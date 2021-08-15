@@ -114,10 +114,6 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         name: &str,
         activation: &mut Activation<'_, 'gc, '_>,
     ) -> Result<Value<'gc>, Error<'gc>> {
-        if name == "__proto__" {
-            return Ok(self.proto());
-        }
-
         let this = (*self).into();
         Ok(search_prototype(Value::Object(this), name, activation, this)?.0)
     }
@@ -139,11 +135,6 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         activation: &mut Activation<'_, 'gc, '_>,
     ) -> Result<(), Error<'gc>> {
         if name.is_empty() {
-            return Ok(());
-        }
-
-        if name == "__proto__" {
-            self.set_proto(activation.context.gc_context, value);
             return Ok(());
         }
 
@@ -170,7 +161,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
                     return Ok(());
                 }
 
-                proto = this_proto.proto();
+                proto = this_proto.proto(activation);
             }
         }
 
@@ -273,14 +264,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     /// The proto is another object used to resolve methods across a class of
     /// multiple objects. It should also be accessible as `__proto__` from
     /// `get`.
-    fn proto(&self) -> Value<'gc>;
-
-    /// Sets the `__proto__` of a given object.
-    ///
-    /// The proto is another object used to resolve methods across a class of
-    /// multiple objects. It should also be accessible as `__proto__` in
-    /// `set`.
-    fn set_proto(&self, gc_context: MutationContext<'gc, '_>, prototype: Value<'gc>);
+    fn proto(&self, activation: &mut Activation<'_, 'gc, '_>) -> Value<'gc>;
 
     /// Define a value on an object.
     ///
@@ -357,7 +341,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     /// Set the 'watcher' of a given property.
     ///
     /// The property does not need to exist at the time of this being called.
-    fn set_watcher(
+    fn watch(
         &self,
         activation: &mut Activation<'_, 'gc, '_>,
         name: Cow<str>,
@@ -369,7 +353,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     ///
     /// The return value will indicate if there was a watcher present before this method was
     /// called.
-    fn remove_watcher(&self, activation: &mut Activation<'_, 'gc, '_>, name: Cow<str>) -> bool;
+    fn unwatch(&self, activation: &mut Activation<'_, 'gc, '_>, name: Cow<str>) -> bool;
 
     /// Checks if the object has a given named property.
     fn has_property(&self, activation: &mut Activation<'_, 'gc, '_>, name: &str) -> bool;
@@ -415,7 +399,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         prototype: Object<'gc>,
     ) -> Result<bool, Error<'gc>> {
         let mut proto_stack = vec![];
-        if let Value::Object(p) = self.proto() {
+        if let Value::Object(p) = self.proto(activation) {
             proto_stack.push(p);
         }
 
@@ -424,7 +408,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
                 return Ok(true);
             }
 
-            if let Value::Object(p) = this_proto.proto() {
+            if let Value::Object(p) = this_proto.proto(activation) {
                 proto_stack.push(p);
             }
 
@@ -560,15 +544,19 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     fn as_ptr(&self) -> *const ObjectPtr;
 
     /// Check if this object is in the prototype chain of the specified test object.
-    fn is_prototype_of(&self, other: Object<'gc>) -> bool {
-        let mut proto = other.proto();
+    fn is_prototype_of(
+        &self,
+        activation: &mut Activation<'_, 'gc, '_>,
+        other: Object<'gc>,
+    ) -> bool {
+        let mut proto = other.proto(activation);
 
         while let Value::Object(proto_ob) = proto {
             if self.as_ptr() == proto_ob.as_ptr() {
                 return true;
             }
 
-            proto = proto_ob.proto();
+            proto = proto_ob.proto(activation);
         }
 
         false
@@ -635,7 +623,7 @@ pub fn search_prototype<'gc>(
             return Ok((value?, Some(p)));
         }
 
-        proto = p.proto();
+        proto = p.proto(activation);
         depth += 1;
     }
 

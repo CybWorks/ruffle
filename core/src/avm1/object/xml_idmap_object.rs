@@ -143,19 +143,18 @@ impl<'gc> TObject<'gc> for XmlIdMapObject<'gc> {
             .add_property_with_case(activation, name, get, set, attributes)
     }
 
-    fn set_watcher(
+    fn watch(
         &self,
         activation: &mut Activation<'_, 'gc, '_>,
         name: Cow<str>,
         callback: Object<'gc>,
         user_data: Value<'gc>,
     ) {
-        self.base()
-            .set_watcher(activation, name, callback, user_data);
+        self.base().watch(activation, name, callback, user_data);
     }
 
-    fn remove_watcher(&self, activation: &mut Activation<'_, 'gc, '_>, name: Cow<str>) -> bool {
-        self.base().remove_watcher(activation, name)
+    fn unwatch(&self, activation: &mut Activation<'_, 'gc, '_>, name: Cow<str>) -> bool {
+        self.base().unwatch(activation, name)
     }
 
     fn define_value(
@@ -180,12 +179,8 @@ impl<'gc> TObject<'gc> for XmlIdMapObject<'gc> {
             .set_attributes(gc_context, name, set_attributes, clear_attributes)
     }
 
-    fn proto(&self) -> Value<'gc> {
-        self.base().proto()
-    }
-
-    fn set_proto(&self, gc_context: MutationContext<'gc, '_>, prototype: Value<'gc>) {
-        self.base().set_proto(gc_context, prototype);
+    fn proto(&self, activation: &mut Activation<'_, 'gc, '_>) -> Value<'gc> {
+        self.base().proto(activation)
     }
 
     fn has_property(&self, activation: &mut Activation<'_, 'gc, '_>, name: &str) -> bool {

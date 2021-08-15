@@ -55,18 +55,19 @@ impl<'a> Reader<'a> {
 
         let action = self.read_op(opcode, &mut length);
 
-        let end_pos = (start.as_ptr() as usize + length) as *const u8;
         if let Err(e) = action {
             return Err(Error::avm1_parse_error_with_source(opcode, e));
         }
 
         // Verify that we parsed the correct amount of data.
+        let end_pos = (start.as_ptr() as usize + length) as *const u8;
         if self.input.as_ptr() != end_pos {
-            self.input = &start[length.min(start.len())..];
             // We incorrectly parsed this action.
             // Re-sync to the expected end of the action and throw an error.
-            return Err(Error::avm1_parse_error(opcode));
+            self.input = &start[length.min(start.len())..];
+            log::warn!("Length mismatch in AVM1 action: {}", OpCode::format(opcode));
         }
+
         action
     }
 
@@ -87,7 +88,6 @@ impl<'a> Reader<'a> {
     /// The final `length` returned will be total length of the action, including sub-blocks.
     #[inline]
     fn read_op(&mut self, opcode: u8, length: &mut usize) -> Result<Option<Action<'a>>> {
-        use num_traits::FromPrimitive;
         let action = if let Some(op) = OpCode::from_u8(opcode) {
             match op {
                 OpCode::End => return Ok(None),
@@ -109,8 +109,9 @@ impl<'a> Reader<'a> {
                 OpCode::CharToAscii => Action::CharToAscii,
                 OpCode::CloneSprite => Action::CloneSprite,
                 OpCode::ConstantPool => {
-                    let mut constants = vec![];
-                    for _ in 0..self.read_u16()? {
+                    let count = self.read_u16()?;
+                    let mut constants = Vec::with_capacity(count as usize);
+                    for _ in 0..count {
                         constants.push(self.read_str()?);
                     }
                     Action::ConstantPool(constants)
@@ -430,5 +431,27 @@ pub mod tests {
         let mut reader = Reader::new(&action_bytes[..], 5);
         let action = reader.read_action().unwrap().unwrap();
         assert_eq!(action, Action::Push(vec![Value::Null, Value::Undefined]));
+    }
+
+    #[test]
+    fn read_length_mismatch() {
+        let action_bytes = [
+            OpCode::ConstantPool as u8,
+            5,
+            0,
+            1,
+            0,
+            b'a',
+            0,
+            OpCode::Add as u8,
+            OpCode::Subtract as u8,
+        ];
+        let mut reader = Reader::new(&action_bytes[..], 5);
+
+        let action = reader.read_action().unwrap().unwrap();
+        assert_eq!(action, Action::ConstantPool(vec!["a".into()]));
+
+        let action = reader.read_action().unwrap().unwrap();
+        assert_eq!(action, Action::Subtract);
     }
 }

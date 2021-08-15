@@ -2,7 +2,7 @@
 
 use crate::avm1::activation::{Activation, ActivationIdentifier};
 use crate::avm1::{Avm1, AvmString, Object, TObject, Value};
-use crate::avm2::Domain as Avm2Domain;
+use crate::avm2::{Activation as Avm2Activation, Domain as Avm2Domain};
 use crate::backend::navigator::OwnedFuture;
 use crate::context::{ActionQueue, ActionType};
 use crate::display_object::{DisplayObject, MorphShape, TDisplayObject};
@@ -402,6 +402,11 @@ impl<'gc> Loader<'gc> {
                 player.lock().unwrap().set_root_movie(Arc::new(movie));
                 Ok(())
             } else {
+                player
+                    .lock()
+                    .unwrap()
+                    .ui()
+                    .display_root_movie_download_failed_message();
                 Err(Error::FetchError(url))
             }
         })
@@ -498,11 +503,12 @@ impl<'gc> Loader<'gc> {
                             _ => unreachable!(),
                         };
 
-                        let domain =
-                            Avm2Domain::movie_domain(uc.gc_context, uc.avm2.global_domain());
-                        let library = uc.library.library_for_movie_mut(movie.clone());
-
-                        library.set_avm2_domain(domain);
+                        let mut activation = Avm2Activation::from_nothing(uc.reborrow());
+                        let parent_domain = activation.avm2().global_domain();
+                        let domain = Avm2Domain::movie_domain(&mut activation, parent_domain);
+                        uc.library
+                            .library_for_movie_mut(movie.clone())
+                            .set_avm2_domain(domain);
 
                         if let Some(broadcaster) = broadcaster {
                             Avm1::run_stack_frame_for_method(

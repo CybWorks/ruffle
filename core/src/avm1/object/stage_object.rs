@@ -2,7 +2,6 @@
 
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
-use crate::avm1::function::Executable;
 use crate::avm1::property::Attribute;
 use crate::avm1::property_map::PropertyMap;
 use crate::avm1::{AvmString, Object, ObjectPtr, ScriptObject, TDisplayObject, TObject, Value};
@@ -270,12 +269,8 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
         self.0.read().base.delete(activation, name)
     }
 
-    fn proto(&self) -> Value<'gc> {
-        self.0.read().base.proto()
-    }
-
-    fn set_proto(&self, gc_context: MutationContext<'gc, '_>, prototype: Value<'gc>) {
-        self.0.read().base.set_proto(gc_context, prototype);
+    fn proto(&self, activation: &mut Activation<'_, 'gc, '_>) -> Value<'gc> {
+        self.0.read().base.proto(activation)
     }
 
     fn define_value(
@@ -334,7 +329,7 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
             .add_property_with_case(activation, name, get, set, attributes)
     }
 
-    fn set_watcher(
+    fn watch(
         &self,
         activation: &mut Activation<'_, 'gc, '_>,
         name: Cow<str>,
@@ -344,11 +339,11 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
         self.0
             .read()
             .base
-            .set_watcher(activation, name, callback, user_data);
+            .watch(activation, name, callback, user_data);
     }
 
-    fn remove_watcher(&self, activation: &mut Activation<'_, 'gc, '_>, name: Cow<str>) -> bool {
-        self.0.read().base.remove_watcher(activation, name)
+    fn unwatch(&self, activation: &mut Activation<'_, 'gc, '_>, name: Cow<str>) -> bool {
+        self.0.read().base.unwatch(activation, name)
     }
 
     fn has_property(&self, activation: &mut Activation<'_, 'gc, '_>, name: &str) -> bool {
@@ -473,9 +468,6 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
 
     fn as_display_object(&self) -> Option<DisplayObject<'gc>> {
         Some(self.0.read().display_object)
-    }
-    fn as_executable(&self) -> Option<Executable<'gc>> {
-        None
     }
 
     fn as_ptr(&self) -> *const ObjectPtr {

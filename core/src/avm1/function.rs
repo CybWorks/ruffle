@@ -12,10 +12,7 @@ use crate::tag_utils::SwfSlice;
 use gc_arena::{Collect, CollectionContext, Gc, GcCell, MutationContext};
 use std::borrow::Cow;
 use std::fmt;
-use swf::{
-    avm1::types::{FunctionFlags, FunctionParam},
-    SwfStr,
-};
+use swf::{avm1::types::FunctionFlags, SwfStr};
 
 /// Represents a function defined in Ruffle's code.
 ///
@@ -144,24 +141,24 @@ impl<'gc> Avm1Function<'gc> {
             )
         };
 
-        let mut owned_params = Vec::new();
-        for FunctionParam {
-            name: s,
-            register_index: r,
-        } in &swf_function.params
-        {
-            owned_params.push((
-                *r,
-                (*s).to_string_lossy(SwfStr::encoding_for_version(swf_version)),
-            ))
-        }
+        let params = swf_function
+            .params
+            .iter()
+            .map(|p| {
+                (
+                    p.register_index,
+                    p.name
+                        .to_string_lossy(SwfStr::encoding_for_version(swf_version)),
+                )
+            })
+            .collect();
 
         Avm1Function {
             swf_version,
             data: actions,
             name,
             register_count: swf_function.register_count,
-            params: owned_params,
+            params,
             scope,
             constant_pool,
             base_clip,
@@ -576,20 +573,18 @@ impl<'gc> TObject<'gc> for FunctionObject<'gc> {
         this: Object<'gc>,
         args: &[Value<'gc>],
     ) -> Result<(), Error<'gc>> {
-        this.set("__constructor__", (*self).into(), activation)?;
-        this.set_attributes(
+        this.define_value(
             activation.context.gc_context,
-            Some("__constructor__"),
+            "__constructor__",
+            (*self).into(),
             Attribute::DONT_ENUM,
-            Attribute::empty(),
         );
         if activation.swf_version() < 7 {
-            this.set("constructor", (*self).into(), activation)?;
-            this.set_attributes(
+            this.define_value(
                 activation.context.gc_context,
-                Some("constructor"),
+                "constructor",
+                (*self).into(),
                 Attribute::DONT_ENUM,
-                Attribute::empty(),
             );
         }
         if let Some(exec) = &self.data.read().constructor {
@@ -618,20 +613,18 @@ impl<'gc> TObject<'gc> for FunctionObject<'gc> {
             .coerce_to_object(activation);
         let this = prototype.create_bare_object(activation, prototype)?;
 
-        this.set("__constructor__", (*self).into(), activation)?;
-        this.set_attributes(
+        this.define_value(
             activation.context.gc_context,
-            Some("__constructor__"),
+            "__constructor__",
+            (*self).into(),
             Attribute::DONT_ENUM,
-            Attribute::empty(),
         );
         if activation.swf_version() < 7 {
-            this.set("constructor", (*self).into(), activation)?;
-            this.set_attributes(
+            this.define_value(
                 activation.context.gc_context,
-                Some("constructor"),
+                "constructor",
+                (*self).into(),
                 Attribute::DONT_ENUM,
-                Attribute::empty(),
             );
         }
         if let Some(exec) = &self.data.read().constructor {
@@ -687,12 +680,8 @@ impl<'gc> TObject<'gc> for FunctionObject<'gc> {
         self.base.delete(activation, name)
     }
 
-    fn proto(&self) -> Value<'gc> {
-        self.base.proto()
-    }
-
-    fn set_proto(&self, gc_context: MutationContext<'gc, '_>, prototype: Value<'gc>) {
-        self.base.set_proto(gc_context, prototype);
+    fn proto(&self, activation: &mut Activation<'_, 'gc, '_>) -> Value<'gc> {
+        self.base.proto(activation)
     }
 
     fn define_value(
@@ -740,18 +729,18 @@ impl<'gc> TObject<'gc> for FunctionObject<'gc> {
             .add_property_with_case(activation, name, get, set, attributes)
     }
 
-    fn set_watcher(
+    fn watch(
         &self,
         activation: &mut Activation<'_, 'gc, '_>,
         name: Cow<str>,
         callback: Object<'gc>,
         user_data: Value<'gc>,
     ) {
-        self.base.set_watcher(activation, name, callback, user_data);
+        self.base.watch(activation, name, callback, user_data);
     }
 
-    fn remove_watcher(&self, activation: &mut Activation<'_, 'gc, '_>, name: Cow<str>) -> bool {
-        self.base.remove_watcher(activation, name)
+    fn unwatch(&self, activation: &mut Activation<'_, 'gc, '_>, name: Cow<str>) -> bool {
+        self.base.unwatch(activation, name)
     }
 
     fn has_property(&self, activation: &mut Activation<'_, 'gc, '_>, name: &str) -> bool {
