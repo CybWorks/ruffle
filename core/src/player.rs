@@ -765,6 +765,13 @@ impl Player {
         })
     }
 
+    pub fn set_show_menu(&mut self, show_menu: bool) {
+        self.mutate_with_update_context(|context| {
+            let stage = context.stage;
+            stage.set_show_menu(context, show_menu);
+        })
+    }
+
     pub fn handle_event(&mut self, event: PlayerEvent) {
         if cfg!(feature = "avm_debug") {
             if let PlayerEvent::KeyDown {
@@ -1382,6 +1389,12 @@ impl Player {
                     if let Err(e) =
                         Avm2::run_stack_frame_for_callable(callable, reciever, &args[..], context)
                     {
+                        log::error!("Unhandled AVM2 exception in event handler: {}", e);
+                    }
+                }
+
+                ActionType::Event2 { event, target } => {
+                    if let Err(e) = Avm2::dispatch_event(context, event, target) {
                         log::error!("Unhandled AVM2 exception in event handler: {}", e);
                     }
                 }

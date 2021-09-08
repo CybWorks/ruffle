@@ -13,7 +13,9 @@ use crate::avm2::scope::Scope;
 use crate::avm2::string::AvmString;
 use crate::avm2::traits::{Trait, TraitKind};
 use crate::avm2::value::{Hint, Value};
+use crate::avm2::vector::VectorStorage;
 use crate::avm2::Error;
+use crate::backend::audio::{SoundHandle, SoundInstanceHandle};
 use crate::display_object::DisplayObject;
 use gc_arena::{Collect, GcCell, MutationContext};
 use ruffle_macros::enum_trait_object;
@@ -34,7 +36,10 @@ mod namespace_object;
 mod primitive_object;
 mod regexp_object;
 mod script_object;
+mod sound_object;
+mod soundchannel_object;
 mod stage_object;
+mod vector_object;
 mod xml_object;
 
 pub use crate::avm2::object::array_object::{array_allocator, ArrayObject};
@@ -51,7 +56,10 @@ pub use crate::avm2::object::namespace_object::{namespace_allocator, NamespaceOb
 pub use crate::avm2::object::primitive_object::{primitive_allocator, PrimitiveObject};
 pub use crate::avm2::object::regexp_object::{regexp_allocator, RegExpObject};
 pub use crate::avm2::object::script_object::ScriptObject;
+pub use crate::avm2::object::sound_object::{sound_allocator, SoundObject};
+pub use crate::avm2::object::soundchannel_object::{soundchannel_allocator, SoundChannelObject};
 pub use crate::avm2::object::stage_object::{stage_allocator, StageObject};
+pub use crate::avm2::object::vector_object::{vector_allocator, VectorObject};
 pub use crate::avm2::object::xml_object::{xml_allocator, XmlObject};
 
 /// Represents an object that can be directly interacted with by the AVM2
@@ -75,6 +83,9 @@ pub use crate::avm2::object::xml_object::{xml_allocator, XmlObject};
         ByteArrayObject(ByteArrayObject<'gc>),
         LoaderInfoObject(LoaderInfoObject<'gc>),
         ClassObject(ClassObject<'gc>),
+        VectorObject(VectorObject<'gc>),
+        SoundObject(SoundObject<'gc>),
+        SoundChannelObject(SoundChannelObject<'gc>),
     }
 )]
 pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy {
@@ -451,7 +462,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     ///
     /// Class and function traits are *not* instantiated at installation time.
     /// Instead, installing such traits is treated as installing a const with
-    /// `undefined` as it's value.
+    /// `undefined` as its value.
     ///
     /// All traits that are instantiated at install time will be instantiated
     /// with this object's current scope stack and this object as a bound
@@ -863,6 +874,29 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     /// returned object should have no properties upon it.
     fn derive(&self, activation: &mut Activation<'_, 'gc, '_>) -> Result<Object<'gc>, Error>;
 
+    /// Construct a parameterization of this particular type and return it.
+    ///
+    /// This is called specifically to parameterize generic types, of which
+    /// only one exists: `Vector`. When `Vector` is applied with a given
+    /// parameter, a new type is returned which can be used to construct
+    /// `Vector`s of that type.
+    ///
+    /// If the object is not a parameterized type, this yields an error. In
+    /// practice, this means only `Vector` can use this method. Parameters must
+    /// be class objects or `null`, which indicates any type.
+    ///
+    /// When a given type is parameterized with the same parameters multiple
+    /// times, each application must return the same object. This is because
+    /// each application has a separate prototype that accepts dynamic
+    /// parameters.
+    fn apply(
+        &self,
+        _activation: &mut Activation<'_, 'gc, '_>,
+        _params: &[Value<'gc>],
+    ) -> Result<Object<'gc>, Error> {
+        Err("Not a parameterized type".into())
+    }
+
     /// Determine the type of primitive coercion this object would prefer, in
     /// the case that there is no obvious reason to prefer one type over the
     /// other.
@@ -972,16 +1006,37 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     /// The given object should be the class object for the given type we are
     /// checking against this object.
     #[allow(unused_mut)] //it's not unused
-    fn is_of_type(&self, mut test_class: Object<'gc>) -> Result<bool, Error> {
-        self.has_class_in_chain(test_class)
+    fn is_of_type(
+        &self,
+        mut test_class: Object<'gc>,
+        activation: &mut Activation<'_, 'gc, '_>,
+    ) -> Result<bool, Error> {
+        let mut my_class = self.as_class_object();
+
+        // ES3 objects are not class instances but are still treated as
+        // instances of Object, which is an ES4 class.
+        if my_class.is_none() && Object::ptr_eq(test_class, activation.avm2().classes().object) {
+            Ok(true)
+        } else if let Some(my_class) = my_class {
+            my_class.has_class_in_chain(test_class, activation)
+        } else {
+            Ok(false)
+        }
     }
 
-    /// Determine if this object has a given class in its class object chain.
+    /// Determine if this class has a given type in its superclass chain.
     ///
     /// The given object `test_class` should be either a superclass or
-    /// interface we are checking against this object.
-    fn has_class_in_chain(&self, test_class: Object<'gc>) -> Result<bool, Error> {
-        let mut my_class = self.as_class_object();
+    /// interface we are checking against this class.
+    ///
+    /// To test if a class *instance* is of a given type, see is_of_type.
+    fn has_class_in_chain(
+        &self,
+        test_class: Object<'gc>,
+        activation: &mut Activation<'_, 'gc, '_>,
+    ) -> Result<bool, Error> {
+        let my_class: Object<'gc> = (*self).into();
+        let mut my_class = Some(my_class);
 
         while let Some(class) = my_class {
             if Object::ptr_eq(class, test_class) {
@@ -990,6 +1045,24 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
 
             for interface in class.interfaces() {
                 if Object::ptr_eq(interface, test_class) {
+                    return Ok(true);
+                }
+            }
+
+            if let (Some(my_param), Some(test_param)) =
+                (class.as_class_params(), test_class.as_class_params())
+            {
+                let mut are_all_params_coercible = true;
+
+                are_all_params_coercible &= match (my_param, test_param) {
+                    (Some(my_param), Some(test_param)) => {
+                        my_param.has_class_in_chain(test_param, activation)?
+                    }
+                    (None, Some(_)) => false,
+                    _ => true,
+                };
+
+                if are_all_params_coercible {
                     return Ok(true);
                 }
             }
@@ -1008,6 +1081,13 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
 
     /// Get this object's class object, if it has one.
     fn as_class_object(&self) -> Option<Object<'gc>>;
+
+    /// Get the parameters of this class object, if present.
+    ///
+    /// Only specialized generic classes will yield their parameters.
+    fn as_class_params(&self) -> Option<Option<Object<'gc>>> {
+        None
+    }
 
     /// Associate the object with a particular class object.
     ///
@@ -1059,6 +1139,19 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         &self,
         _mc: MutationContext<'gc, '_>,
     ) -> Option<RefMut<ArrayStorage<'gc>>> {
+        None
+    }
+
+    /// Unwrap this object as vector storage.
+    fn as_vector_storage(&self) -> Option<Ref<VectorStorage<'gc>>> {
+        None
+    }
+
+    /// Unwrap this object as mutable vector storage.
+    fn as_vector_storage_mut(
+        &self,
+        _mc: MutationContext<'gc, '_>,
+    ) -> Option<RefMut<VectorStorage<'gc>>> {
         None
     }
 
@@ -1126,6 +1219,26 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     fn as_loader_stream(&self) -> Option<Ref<LoaderStream<'gc>>> {
         None
     }
+
+    /// Unwrap this object's sound handle.
+    fn as_sound(self) -> Option<SoundHandle> {
+        None
+    }
+
+    /// Associate the object with a particular sound handle.
+    ///
+    /// This does nothing if the object is not a sound.
+    fn set_sound(self, _mc: MutationContext<'gc, '_>, _sound: SoundHandle) {}
+
+    /// Unwrap this object's sound instance handle.
+    fn as_sound_instance(self) -> Option<SoundInstanceHandle> {
+        None
+    }
+
+    /// Associate the object with a particular sound instance handle.
+    ///
+    /// This does nothing if the object is not a sound channel.
+    fn set_sound_instance(self, _mc: MutationContext<'gc, '_>, _sound: SoundInstanceHandle) {}
 }
 
 pub enum ObjectPtr {}

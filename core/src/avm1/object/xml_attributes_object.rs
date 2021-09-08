@@ -56,15 +56,14 @@ impl fmt::Debug for XmlAttributesObject<'_> {
 }
 
 impl<'gc> TObject<'gc> for XmlAttributesObject<'gc> {
-    fn get_local(
+    fn get_local_stored(
         &self,
         name: &str,
         activation: &mut Activation<'_, 'gc, '_>,
-        _this: Object<'gc>,
-    ) -> Option<Result<Value<'gc>, Error<'gc>>> {
+    ) -> Option<Value<'gc>> {
         self.node()
             .attribute_value(&XmlName::from_str(name))
-            .map(|s| Ok(AvmString::new(activation.context.gc_context, s).into()))
+            .map(|s| AvmString::new(activation.context.gc_context, s).into())
     }
 
     fn set_local(
@@ -82,6 +81,7 @@ impl<'gc> TObject<'gc> for XmlAttributesObject<'gc> {
         );
         Ok(())
     }
+
     fn call(
         &self,
         name: &str,
@@ -93,13 +93,12 @@ impl<'gc> TObject<'gc> for XmlAttributesObject<'gc> {
         self.base().call(name, activation, this, base_proto, args)
     }
 
-    fn call_setter(
-        &self,
-        name: &str,
-        value: Value<'gc>,
-        activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Option<Object<'gc>> {
-        self.base().call_setter(name, value, activation)
+    fn getter(&self, name: &str, activation: &mut Activation<'_, 'gc, '_>) -> Option<Object<'gc>> {
+        self.base().getter(name, activation)
+    }
+
+    fn setter(&self, name: &str, activation: &mut Activation<'_, 'gc, '_>) -> Option<Object<'gc>> {
+        self.base().setter(name, activation)
     }
 
     fn create_bare_object(
@@ -140,6 +139,15 @@ impl<'gc> TObject<'gc> for XmlAttributesObject<'gc> {
     ) {
         self.base()
             .add_property_with_case(activation, name, get, set, attributes)
+    }
+
+    fn call_watcher(
+        &self,
+        activation: &mut Activation<'_, 'gc, '_>,
+        name: &str,
+        value: &mut Value<'gc>,
+    ) -> Result<(), Error<'gc>> {
+        self.base().call_watcher(activation, name, value)
     }
 
     fn watch(

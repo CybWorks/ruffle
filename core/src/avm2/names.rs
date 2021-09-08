@@ -6,7 +6,8 @@ use crate::avm2::string::AvmString;
 use crate::avm2::Error;
 use gc_arena::{Collect, MutationContext};
 use swf::avm2::types::{
-    Index, Multiname as AbcMultiname, Namespace as AbcNamespace, NamespaceSet as AbcNamespaceSet,
+    AbcFile, Index, Multiname as AbcMultiname, Namespace as AbcNamespace,
+    NamespaceSet as AbcNamespaceSet,
 };
 
 /// Represents the name of a namespace.
@@ -74,6 +75,10 @@ impl<'gc> Namespace<'gc> {
         Self::Package(package_name.into())
     }
 
+    pub fn internal(package_name: impl Into<AvmString<'gc>>) -> Self {
+        Self::PackageInternal(package_name.into())
+    }
+
     pub fn private(name: impl Into<AvmString<'gc>>) -> Self {
         Self::Private(name.into())
     }
@@ -92,6 +97,14 @@ impl<'gc> Namespace<'gc> {
 
     pub fn is_dynamic(&self) -> bool {
         self.is_public() || self.is_any()
+    }
+
+    pub fn is_package(&self, package_name: impl Into<AvmString<'gc>>) -> bool {
+        if let Self::Package(my_name) = self {
+            return my_name == &package_name.into();
+        }
+
+        false
     }
 
     /// Get the string value of this namespace, ignoring its type.
@@ -172,22 +185,38 @@ impl<'gc> QName<'gc> {
         })
     }
 
-    /// Given a symbol class name, parse it as a `QName`.
+    /// Constructs a `QName` from a fully qualified name.
     ///
-    /// Symbol class names consist of one or more package strings, followed by
-    /// the local name of the class, all separated by dots.
-    pub fn from_symbol_class(class_name: &str, mc: MutationContext<'gc, '_>) -> Option<Self> {
-        match &class_name.rsplitn(2, '.').collect::<Vec<&str>>()[..] {
-            [local_name, package_name] => Some(Self {
+    /// A fully qualified name can be any of the following formats:
+    /// NAMESPACE::LOCAL_NAME
+    /// NAMESPACE.LOCAL_NAME (Where the LAST dot is used to split the namespace & local_name)
+    /// LOCAL_NAME (Use the public namespace)
+    pub fn from_qualified_name(name: &str, mc: MutationContext<'gc, '_>) -> Self {
+        if let Some((package_name, local_name)) = name.rsplit_once("::") {
+            Self {
                 ns: Namespace::Package(AvmString::new(mc, package_name.to_string())),
                 name: AvmString::new(mc, local_name.to_string()),
-            }),
-            [local_name] => Some(Self {
-                ns: Namespace::public(),
+            }
+        } else if let Some((package_name, local_name)) = name.rsplit_once('.') {
+            Self {
+                ns: Namespace::Package(AvmString::new(mc, package_name.to_string())),
                 name: AvmString::new(mc, local_name.to_string()),
-            }),
-            _ => None,
+            }
+        } else {
+            Self {
+                ns: Namespace::public(),
+                name: AvmString::new(mc, name.to_string()),
+            }
         }
+    }
+
+    /// Converts this `QName` to a fully qualified name.
+    pub fn to_qualified_name(&self) -> String {
+        let uri = self.namespace().as_uri();
+        let name = self.local_name();
+        uri.is_empty()
+            .then(|| name.to_string())
+            .unwrap_or_else(|| format!("{}::{}", uri, name))
     }
 
     pub fn local_name(&self) -> AvmString<'gc> {
@@ -209,8 +238,16 @@ impl<'gc> QName<'gc> {
 #[derive(Clone, Debug, Collect)]
 #[collect(no_drop)]
 pub struct Multiname<'gc> {
+    /// The list of namespaces that satisfy this multiname.
     ns: Vec<Namespace<'gc>>,
+
+    /// The local name that satisfies this multiname. If `None`, then this
+    /// multiname is satisfied by any name in the namespace.
     name: Option<AvmString<'gc>>,
+
+    /// The type parameters required to satisfy this multiname. If empty, then
+    /// this multiname is satisfied by any type parameters in any amount.
+    params: Vec<Multiname<'gc>>,
 }
 
 impl<'gc> Multiname<'gc> {
@@ -248,28 +285,20 @@ impl<'gc> Multiname<'gc> {
         Ok(result)
     }
 
-    /// Read a multiname from the ABC constant pool, copying it into the most
-    /// general form of multiname.
+    /// Resolve an ABC multiname's parameters and yields an AVM multiname with
+    /// those parameters filled in.
     ///
-    /// Multiname index zero is also treated as an error, you must check for it
-    /// and substitute it with whatever default is called for by AVM2.
-    pub fn from_abc_multiname(
+    /// This function deliberately errors out if handed a `TypeName`, as it
+    /// assumes that this is an attempt to construct a recursive generic type.
+    /// Type parameters may themselves be typenames, but not the base type.
+    /// This is valid: `Vector.<Vector.<int>>`, but this is not:
+    /// `Vector.<int>.<int>`
+    fn resolve_multiname_params(
         translation_unit: TranslationUnit<'gc>,
-        multiname_index: Index<AbcMultiname>,
+        abc_multiname: &AbcMultiname,
         activation: &mut Activation<'_, 'gc, '_>,
     ) -> Result<Self, Error> {
-        let actual_index: Result<usize, Error> = (multiname_index.0 as usize)
-            .checked_sub(1)
-            .ok_or_else(|| "Attempted to resolve a multiname at index zero. This is a bug.".into());
-        let actual_index = actual_index?;
-        let abc = translation_unit.abc();
-        let abc_multiname: Result<_, Error> = abc
-            .constant_pool
-            .multinames
-            .get(actual_index)
-            .ok_or_else(|| format!("Unknown multiname constant {}", multiname_index.0).into());
-
-        Ok(match abc_multiname? {
+        Ok(match abc_multiname {
             AbcMultiname::QName { namespace, name } | AbcMultiname::QNameA { namespace, name } => {
                 Self {
                     ns: vec![Namespace::from_abc_namespace(
@@ -279,6 +308,7 @@ impl<'gc> Multiname<'gc> {
                     )?],
                     name: translation_unit
                         .pool_string_option(name.0, activation.context.gc_context)?,
+                    params: Vec::new(),
                 }
             }
             AbcMultiname::RTQName { name } | AbcMultiname::RTQNameA { name } => {
@@ -287,6 +317,7 @@ impl<'gc> Multiname<'gc> {
                     ns: vec![ns],
                     name: translation_unit
                         .pool_string_option(name.0, activation.context.gc_context)?,
+                    params: Vec::new(),
                 }
             }
             AbcMultiname::RTQNameL | AbcMultiname::RTQNameLA => {
@@ -295,6 +326,7 @@ impl<'gc> Multiname<'gc> {
                 Self {
                     ns: vec![ns],
                     name: Some(name),
+                    params: Vec::new(),
                 }
             }
             AbcMultiname::Multiname {
@@ -311,6 +343,7 @@ impl<'gc> Multiname<'gc> {
                     activation.context.gc_context,
                 )?,
                 name: translation_unit.pool_string_option(name.0, activation.context.gc_context)?,
+                params: Vec::new(),
             },
             AbcMultiname::MultinameL { namespace_set }
             | AbcMultiname::MultinameLA { namespace_set } => {
@@ -322,9 +355,74 @@ impl<'gc> Multiname<'gc> {
                         activation.context.gc_context,
                     )?,
                     name: Some(name),
+                    params: Vec::new(),
                 }
             }
+            AbcMultiname::TypeName { .. } => {
+                return Err("Recursive TypeNames are not supported!".into())
+            }
         })
+    }
+
+    /// Retrieve a given multiname index from the ABC file, yielding an error
+    /// if the multiname index is zero.
+    pub fn resolve_multiname_index(
+        abc: &AbcFile,
+        multiname_index: Index<AbcMultiname>,
+    ) -> Result<&AbcMultiname, Error> {
+        let actual_index: Result<usize, Error> = (multiname_index.0 as usize)
+            .checked_sub(1)
+            .ok_or_else(|| "Attempted to resolve a multiname at index zero. This is a bug.".into());
+        let actual_index = actual_index?;
+        let abc_multiname: Result<_, Error> = abc
+            .constant_pool
+            .multinames
+            .get(actual_index)
+            .ok_or_else(|| format!("Unknown multiname constant {}", multiname_index.0).into());
+
+        abc_multiname
+    }
+
+    /// Read a multiname from the ABC constant pool, copying it into the most
+    /// general form of multiname.
+    pub fn from_abc_multiname(
+        translation_unit: TranslationUnit<'gc>,
+        multiname_index: Index<AbcMultiname>,
+        activation: &mut Activation<'_, 'gc, '_>,
+    ) -> Result<Self, Error> {
+        let abc = translation_unit.abc();
+        let abc_multiname = Self::resolve_multiname_index(&abc, multiname_index)?;
+
+        match abc_multiname {
+            AbcMultiname::TypeName {
+                base_type,
+                parameters,
+            } => {
+                let base_multiname = Self::resolve_multiname_index(&abc, base_type.clone())?;
+                let mut base =
+                    Self::resolve_multiname_params(translation_unit, base_multiname, activation)?;
+
+                if parameters.len() > 1 {
+                    return Err(format!(
+                        "VerifyError: Multiname has {} parameters, no more than 1 is allowed",
+                        parameters.len()
+                    )
+                    .into());
+                }
+
+                for param_type in parameters {
+                    let param_multiname =
+                        Self::from_abc_multiname(translation_unit, param_type.clone(), activation)?;
+
+                    base.params.push(param_multiname);
+                }
+
+                Ok(base)
+            }
+            abc_multiname => {
+                Self::resolve_multiname_params(translation_unit, abc_multiname, activation)
+            }
+        }
     }
 
     /// Read a static multiname from the ABC constant pool
@@ -360,6 +458,7 @@ impl<'gc> Multiname<'gc> {
                         mc,
                     )?],
                     name: translation_unit.pool_string_option(name.0, mc)?,
+                    params: Vec::new(),
                 }
             }
             AbcMultiname::Multiname {
@@ -372,7 +471,35 @@ impl<'gc> Multiname<'gc> {
             } => Self {
                 ns: Self::abc_namespace_set(translation_unit, namespace_set.clone(), mc)?,
                 name: translation_unit.pool_string_option(name.0, mc)?,
+                params: Vec::new(),
             },
+            AbcMultiname::TypeName {
+                base_type,
+                parameters,
+            } => {
+                let mut base =
+                    Self::from_abc_multiname_static(translation_unit, base_type.clone(), mc)?;
+
+                if parameters.len() > 1 {
+                    return Err(format!(
+                        "VerifyError: Multiname has {} parameters, no more than 1 is allowed",
+                        parameters.len()
+                    )
+                    .into());
+                }
+
+                for param_type in parameters {
+                    let param_multiname = if param_type.0 == 0 {
+                        Self::any()
+                    } else {
+                        Self::from_abc_multiname_static(translation_unit, param_type.clone(), mc)?
+                    };
+
+                    base.params.push(param_multiname);
+                }
+
+                base
+            }
             _ => return Err(format!("Multiname {} is not static", multiname_index.0).into()),
         })
     }
@@ -382,6 +509,7 @@ impl<'gc> Multiname<'gc> {
         Self {
             ns: vec![Namespace::Any],
             name: None,
+            params: Vec::new(),
         }
     }
 
@@ -418,6 +546,11 @@ impl<'gc> Multiname<'gc> {
 
         ns_match && name_match
     }
+
+    /// List the parameters that the selected class must match.
+    pub fn params(&self) -> &[Multiname<'gc>] {
+        &self.params[..]
+    }
 }
 
 impl<'gc> From<QName<'gc>> for Multiname<'gc> {
@@ -425,6 +558,7 @@ impl<'gc> From<QName<'gc>> for Multiname<'gc> {
         Self {
             ns: vec![q.ns],
             name: Some(q.name),
+            params: Vec::new(),
         }
     }
 }

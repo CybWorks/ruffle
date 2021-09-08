@@ -220,6 +220,22 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             return Err(format!("Resolved parameter type {:?} is not a class", type_name).into());
         }
 
+        // Type parameters should specialize the returned class.
+        // Unresolvable parameter types are treated as Any, which is treated as
+        // Object.
+        if !type_name.params().is_empty() {
+            let mut param_types = Vec::with_capacity(type_name.params().len());
+
+            for param in type_name.params() {
+                param_types.push(match self.resolve_type(param.clone())? {
+                    Some(o) => Value::Object(o),
+                    None => Value::Null,
+                });
+            }
+
+            return Ok(Some(class.apply(self, &param_types[..])?));
+        }
+
         Ok(Some(class))
     }
 
@@ -786,6 +802,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
                 Op::NewObject { num_args } => self.op_new_object(num_args),
                 Op::NewFunction { index } => self.op_new_function(method, index),
                 Op::NewClass { index } => self.op_new_class(method, index),
+                Op::ApplyType { num_types } => self.op_apply_type(num_types),
                 Op::NewArray { num_args } => self.op_new_array(num_args),
                 Op::CoerceA => self.op_coerce_a(),
                 Op::CoerceS => self.op_coerce_s(),
@@ -1677,6 +1694,24 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         Ok(FrameControl::Continue)
     }
 
+    fn op_apply_type(&mut self, num_types: u32) -> Result<FrameControl<'gc>, Error> {
+        let args = self.context.avm2.pop_args(num_types);
+        let base = self.context.avm2.pop().coerce_to_object(self)?;
+
+        if args.len() > 1 {
+            return Err(format!(
+                "VerifyError: Cannot specialize classes with more than one parameter, {} given",
+                args.len()
+            )
+            .into());
+        }
+
+        let applied = base.apply(self, &args[..])?;
+        self.context.avm2.push(applied);
+
+        Ok(FrameControl::Continue)
+    }
+
     fn op_new_array(&mut self, num_args: u32) -> Result<FrameControl<'gc>, Error> {
         let args = self.context.avm2.pop_args(num_args);
         let array = ArrayStorage::from_args(&args[..]);
@@ -2470,7 +2505,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             return Err("TypeError: The right-hand side of operator must be a class.".into());
         }
 
-        if value.is_of_type(class)? {
+        if value.is_of_type(class, self)? {
             self.context.avm2.push(value);
         } else {
             self.context.avm2.push(Value::Null);
@@ -2487,7 +2522,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             return Err("TypeError: The right-hand side of operator must be a class.".into());
         }
 
-        if value.is_of_type(class)? {
+        if value.is_of_type(class, self)? {
             self.context.avm2.push(value);
         } else {
             self.context.avm2.push(Value::Null);

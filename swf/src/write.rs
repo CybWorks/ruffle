@@ -499,12 +499,7 @@ impl<W: Write> Writer<W> {
                 self.write_u8(0)?; // Reserved (0).
             }
 
-            Tag::DefineBinaryData { id, data } => {
-                self.write_tag_header(TagCode::DefineBinaryData, data.len() as u32 + 6)?;
-                self.write_u16(id)?;
-                self.write_u32(0)?; // Reserved
-                self.output.write_all(data)?;
-            }
+            Tag::DefineBinaryData(ref binary_data) => self.write_define_binary_data(binary_data)?,
 
             Tag::DefineBits { id, jpeg_data } => {
                 self.write_tag_header(TagCode::DefineBits, jpeg_data.len() as u32 + 2)?;
@@ -2014,30 +2009,11 @@ impl<W: Write> Writer<W> {
 
     fn write_clip_event_flags(&mut self, clip_events: ClipEventFlag) -> Result<()> {
         // TODO: Assert proper version.
-        let version = self.version;
-        let mut bits = self.bits();
-        bits.write_bit(clip_events.contains(ClipEventFlag::KEY_UP))?;
-        bits.write_bit(clip_events.contains(ClipEventFlag::KEY_DOWN))?;
-        bits.write_bit(clip_events.contains(ClipEventFlag::MOUSE_UP))?;
-        bits.write_bit(clip_events.contains(ClipEventFlag::MOUSE_DOWN))?;
-        bits.write_bit(clip_events.contains(ClipEventFlag::MOUSE_MOVE))?;
-        bits.write_bit(clip_events.contains(ClipEventFlag::UNLOAD))?;
-        bits.write_bit(clip_events.contains(ClipEventFlag::ENTER_FRAME))?;
-        bits.write_bit(clip_events.contains(ClipEventFlag::LOAD))?;
-        bits.write_bit(clip_events.contains(ClipEventFlag::DRAG_OVER))?;
-        bits.write_bit(clip_events.contains(ClipEventFlag::ROLL_OUT))?;
-        bits.write_bit(clip_events.contains(ClipEventFlag::ROLL_OVER))?;
-        bits.write_bit(clip_events.contains(ClipEventFlag::RELEASE_OUTSIDE))?;
-        bits.write_bit(clip_events.contains(ClipEventFlag::RELEASE))?;
-        bits.write_bit(clip_events.contains(ClipEventFlag::PRESS))?;
-        bits.write_bit(clip_events.contains(ClipEventFlag::INITIALIZE))?;
-        bits.write_bit(clip_events.contains(ClipEventFlag::DATA))?;
-        if version >= 6 {
-            bits.write_ubits(5, 0)?;
-            bits.write_bit(clip_events.contains(ClipEventFlag::CONSTRUCT))?;
-            bits.write_bit(clip_events.contains(ClipEventFlag::KEY_PRESS))?;
-            bits.write_bit(clip_events.contains(ClipEventFlag::DRAG_OUT))?;
-            bits.write_ubits(8, 0)?;
+        let bits = clip_events.bits();
+        if self.version >= 6 {
+            self.write_u32(bits)?;
+        } else {
+            self.write_u16((bits as u8).into())?;
         }
         Ok(())
     }
@@ -2281,6 +2257,14 @@ impl<W: Write> Writer<W> {
             self.write_u8(kerning.right_code as u8)?;
         }
         self.write_i16(kerning.adjustment.get() as i16)?; // TODO(Herschel): Handle overflow
+        Ok(())
+    }
+
+    fn write_define_binary_data(&mut self, binary_data: &DefineBinaryData) -> Result<()> {
+        self.write_tag_header(TagCode::DefineBinaryData, binary_data.data.len() as u32 + 6)?;
+        self.write_u16(binary_data.id)?;
+        self.write_u32(0)?; // Reserved
+        self.output.write_all(binary_data.data)?;
         Ok(())
     }
 

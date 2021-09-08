@@ -6,7 +6,7 @@ use crate::avm2::method::{Method, NativeMethodImpl};
 use crate::avm2::{Activation, Error, Namespace, Object, QName, TObject, Value};
 use gc_arena::{GcCell, MutationContext};
 
-fn create_point<'gc>(
+pub fn create_point<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     coords: (f64, f64),
 ) -> Result<Value<'gc>, Error> {
@@ -318,8 +318,13 @@ pub fn to_string<'gc>(
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error> {
-    if let Some(mut this) = this {
-        let (x, y) = coords(&mut this, activation)?;
+    if let Some(this) = this {
+        let x = this
+            .get_property(this, &QName::new(Namespace::public(), "x"), activation)?
+            .coerce_to_string(activation)?;
+        let y = this
+            .get_property(this, &QName::new(Namespace::public(), "y"), activation)?
+            .coerce_to_string(activation)?;
         return Ok(
             AvmString::new(activation.context.gc_context, format!("(x={}, y={})", x, y)).into(),
         );

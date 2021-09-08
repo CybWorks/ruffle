@@ -29,6 +29,9 @@ bitflags! {
 
         /// Class is an interface.
         const INTERFACE = 1 << 2;
+
+        /// Class accepts type parameters.
+        const GENERIC = 1 << 3;
     }
 }
 
@@ -70,6 +73,9 @@ impl fmt::Debug for Allocator {
 pub struct Class<'gc> {
     /// The name of the class.
     name: QName<'gc>,
+
+    /// The type parameters for this class.
+    params: Vec<GcCell<'gc, Class<'gc>>>,
 
     /// The name of this class's superclass.
     super_class: Option<Multiname<'gc>>,
@@ -124,6 +130,12 @@ pub struct Class<'gc> {
 
     /// Whether or not the class initializer has already been called.
     class_initializer_called: bool,
+
+    /// The class initializer for specializations of this class.
+    ///
+    /// Only applies for generic classes. Must be called once and only once
+    /// per specialization, prior to any use of the specialized class.
+    specialized_class_init: Method<'gc>,
 
     /// Static traits for a given class.
     ///
@@ -214,6 +226,7 @@ impl<'gc> Class<'gc> {
             mc,
             Self {
                 name,
+                params: Vec::new(),
                 super_class,
                 attributes: ClassAttributes::empty(),
                 protected_namespace: None,
@@ -225,9 +238,33 @@ impl<'gc> Class<'gc> {
                 class_init,
                 class_initializer_called: false,
                 class_traits: Vec::new(),
+                specialized_class_init: Method::from_builtin(
+                    |_, _, _| Ok(Value::Undefined),
+                    "<Null specialization constructor>",
+                    mc,
+                ),
                 traits_loaded: true,
             },
         )
+    }
+
+    /// Apply type parameters to an existing class.
+    ///
+    /// This is used to parameterize a generic type. The returned class will no
+    /// longer be generic.
+    pub fn with_type_params(
+        &self,
+        params: &[GcCell<'gc, Class<'gc>>],
+        mc: MutationContext<'gc, '_>,
+    ) -> GcCell<'gc, Class<'gc>> {
+        let mut new_class = self.clone();
+
+        new_class.params = params.to_vec();
+        new_class.attributes.remove(ClassAttributes::GENERIC);
+        new_class.class_init = new_class.specialized_class_init.clone();
+        new_class.class_initializer_called = false;
+
+        GcCell::allocate(mc, new_class)
     }
 
     /// Set the attributes of the class (sealed/final/interface status).
@@ -310,6 +347,7 @@ impl<'gc> Class<'gc> {
             activation.context.gc_context,
             Self {
                 name,
+                params: Vec::new(),
                 super_class,
                 attributes,
                 protected_namespace,
@@ -321,6 +359,11 @@ impl<'gc> Class<'gc> {
                 class_init,
                 class_initializer_called: false,
                 class_traits: Vec::new(),
+                specialized_class_init: Method::from_builtin(
+                    |_, _, _| Ok(Value::Undefined),
+                    "<Null specialization constructor>",
+                    activation.context.gc_context,
+                ),
                 traits_loaded: false,
             },
         ))
@@ -392,6 +435,7 @@ impl<'gc> Class<'gc> {
             activation.context.gc_context,
             Self {
                 name: QName::dynamic_name(name),
+                params: Vec::new(),
                 super_class: None,
                 attributes: ClassAttributes::empty(),
                 protected_namespace: None,
@@ -413,6 +457,11 @@ impl<'gc> Class<'gc> {
                     "<Activation object class constructor>",
                     activation.context.gc_context,
                 ),
+                specialized_class_init: Method::from_builtin(
+                    |_, _, _| Ok(Value::Undefined),
+                    "<Activation object specialization constructor>",
+                    activation.context.gc_context,
+                ),
                 class_initializer_called: false,
                 class_traits: Vec::new(),
                 traits_loaded: true,
@@ -422,6 +471,10 @@ impl<'gc> Class<'gc> {
 
     pub fn name(&self) -> &QName<'gc> {
         &self.name
+    }
+
+    pub fn set_name(&mut self, name: QName<'gc>) {
+        self.name = name;
     }
 
     pub fn super_class_name(&self) -> &Option<Multiname<'gc>> {
@@ -548,6 +601,19 @@ impl<'gc> Class<'gc> {
                     Method::from_builtin(setter, name, mc),
                 ));
             }
+        }
+    }
+    #[inline(never)]
+    pub fn define_public_slot_number_instance_traits(
+        &mut self,
+        items: &[(&'static str, Option<f64>)],
+    ) {
+        for &(name, value) in items {
+            self.define_instance_trait(Trait::from_slot(
+                QName::new(Namespace::public(), name),
+                QName::new(Namespace::public(), "Number").into(),
+                value.map(|v| v.into()),
+            ));
         }
     }
 
@@ -736,6 +802,11 @@ impl<'gc> Class<'gc> {
         self.class_initializer_called = true;
     }
 
+    /// Set the class initializer for specializations of this class.
+    pub fn set_specialized_init(&mut self, specialized_init: Method<'gc>) {
+        self.specialized_class_init = specialized_init;
+    }
+
     pub fn interfaces(&self) -> &[Multiname<'gc>] {
         &self.interfaces
     }
@@ -757,5 +828,14 @@ impl<'gc> Class<'gc> {
     /// Determine if this class is an interface
     pub fn is_interface(&self) -> bool {
         self.attributes.contains(ClassAttributes::INTERFACE)
+    }
+
+    /// Determine if this class is generic (can be specialized)
+    pub fn is_generic(&self) -> bool {
+        self.attributes.contains(ClassAttributes::GENERIC)
+    }
+
+    pub fn params(&self) -> &[GcCell<'gc, Class<'gc>>] {
+        &self.params[..]
     }
 }

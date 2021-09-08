@@ -93,13 +93,12 @@ impl<'gc> ArrayObject<'gc> {
 }
 
 impl<'gc> TObject<'gc> for ArrayObject<'gc> {
-    fn get_local(
+    fn get_local_stored(
         &self,
         name: &str,
         activation: &mut Activation<'_, 'gc, '_>,
-        this: Object<'gc>,
-    ) -> Option<Result<Value<'gc>, Error<'gc>>> {
-        self.0.read().get_local(name, activation, this)
+    ) -> Option<Value<'gc>> {
+        self.0.read().get_local_stored(name, activation)
     }
 
     fn set_local(
@@ -136,13 +135,12 @@ impl<'gc> TObject<'gc> for ArrayObject<'gc> {
         self.0.read().call(name, activation, this, base_proto, args)
     }
 
-    fn call_setter(
-        &self,
-        name: &str,
-        value: Value<'gc>,
-        activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Option<Object<'gc>> {
-        self.0.read().call_setter(name, value, activation)
+    fn getter(&self, name: &str, activation: &mut Activation<'_, 'gc, '_>) -> Option<Object<'gc>> {
+        self.0.read().getter(name, activation)
+    }
+
+    fn setter(&self, name: &str, activation: &mut Activation<'_, 'gc, '_>) -> Option<Object<'gc>> {
+        self.0.read().setter(name, activation)
     }
 
     fn create_bare_object(
@@ -181,6 +179,15 @@ impl<'gc> TObject<'gc> for ArrayObject<'gc> {
         self.0
             .read()
             .add_property_with_case(activation, name, get, set, attributes)
+    }
+
+    fn call_watcher(
+        &self,
+        activation: &mut Activation<'_, 'gc, '_>,
+        name: &str,
+        value: &mut Value<'gc>,
+    ) -> Result<(), Error<'gc>> {
+        self.0.read().call_watcher(activation, name, value)
     }
 
     fn watch(

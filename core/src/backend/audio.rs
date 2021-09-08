@@ -1,9 +1,8 @@
 use crate::{
     avm1::SoundObject,
-    display_object::{
-        self, DisplayObject, MovieClip, SoundTransform as DisplayObjectSoundTransform,
-        TDisplayObject,
-    },
+    avm2::Event as Avm2Event,
+    avm2::Object as Avm2Object,
+    display_object::{self, DisplayObject, MovieClip, TDisplayObject},
 };
 use downcast_rs::Downcast;
 use gc_arena::Collect;
@@ -16,6 +15,9 @@ pub mod swf {
         SoundFormat, SoundInfo, SoundStreamHead,
     };
 }
+
+mod mixer;
+pub use mixer::*;
 
 pub type SoundHandle = Index;
 pub type SoundInstanceHandle = Index;
@@ -87,7 +89,15 @@ pub trait AudioBackend: Downcast {
 
     /// Get the duration of a sound in milliseconds.
     /// Returns `None` if sound is not registered.
-    fn get_sound_duration(&self, sound: SoundHandle) -> Option<u32>;
+    fn get_sound_duration(&self, sound: SoundHandle) -> Option<f64>;
+
+    /// Get the size of the data stored within a given sound.
+    ///
+    /// This is specifically measured in compressed bytes.
+    fn get_sound_size(&self, sound: SoundHandle) -> Option<u32>;
+
+    /// Get the sound format that a given sound was added with.
+    fn get_sound_format(&self, sound: SoundHandle) -> Option<&swf::SoundFormat>;
 
     /// Set the volume transform for a sound instance.
     fn set_sound_transform(&mut self, instance: SoundInstanceHandle, transform: SoundTransform);
@@ -96,6 +106,10 @@ pub trait AudioBackend: Downcast {
     fn is_loading_complete(&self) -> bool {
         true
     }
+
+    /// Allows the audio backend to update.
+    ///
+    /// Runs once per event loop iteration.
     fn tick(&mut self) {}
 
     /// Inform the audio backend of the current stage frame rate.
@@ -108,9 +122,21 @@ pub trait AudioBackend: Downcast {
 
 impl_downcast!(AudioBackend);
 
+/// Information about a sound provided to `NullAudioBackend`.
+struct NullSound {
+    /// The duration of the sound in milliseconds.
+    duration: f64,
+
+    /// The compressed size of the sound data, excluding MP3 latency seek data.
+    size: u32,
+
+    /// The stated format of the sound data.
+    format: swf::SoundFormat,
+}
+
 /// Audio backend that ignores all audio.
 pub struct NullAudioBackend {
-    sounds: Arena<()>,
+    sounds: Arena<NullSound>,
 }
 
 impl NullAudioBackend {
@@ -124,8 +150,24 @@ impl NullAudioBackend {
 impl AudioBackend for NullAudioBackend {
     fn play(&mut self) {}
     fn pause(&mut self) {}
-    fn register_sound(&mut self, _sound: &swf::Sound) -> Result<SoundHandle, Error> {
-        Ok(self.sounds.insert(()))
+    fn register_sound(&mut self, sound: &swf::Sound) -> Result<SoundHandle, Error> {
+        // Slice off latency seek for MP3 data.
+        let data = if sound.format.compression == swf::AudioCompression::Mp3 {
+            &sound.data[2..]
+        } else {
+            sound.data
+        };
+
+        // AS duration does not subtract `skip_sample_frames`.
+        let num_sample_frames: f64 = sound.num_samples.into();
+        let sample_rate: f64 = sound.format.sample_rate.into();
+        let duration = num_sample_frames * 1000.0 / sample_rate;
+
+        Ok(self.sounds.insert(NullSound {
+            duration,
+            size: data.len() as u32,
+            format: sound.format.clone(),
+        }))
     }
 
     fn start_sound(
@@ -150,10 +192,25 @@ impl AudioBackend for NullAudioBackend {
 
     fn stop_all_sounds(&mut self) {}
     fn get_sound_position(&self, _instance: SoundInstanceHandle) -> Option<u32> {
-        None
+        Some(0)
     }
-    fn get_sound_duration(&self, _sound: SoundHandle) -> Option<u32> {
-        None
+    fn get_sound_duration(&self, sound: SoundHandle) -> Option<f64> {
+        if let Some(sound) = self.sounds.get(sound) {
+            Some(sound.duration)
+        } else {
+            None
+        }
+    }
+    fn get_sound_size(&self, sound: SoundHandle) -> Option<u32> {
+        if let Some(sound) = self.sounds.get(sound) {
+            Some(sound.size)
+        } else {
+            None
+        }
+    }
+
+    fn get_sound_format(&self, sound: SoundHandle) -> Option<&swf::SoundFormat> {
+        self.sounds.get(sound).map(|s| &s.format)
     }
 
     fn set_sound_transform(&mut self, _instance: SoundInstanceHandle, _transform: SoundTransform) {}
@@ -172,7 +229,7 @@ pub struct AudioManager<'gc> {
     sounds: Vec<SoundInstance<'gc>>,
 
     /// The global sound transform applied to all sounds.
-    global_sound_transform: DisplayObjectSoundTransform,
+    global_sound_transform: display_object::SoundTransform,
 
     /// The number of seconds that a timeline audio stream should buffer before playing.
     ///
@@ -230,6 +287,20 @@ impl<'gc> AudioManager<'gc> {
                         false,
                     );
                 }
+
+                if let Some(object) = sound.avm2_object {
+                    //TODO: AVM2 events are usually not queued, but we can't
+                    //hold the update context in the audio manager yet.
+                    action_queue.queue_actions(
+                        root,
+                        crate::context::ActionType::Event2 {
+                            event: Avm2Event::new("soundComplete"),
+                            target: object,
+                        },
+                        false,
+                    )
+                }
+
                 false
             }
         });
@@ -252,13 +323,30 @@ impl<'gc> AudioManager<'gc> {
                 sound: Some(sound),
                 instance: handle,
                 display_object,
+                transform: display_object::SoundTransform::default(),
                 avm1_object,
+                avm2_object: None,
             };
             audio.set_sound_transform(handle, self.transform_for_sound(&instance));
             self.sounds.push(instance);
             Some(handle)
         } else {
             None
+        }
+    }
+
+    pub fn attach_avm2_sound_channel(
+        &mut self,
+        instance: SoundInstanceHandle,
+        avm2_object: Avm2Object<'gc>,
+    ) {
+        if let Some(i) = self
+            .sounds
+            .iter()
+            .position(|other| other.instance == instance)
+        {
+            let instance = &mut self.sounds[i];
+            instance.avm2_object = Some(avm2_object);
         }
     }
 
@@ -327,7 +415,9 @@ impl<'gc> AudioManager<'gc> {
                 sound: None,
                 instance: handle,
                 display_object: Some(movie_clip.into()),
+                transform: display_object::SoundTransform::default(),
                 avm1_object: None,
+                avm2_object: None,
             };
             audio.set_sound_transform(handle, self.transform_for_sound(&instance));
             self.sounds.push(instance);
@@ -337,13 +427,48 @@ impl<'gc> AudioManager<'gc> {
         }
     }
 
-    pub fn global_sound_transform(&self) -> &DisplayObjectSoundTransform {
+    pub fn global_sound_transform(&self) -> &display_object::SoundTransform {
         &self.global_sound_transform
     }
 
-    pub fn set_global_sound_transform(&mut self, sound_transform: DisplayObjectSoundTransform) {
+    pub fn set_global_sound_transform(&mut self, sound_transform: display_object::SoundTransform) {
         self.global_sound_transform = sound_transform;
         self.transforms_dirty = true;
+    }
+
+    /// Get the local sound transform of a single sound instance.
+    pub fn local_sound_transform(
+        &self,
+        instance: SoundInstanceHandle,
+    ) -> Option<&display_object::SoundTransform> {
+        if let Some(i) = self
+            .sounds
+            .iter()
+            .position(|other| other.instance == instance)
+        {
+            let instance = &self.sounds[i];
+            Some(&instance.transform)
+        } else {
+            None
+        }
+    }
+
+    /// Set the local sound transform of a single sound instance.
+    pub fn set_local_sound_transform(
+        &mut self,
+        instance: SoundInstanceHandle,
+        sound_transform: display_object::SoundTransform,
+    ) {
+        if let Some(i) = self
+            .sounds
+            .iter()
+            .position(|other| other.instance == instance)
+        {
+            let instance = &mut self.sounds[i];
+
+            instance.transform = sound_transform;
+            self.transforms_dirty = true;
+        }
     }
 
     /// Returns the number of seconds that a timeline audio stream should buffer before playing.
@@ -365,14 +490,14 @@ impl<'gc> AudioManager<'gc> {
     }
 
     fn transform_for_sound(&self, sound: &SoundInstance<'gc>) -> SoundTransform {
-        let mut transform = DisplayObjectSoundTransform::default();
+        let mut transform = sound.transform.clone();
         let mut parent = sound.display_object;
         while let Some(display_object) = parent {
             transform.concat(&display_object.sound_transform());
             parent = display_object.parent();
         }
         transform.concat(&self.global_sound_transform);
-        SoundTransform::from_display_object_transform(&transform)
+        transform.into()
     }
 
     /// Update the sound transforms for all sounds.
@@ -413,14 +538,25 @@ pub struct SoundInstance<'gc> {
     /// Used for volume mixing and `Sound.stop()`.
     display_object: Option<DisplayObject<'gc>>,
 
+    /// The local sound transform of this sound.
+    ///
+    /// Only AVM2 sounds have a local sound transform. In AVM1, sound instances
+    /// instead get the sound transform of the display object they're
+    /// associated with.
+    transform: display_object::SoundTransform,
+
     /// The AVM1 `Sound` object associated with this sound, if any.
-    pub avm1_object: Option<SoundObject<'gc>>,
+    avm1_object: Option<SoundObject<'gc>>,
+
+    /// The AVM2 `Sound` object associated with this sound, if any.
+    avm2_object: Option<Avm2Object<'gc>>,
 }
 
 /// A sound transform for a playing sound, for use by audio backends.
-/// This differs from `display_object::SoundTranform` by being
+/// This differs from `display_object::SoundTransform` by being
 /// already converted to `f32` and having `volume` baked in.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Collect)]
+#[collect(require_static)]
 pub struct SoundTransform {
     pub left_to_left: f32,
     pub left_to_right: f32,
@@ -428,16 +564,26 @@ pub struct SoundTransform {
     pub right_to_right: f32,
 }
 
-impl SoundTransform {
+impl From<display_object::SoundTransform> for SoundTransform {
     /// Converts from a `display_object::SoundTransform` to a `backend::audio::SoundTransform`.
-    fn from_display_object_transform(other: &DisplayObjectSoundTransform) -> Self {
-        const SCALE: f32 = (display_object::SoundTransform::MAX_VOLUME
-            * display_object::SoundTransform::MAX_VOLUME) as f32;
+    fn from(other: display_object::SoundTransform) -> Self {
+        const SCALE: f32 = display_object::SoundTransform::MAX_VOLUME.pow(2) as f32;
+
+        // It seems like Flash stores sound transform values in 30-bit unsigned integers:
+        // * Negative values are equivalent to their absolute value.
+        // * Specifically, 0x40000000, -0x40000000 and -0x80000000 are equivalent to zero.
+        // * The volume multiplication wraps around at `u32::MAX`.
+        let left_to_left = (other.left_to_left << 2) >> 2;
+        let left_to_right = (other.left_to_right << 2) >> 2;
+        let right_to_left = (other.right_to_left << 2) >> 2;
+        let right_to_right = (other.right_to_right << 2) >> 2;
+        let volume = (other.volume << 2) >> 2;
+
         Self {
-            left_to_left: other.left_to_left as f32 * other.volume as f32 / SCALE,
-            left_to_right: other.left_to_right as f32 * other.volume as f32 / SCALE,
-            right_to_left: other.right_to_left as f32 * other.volume as f32 / SCALE,
-            right_to_right: other.right_to_right as f32 * other.volume as f32 / SCALE,
+            left_to_left: left_to_left.wrapping_mul(volume) as f32 / SCALE,
+            left_to_right: left_to_right.wrapping_mul(volume) as f32 / SCALE,
+            right_to_left: right_to_left.wrapping_mul(volume) as f32 / SCALE,
+            right_to_right: right_to_right.wrapping_mul(volume) as f32 / SCALE,
         }
     }
 }

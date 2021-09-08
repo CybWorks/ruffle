@@ -3,6 +3,7 @@ import {
     FUTURESPLASH_MIMETYPE,
     FLASH7_AND_8_MIMETYPE,
     FLASH_MOVIE_MIMETYPE,
+    isBuiltInContextMenuVisible,
     isScriptAccessAllowed,
     isSwfFilename,
     RufflePlayer,
@@ -39,6 +40,7 @@ export class RuffleEmbed extends RufflePlayer {
             const allowScriptAccess =
                 this.attributes.getNamedItem("allowScriptAccess")?.value ??
                 null;
+            const menu = this.attributes.getNamedItem("menu")?.value ?? null;
 
             // Kick off the SWF download.
             this.load({
@@ -49,6 +51,8 @@ export class RuffleEmbed extends RufflePlayer {
                 ),
                 parameters: this.attributes.getNamedItem("flashvars")?.value,
                 backgroundColor: this.attributes.getNamedItem("bgcolor")?.value,
+                base: this.attributes.getNamedItem("base")?.value,
+                menu: isBuiltInContextMenuVisible(menu),
             });
         }
     }
@@ -105,7 +109,11 @@ export class RuffleEmbed extends RufflePlayer {
             }
             const src = this.attributes.getNamedItem("src");
             if (src) {
-                this.load({ url: src.value, parameters });
+                this.load({
+                    url: src.value,
+                    parameters,
+                    base: this.attributes.getNamedItem("base")?.value,
+                });
             }
         }
     }

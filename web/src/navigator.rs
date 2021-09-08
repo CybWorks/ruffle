@@ -10,17 +10,24 @@ use std::time::Duration;
 use url::Url;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::{spawn_local, JsFuture};
-use web_sys::{window, Blob, BlobPropertyBag, Performance, Request, RequestInit, Response};
+use web_sys::{
+    window, Blob, BlobPropertyBag, Document, Performance, Request, RequestInit, Response,
+};
 
 pub struct WebNavigatorBackend {
     performance: Performance,
     start_time: f64,
     allow_script_access: bool,
     upgrade_to_https: bool,
+    base_url: Option<String>,
 }
 
 impl WebNavigatorBackend {
-    pub fn new(allow_script_access: bool, upgrade_to_https: bool) -> Self {
+    pub fn new(
+        allow_script_access: bool,
+        upgrade_to_https: bool,
+        mut base_url: Option<String>,
+    ) -> Self {
         let window = web_sys::window().expect("window()");
         let performance = window.performance().expect("window.performance()");
 
@@ -28,11 +35,42 @@ impl WebNavigatorBackend {
         let upgrade_to_https =
             upgrade_to_https && window.location().protocol().unwrap_or_default() == "https:";
 
+        if let Some(ref base) = base_url {
+            if Url::parse(base).is_err() {
+                let document = window.document().expect("Could not get document");
+                if let Ok(Some(doc_base_uri)) = document.base_uri() {
+                    let doc_url =
+                        Url::parse(&doc_base_uri).expect("Could not parse document base uri");
+
+                    if let Ok(joined_url) = doc_url.join(base) {
+                        base_url = Some(joined_url.into());
+                    } else {
+                        log::error!("Bad base directory {}", base);
+                        base_url = None;
+                    }
+                } else {
+                    log::error!("Could not get document base_uri for base directory inference");
+                    base_url = None;
+                }
+            }
+        }
+
         WebNavigatorBackend {
             start_time: performance.now(),
             performance,
             allow_script_access,
             upgrade_to_https,
+            base_url,
+        }
+    }
+
+    fn base_uri(&self, document: &Document) -> Option<String> {
+        if let Some(base_url) = self.base_url.clone() {
+            Some(base_url)
+        } else if let Ok(Some(base_uri)) = document.base_uri() {
+            Some(base_uri)
+        } else {
+            None
         }
     }
 }
@@ -51,12 +89,14 @@ impl NavigatorBackend for WebNavigatorBackend {
 
         if let Some(window) = window() {
             let document = window.document().expect("Could not get document");
-            let url = if let Ok(Some(base_uri)) = document.base_uri() {
-                if let Ok(new_url) = url_from_relative_url(&base_uri, &url) {
-                    new_url
-                } else {
-                    return;
-                }
+
+            let base_uri = match self.base_uri(&document) {
+                Some(base_uri) => base_uri,
+                _ => return,
+            };
+
+            let url = if let Ok(new_url) = url_from_relative_url(&base_uri, &url) {
+                new_url
             } else {
                 return;
             };
@@ -129,7 +169,7 @@ impl NavigatorBackend for WebNavigatorBackend {
         let url = if let Ok(parsed_url) = Url::parse(url) {
             self.pre_process_url(parsed_url).to_string()
         } else {
-            url.to_string()
+            self.resolve_relative_url(url).to_string()
         };
 
         Box::pin(async move {
@@ -186,9 +226,12 @@ impl NavigatorBackend for WebNavigatorBackend {
 
             let data: ArrayBuffer = JsFuture::from(resp.array_buffer().unwrap())
                 .await
-                .unwrap()
+                .map_err(|_| {
+                    Error::FetchError("Could not allocate array buffer for response".to_string())
+                })?
                 .dyn_into()
                 .unwrap();
+
             let jsarray = Uint8Array::new(&data);
             let mut rust_array = vec![0; jsarray.length() as usize];
             jsarray.copy_to(&mut rust_array);
@@ -205,11 +248,11 @@ impl NavigatorBackend for WebNavigatorBackend {
         })
     }
 
-    fn resolve_relative_url<'a>(&mut self, url: &'a str) -> Cow<'a, str> {
+    fn resolve_relative_url<'a>(&self, url: &'a str) -> Cow<'a, str> {
         let window = web_sys::window().expect("window()");
         let document = window.document().expect("document()");
 
-        if let Ok(Some(base_uri)) = document.base_uri() {
+        if let Some(base_uri) = self.base_uri(&document) {
             if let Ok(new_url) = url_from_relative_url(&base_uri, url) {
                 return String::from(new_url).into();
             }

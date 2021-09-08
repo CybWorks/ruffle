@@ -1,11 +1,12 @@
 //! flash.display.BitmapData object
 
+use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::function::{Executable, FunctionObject};
-use crate::avm1::object::bitmap_data::{BitmapDataObject, ChannelOptions, Color};
+use crate::avm1::object::bitmap_data::BitmapDataObject;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
-use crate::avm1::{activation::Activation, object::bitmap_data::BitmapData};
 use crate::avm1::{Object, TObject, Value};
+use crate::bitmap::bitmap_data::{BitmapData, ChannelOptions, Color};
 use crate::character::Character;
 use crate::display_object::TDisplayObject;
 use gc_arena::{GcCell, MutationContext};
@@ -582,10 +583,11 @@ pub fn color_transform<'gc>(
             let end_y = (y + height) as u32;
 
             if let Some(color_transform) = color_transform.as_color_transform_object() {
+                let params = color_transform.get_params();
                 bitmap_data
                     .bitmap_data()
                     .write(activation.context.gc_context)
-                    .color_transform(min_x, min_y, end_x, end_y, color_transform);
+                    .color_transform(min_x, min_y, end_x, end_y, &params);
             }
 
             return Ok(Value::Undefined);

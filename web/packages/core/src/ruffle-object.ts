@@ -4,6 +4,7 @@ import {
     FLASH7_AND_8_MIMETYPE,
     FLASH_MOVIE_MIMETYPE,
     FLASH_ACTIVEX_CLASSID,
+    isBuiltInContextMenuVisible,
     isScriptAccessAllowed,
     isSwfFilename,
     RufflePlayer,
@@ -112,6 +113,14 @@ export class RuffleObject extends RufflePlayer {
             this.getAttribute("bgcolor")
         );
 
+        const base = findCaseInsensitive(
+            this.params,
+            "base",
+            this.getAttribute("base")
+        );
+
+        const menu = findCaseInsensitive(this.params, "menu", null);
+
         if (url) {
             const options: URLLoadOptions = { url };
             options.allowScriptAccess = isScriptAccessAllowed(
@@ -124,6 +133,10 @@ export class RuffleObject extends RufflePlayer {
             if (backgroundColor) {
                 options.backgroundColor = backgroundColor;
             }
+            if (base) {
+                options.base = base;
+            }
+            options.menu = isBuiltInContextMenuVisible(menu);
 
             // Kick off the SWF download.
             this.load(options);

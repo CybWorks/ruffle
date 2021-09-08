@@ -29,10 +29,12 @@ mod object;
 mod regexp;
 mod string;
 mod r#uint;
+mod vector;
 mod xml;
 mod xml_list;
 
 const NS_RUFFLE_INTERNAL: &str = "https://ruffle.rs/AS3/impl/";
+const NS_VECTOR: &str = "__AS3__.vec";
 
 fn trace<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
@@ -103,6 +105,7 @@ pub struct SystemPrototypes<'gc> {
     pub display_object: Object<'gc>,
     pub shape: Object<'gc>,
     pub point: Object<'gc>,
+    pub rectangle: Object<'gc>,
     pub textfield: Object<'gc>,
     pub textformat: Object<'gc>,
     pub graphics: Object<'gc>,
@@ -112,6 +115,9 @@ pub struct SystemPrototypes<'gc> {
     pub sprite: Object<'gc>,
     pub simplebutton: Object<'gc>,
     pub regexp: Object<'gc>,
+    pub vector: Object<'gc>,
+    pub soundtransform: Object<'gc>,
+    pub soundchannel: Object<'gc>,
 }
 
 impl<'gc> SystemPrototypes<'gc> {
@@ -151,6 +157,7 @@ impl<'gc> SystemPrototypes<'gc> {
             display_object: empty,
             shape: empty,
             point: empty,
+            rectangle: empty,
             textfield: empty,
             textformat: empty,
             graphics: empty,
@@ -160,6 +167,9 @@ impl<'gc> SystemPrototypes<'gc> {
             sprite: empty,
             simplebutton: empty,
             regexp: empty,
+            vector: empty,
+            soundtransform: empty,
+            soundchannel: empty,
         }
     }
 }
@@ -190,6 +200,7 @@ pub struct SystemClasses<'gc> {
     pub display_object: Object<'gc>,
     pub shape: Object<'gc>,
     pub point: Object<'gc>,
+    pub rectangle: Object<'gc>,
     pub textfield: Object<'gc>,
     pub textformat: Object<'gc>,
     pub graphics: Object<'gc>,
@@ -199,6 +210,9 @@ pub struct SystemClasses<'gc> {
     pub sprite: Object<'gc>,
     pub simplebutton: Object<'gc>,
     pub regexp: Object<'gc>,
+    pub vector: Object<'gc>,
+    pub soundtransform: Object<'gc>,
+    pub soundchannel: Object<'gc>,
 }
 
 impl<'gc> SystemClasses<'gc> {
@@ -238,6 +252,7 @@ impl<'gc> SystemClasses<'gc> {
             display_object: empty,
             shape: empty,
             point: empty,
+            rectangle: empty,
             textfield: empty,
             textformat: empty,
             graphics: empty,
@@ -247,6 +262,9 @@ impl<'gc> SystemClasses<'gc> {
             sprite: empty,
             simplebutton: empty,
             regexp: empty,
+            vector: empty,
+            soundtransform: empty,
+            soundchannel: empty,
         }
     }
 }
@@ -493,7 +511,7 @@ pub fn load_player_globals<'gc>(
 
     class(activation, math::create_class(mc), domain, script)?;
     avm2_system_class!(regexp, activation, regexp::create_class(mc), domain, script);
-
+    avm2_system_class!(vector, activation, vector::create_class(mc), domain, script);
     avm2_system_class!(xml, activation, xml::create_class(mc), domain, script);
     avm2_system_class!(
         xml_list,
@@ -514,6 +532,12 @@ pub fn load_player_globals<'gc>(
     class(
         activation,
         flash::system::capabilities::create_class(mc),
+        domain,
+        script,
+    )?;
+    class(
+        activation,
+        flash::system::security::create_class(mc),
         domain,
         script,
     )?;
@@ -541,6 +565,24 @@ pub fn load_player_globals<'gc>(
     class(
         activation,
         flash::events::eventdispatcher::create_class(mc),
+        domain,
+        script,
+    )?;
+    class(
+        activation,
+        flash::events::mouseevent::create_class(mc),
+        domain,
+        script,
+    )?;
+    class(
+        activation,
+        flash::events::keyboardevent::create_class(mc),
+        domain,
+        script,
+    )?;
+    class(
+        activation,
+        flash::events::progressevent::create_class(mc),
         domain,
         script,
     )?;
@@ -577,6 +619,36 @@ pub fn load_player_globals<'gc>(
         "flash.utils",
         "getTimer",
         flash::utils::get_timer,
+        fn_proto,
+        domain,
+        script,
+    )?;
+
+    function(
+        mc,
+        "flash.utils",
+        "getQualifiedClassName",
+        flash::utils::get_qualified_class_name,
+        fn_proto,
+        domain,
+        script,
+    )?;
+
+    function(
+        mc,
+        "flash.utils",
+        "getQualifiedSuperclassName",
+        flash::utils::get_qualified_super_class_name,
+        fn_proto,
+        domain,
+        script,
+    )?;
+
+    function(
+        mc,
+        "flash.utils",
+        "getDefinitionByName",
+        flash::utils::get_definition_by_name,
         fn_proto,
         domain,
         script,
@@ -728,12 +800,45 @@ pub fn load_player_globals<'gc>(
         domain,
         script
     );
+    avm2_system_class!(
+        rectangle,
+        activation,
+        flash::geom::rectangle::create_class(mc),
+        domain,
+        script
+    );
 
     // package `flash.media`
     avm2_system_class!(
         video,
         activation,
         flash::media::video::create_class(mc),
+        domain,
+        script
+    );
+    class(
+        activation,
+        flash::media::sound::create_class(mc),
+        domain,
+        script,
+    )?;
+    avm2_system_class!(
+        soundtransform,
+        activation,
+        flash::media::soundtransform::create_class(mc),
+        domain,
+        script
+    );
+    class(
+        activation,
+        flash::media::soundmixer::create_class(mc),
+        domain,
+        script,
+    )?;
+    avm2_system_class!(
+        soundchannel,
+        activation,
+        flash::media::soundchannel::create_class(mc),
         domain,
         script
     );
@@ -768,6 +873,12 @@ pub fn load_player_globals<'gc>(
     class(
         activation,
         flash::text::textfieldtype::create_class(mc),
+        domain,
+        script,
+    )?;
+    class(
+        activation,
+        flash::text::font::create_class(mc),
         domain,
         script,
     )?;

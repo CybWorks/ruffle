@@ -122,6 +122,8 @@ export class RufflePlayer extends HTMLElement {
     // so avoid shadowing it.
     private contextMenuElement: HTMLElement;
     private hasContextMenu = false;
+    // Allows the user to permanently disable the context menu.
+    private contextMenuForceDisabled = false;
 
     // Whether this device is a touch device.
     // Set to true when a touch event is encountered.
@@ -135,7 +137,6 @@ export class RufflePlayer extends HTMLElement {
     private _metadata: MovieMetadata | null;
     private _readyState: ReadyState;
 
-    private ruffleConstructor: Promise<typeof Ruffle>;
     private panicked = false;
 
     private isExtension = false;
@@ -221,8 +222,6 @@ export class RufflePlayer extends HTMLElement {
 
         this._readyState = ReadyState.HaveNothing;
         this._metadata = null;
-
-        this.ruffleConstructor = loadRuffle();
 
         this.lastActivePlayingState = false;
         this.setupPauseOnTabHidden();
@@ -379,7 +378,7 @@ export class RufflePlayer extends HTMLElement {
     private async ensureFreshInstance(config: BaseLoadOptions): Promise<void> {
         this.destroy();
 
-        const ruffleConstructor = await this.ruffleConstructor.catch((e) => {
+        const ruffleConstructor = await loadRuffle(config).catch((e) => {
             console.error(`Serious error loading Ruffle: ${e}`);
 
             // Serious duck typing. In error conditions, let's not make assumptions.
@@ -575,7 +574,7 @@ export class RufflePlayer extends HTMLElement {
                     ...sanitizeParameters(options.parameters),
                 };
 
-                this.instance!.stream_from(options.url, parameters);
+                this.instance!.stream_from(this.swfUrl, parameters);
             } else if ("data" in options) {
                 console.log("Loading SWF data");
                 this.instance!.load_data(
@@ -656,7 +655,7 @@ export class RufflePlayer extends HTMLElement {
     }
 
     private pointerDown(event: PointerEvent): void {
-        // Disable context menu when touch support is being used
+        // Give option to disable context menu when touch support is being used
         // to avoid a long press triggering the context menu. (#1972)
         if (event.pointerType === "touch" || event.pointerType === "pen") {
             this.isTouch = true;
@@ -706,13 +705,20 @@ export class RufflePlayer extends HTMLElement {
                 window.open(RUFFLE_ORIGIN, "_blank");
             },
         });
+        if (this.isTouch) {
+            items.push(null);
+            items.push({
+                text: "Hide this menu",
+                onClick: () => (this.contextMenuForceDisabled = true),
+            });
+        }
         return items;
     }
 
     private showContextMenu(e: MouseEvent): void {
         e.preventDefault();
 
-        if (!this.hasContextMenu || this.isTouch) {
+        if (!this.hasContextMenu || this.contextMenuForceDisabled) {
             return;
         }
 
@@ -1292,6 +1298,19 @@ export function isScriptAccessAllowed(
                 return false;
             }
     }
+}
+
+/**
+ * Returns whether a SWF file should show the built-in context menu items.
+ *
+ * @param menu The value of the `menu` attribute.
+ * @returns True if the built-in context items should be shown.
+ */
+export function isBuiltInContextMenuVisible(menu: string | null): boolean {
+    if (menu === "true" || menu === null) {
+        return true;
+    }
+    return false;
 }
 
 /**

@@ -42,6 +42,7 @@ mod slot;
 mod string;
 mod traits;
 mod value;
+mod vector;
 
 pub use crate::avm2::activation::Activation;
 pub use crate::avm2::array::ArrayStorage;
@@ -231,8 +232,10 @@ impl<'gc> Avm2<'gc> {
                 .copied();
 
             if let Some(object) = object {
-                if object.is_of_type(on_type)? {
-                    Avm2::dispatch_event(context, event.clone(), object)?;
+                let mut activation = Activation::from_nothing(context.reborrow());
+
+                if object.is_of_type(on_type, &mut activation)? {
+                    Avm2::dispatch_event(&mut activation.context, event.clone(), object)?;
                 }
             }
         }

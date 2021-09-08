@@ -265,17 +265,9 @@ impl<'gc> Executable<'gc> {
                     Attribute::DONT_ENUM,
                 );
 
-                let argcell = arguments.into();
                 let super_object: Option<Object<'gc>> =
                     if !af.flags.contains(FunctionFlags::SUPPRESS_SUPER) {
-                        Some(
-                            SuperObject::from_this_and_base_proto(
-                                this,
-                                base_proto.unwrap_or(this),
-                                activation,
-                            )?
-                            .into(),
-                        )
+                        Some(SuperObject::new(activation, this, base_proto.unwrap_or(this)).into())
                     } else {
                         None
                     };
@@ -324,7 +316,7 @@ impl<'gc> Executable<'gc> {
                     base_clip,
                     this,
                     Some(callee),
-                    Some(argcell),
+                    Some(arguments.into()),
                 );
 
                 frame.allocate_local_registers(af.register_count(), frame.context.gc_context);
@@ -334,25 +326,25 @@ impl<'gc> Executable<'gc> {
                 if af.flags.contains(FunctionFlags::PRELOAD_THIS) {
                     //TODO: What happens if you specify both suppress and
                     //preload for this?
-                    frame.set_local_register(preload_r, this);
+                    frame.set_local_register(preload_r, this.into());
                     preload_r += 1;
                 }
 
                 if af.flags.contains(FunctionFlags::PRELOAD_ARGUMENTS) {
                     //TODO: What happens if you specify both suppress and
                     //preload for arguments?
-                    frame.set_local_register(preload_r, argcell);
+                    frame.set_local_register(preload_r, arguments.into());
                     preload_r += 1;
                 }
 
                 if let Some(super_object) = super_object {
                     if af.flags.contains(FunctionFlags::PRELOAD_SUPER) {
-                        frame.set_local_register(preload_r, super_object);
+                        frame.set_local_register(preload_r, super_object.into());
                         //TODO: What happens if you specify both suppress and
                         //preload for super?
                         preload_r += 1;
                     } else {
-                        frame.force_define_local("super", super_object);
+                        frame.force_define_local("super", super_object.into());
                     }
                 }
 
@@ -523,13 +515,12 @@ impl<'gc> FunctionObject<'gc> {
 }
 
 impl<'gc> TObject<'gc> for FunctionObject<'gc> {
-    fn get_local(
+    fn get_local_stored(
         &self,
         name: &str,
         activation: &mut Activation<'_, 'gc, '_>,
-        this: Object<'gc>,
-    ) -> Option<Result<Value<'gc>, Error<'gc>>> {
-        self.base.get_local(name, activation, this)
+    ) -> Option<Value<'gc>> {
+        self.base.get_local_stored(name, activation)
     }
 
     fn set_local(
@@ -646,13 +637,12 @@ impl<'gc> TObject<'gc> for FunctionObject<'gc> {
         }
     }
 
-    fn call_setter(
-        &self,
-        name: &str,
-        value: Value<'gc>,
-        activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Option<Object<'gc>> {
-        self.base.call_setter(name, value, activation)
+    fn getter(&self, name: &str, activation: &mut Activation<'_, 'gc, '_>) -> Option<Object<'gc>> {
+        self.base.getter(name, activation)
+    }
+
+    fn setter(&self, name: &str, activation: &mut Activation<'_, 'gc, '_>) -> Option<Object<'gc>> {
+        self.base.setter(name, activation)
     }
 
     fn create_bare_object(
@@ -727,6 +717,15 @@ impl<'gc> TObject<'gc> for FunctionObject<'gc> {
     ) {
         self.base
             .add_property_with_case(activation, name, get, set, attributes)
+    }
+
+    fn call_watcher(
+        &self,
+        activation: &mut Activation<'_, 'gc, '_>,
+        name: &str,
+        value: &mut Value<'gc>,
+    ) -> Result<(), Error<'gc>> {
+        self.base.call_watcher(activation, name, value)
     }
 
     fn watch(

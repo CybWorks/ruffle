@@ -12,6 +12,7 @@ use crate::backend::ui::MouseCursor;
 use bitflags::bitflags;
 
 use crate::avm1::activation::{Activation as Avm1Activation, ActivationIdentifier};
+use crate::binary_data::BinaryData;
 use crate::character::Character;
 use crate::context::{ActionType, RenderContext, UpdateContext};
 use crate::display_object::container::{
@@ -465,6 +466,10 @@ impl<'gc> MovieClip<'gc> {
                     tag_len,
                 )
             }
+            TagCode::DefineBinaryData => self
+                .0
+                .write(context.gc_context)
+                .define_binary_data(context, reader),
             _ => Ok(()),
         };
         let _ = tag_utils::decode_tags(&mut reader, tag_callback, TagCode::End);
@@ -574,50 +579,58 @@ impl<'gc> MovieClip<'gc> {
             let id = reader.read_u16()?;
             let class_name = reader.read_str()?.to_string_lossy(reader.encoding());
 
-            if let Some(name) =
-                Avm2QName::from_symbol_class(&class_name, activation.context.gc_context)
-            {
-                let library = activation
-                    .context
-                    .library
-                    .library_for_movie_mut(movie.clone());
-                let domain = library.avm2_domain();
-                let class_object = domain
-                    .get_defined_value(&mut activation, name.clone())
-                    .and_then(|v| v.coerce_to_object(&mut activation));
+            let name = Avm2QName::from_qualified_name(&class_name, activation.context.gc_context);
+            let library = activation
+                .context
+                .library
+                .library_for_movie_mut(movie.clone());
+            let domain = library.avm2_domain();
+            let class_object = domain
+                .get_defined_value(&mut activation, name.clone())
+                .and_then(|v| v.coerce_to_object(&mut activation));
 
-                match class_object {
-                    Ok(class_object) => {
-                        activation
-                            .context
-                            .library
-                            .avm2_class_registry_mut()
-                            .set_class_symbol(class_object, movie.clone(), id);
+            match class_object {
+                Ok(class_object) => {
+                    activation
+                        .context
+                        .library
+                        .avm2_class_registry_mut()
+                        .set_class_symbol(class_object, movie.clone(), id);
 
-                        let library = activation
-                            .context
-                            .library
-                            .library_for_movie_mut(movie.clone());
+                    let library = activation
+                        .context
+                        .library
+                        .library_for_movie_mut(movie.clone());
 
-                        if id == 0 {
-                            //TODO: This assumes only the root movie has `SymbolClass` tags.
-                            self.set_avm2_class(activation.context.gc_context, Some(class_object));
-                        } else if let Some(Character::MovieClip(mc)) = library.character_by_id(id) {
-                            mc.set_avm2_class(activation.context.gc_context, Some(class_object));
-                        } else {
-                            log::warn!(
-                                "Symbol class {} cannot be assigned to invalid character id {}",
-                                class_name,
-                                id
-                            );
+                    if id == 0 {
+                        //TODO: This assumes only the root movie has `SymbolClass` tags.
+                        self.set_avm2_class(activation.context.gc_context, Some(class_object));
+                    } else {
+                        match library.character_by_id(id) {
+                            Some(Character::MovieClip(mc)) => {
+                                mc.set_avm2_class(activation.context.gc_context, Some(class_object))
+                            }
+                            Some(Character::Avm2Button(btn)) => {
+                                btn.set_avm2_class(activation.context.gc_context, class_object)
+                            }
+                            Some(Character::BinaryData(_)) => {}
+                            Some(Character::Font(_)) => {}
+                            Some(Character::Sound(_)) => {}
+                            _ => {
+                                log::warn!(
+                                    "Symbol class {} cannot be assigned to invalid character id {}",
+                                    class_name,
+                                    id
+                                );
+                            }
                         }
                     }
-                    Err(e) => log::warn!(
-                        "Got AVM2 error {} when attempting to assign symbol class {}",
-                        e,
-                        class_name
-                    ),
                 }
+                Err(e) => log::warn!(
+                    "Got AVM2 error {} when attempting to assign symbol class {}",
+                    e,
+                    class_name
+                ),
             }
         }
 
@@ -1563,7 +1576,7 @@ impl<'gc> MovieClip<'gc> {
             let result: Result<(), Avm2Error> = constr_thing();
 
             if let Err(e) = result {
-                log::error!("Got {} when constructing AVM2 side of display object", e);
+                log::error!("Got {} when constructing AVM2 side of movie clip", e);
             }
         }
     }
@@ -2725,24 +2738,26 @@ impl<'gc, 'a> MovieClipData<'gc> {
         tag_len: usize,
     ) -> DecodeResult {
         let button_colors = reader.read_define_button_cxform(tag_len)?;
-        if let Some(button) = context
+        match context
             .library
             .library_for_movie_mut(self.movie())
             .character_by_id(button_colors.id)
         {
-            if let Character::Avm1Button(button) = button {
+            Some(Character::Avm1Button(button)) => {
                 button.set_colors(context.gc_context, &button_colors.color_transforms[..]);
-            } else {
+            }
+            Some(_) => {
                 log::warn!(
                     "DefineButtonCxform: Tried to apply on non-button ID {}",
                     button_colors.id
                 );
             }
-        } else {
-            log::warn!(
-                "DefineButtonCxform: Character ID {} doesn't exist",
-                button_colors.id
-            );
+            None => {
+                log::warn!(
+                    "DefineButtonCxform: Character ID {} doesn't exist",
+                    button_colors.id
+                );
+            }
         }
         Ok(())
     }
@@ -2754,24 +2769,26 @@ impl<'gc, 'a> MovieClipData<'gc> {
         reader: &mut SwfStream<'a>,
     ) -> DecodeResult {
         let button_sounds = reader.read_define_button_sound()?;
-        if let Some(button) = context
+        match context
             .library
             .library_for_movie_mut(self.movie())
             .character_by_id(button_sounds.id)
         {
-            if let Character::Avm1Button(button) = button {
+            Some(Character::Avm1Button(button)) => {
                 button.set_sounds(context.gc_context, button_sounds);
-            } else {
+            }
+            Some(_) => {
                 log::warn!(
                     "DefineButtonSound: Tried to apply on non-button ID {}",
                     button_sounds.id
                 );
             }
-        } else {
-            log::warn!(
-                "DefineButtonSound: Character ID {} doesn't exist",
-                button_sounds.id
-            );
+            None => {
+                log::warn!(
+                    "DefineButtonSound: Character ID {} doesn't exist",
+                    button_sounds.id
+                );
+            }
         }
         Ok(())
     }
@@ -2979,6 +2996,21 @@ impl<'gc, 'a> MovieClipData<'gc> {
             .library
             .library_for_movie_mut(self.movie())
             .register_character(text.id, Character::Text(text_object));
+        Ok(())
+    }
+
+    #[inline]
+    fn define_binary_data(
+        &mut self,
+        context: &mut UpdateContext<'_, 'gc, '_>,
+        reader: &mut SwfStream<'a>,
+    ) -> DecodeResult {
+        let tag_data = reader.read_define_binary_data()?;
+        let binary_data = BinaryData::from_swf_tag(self.movie(), &tag_data);
+        context
+            .library
+            .library_for_movie_mut(self.movie())
+            .register_character(tag_data.id, Character::BinaryData(binary_data));
         Ok(())
     }
 
