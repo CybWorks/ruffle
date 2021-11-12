@@ -3,10 +3,10 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::names::{Namespace, QName};
 use crate::avm2::object::{Object, TObject};
-use crate::avm2::string::AvmString;
 use crate::avm2::value::Value;
 use crate::avm2::Error;
 use crate::display_object::TDisplayObject;
+use crate::string::AvmString;
 use gc_arena::Collect;
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
@@ -297,6 +297,12 @@ impl<'gc> DispatchList<'gc> {
     }
 }
 
+impl<'gc> Default for DispatchList<'gc> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// A single instance of an event handler.
 #[derive(Clone, Collect, Debug)]
 #[collect(no_drop)]
@@ -374,7 +380,7 @@ pub fn dispatch_event_to_target<'gc>(
     let dispatch_list = target
         .get_property(
             target,
-            &QName::new(Namespace::private(NS_EVENT_DISPATCHER), "dispatch_list"),
+            &QName::new(Namespace::private(NS_EVENT_DISPATCHER), "dispatch_list").into(),
             activation,
         )?
         .coerce_to_object(activation);
@@ -409,12 +415,9 @@ pub fn dispatch_event_to_target<'gc>(
             break;
         }
 
-        handler.call(
-            activation.global_scope().coerce_to_object(activation).ok(),
-            &[event.into()],
-            activation,
-            None,
-        )?;
+        let object = activation.global_scope();
+
+        handler.call(object, &[event.into()], activation)?;
     }
 
     Ok(())
@@ -428,7 +431,7 @@ pub fn dispatch_event<'gc>(
     let target = this
         .get_property(
             this,
-            &QName::new(Namespace::private(NS_EVENT_DISPATCHER), "target"),
+            &QName::new(Namespace::private(NS_EVENT_DISPATCHER), "target").into(),
             activation,
         )?
         .coerce_to_object(activation)

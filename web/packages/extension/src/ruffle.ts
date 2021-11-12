@@ -1,43 +1,71 @@
-import { PublicAPI, SourceAPI } from "ruffle-core";
+import { PublicAPI, SourceAPI, Config } from "ruffle-core";
 
-window.RufflePlayer = PublicAPI.negotiate(
-    window.RufflePlayer!,
-    "extension",
-    new SourceAPI("extension")
-);
+interface LoadMessage {
+    type: "load";
+    config: Config;
+}
 
-let uniqueMessageSuffix: string | null = null;
+interface PingMessage {
+    type: "ping";
+}
+
+type Message = LoadMessage | PingMessage;
+
+function handleMessage(message: Message) {
+    switch (message.type) {
+        case "load":
+            window.RufflePlayer = window.RufflePlayer || {};
+            window.RufflePlayer.config = {
+                ...window.RufflePlayer.config,
+                ...message.config,
+            };
+            window.RufflePlayer = PublicAPI.negotiate(
+                window.RufflePlayer!,
+                "extension",
+                new SourceAPI("extension")
+            );
+            return {};
+        case "ping":
+            // Ping back.
+            return {};
+        default:
+            // Ignore unknown messages.
+            return null;
+    }
+}
+
+let ID: string | null = null;
 if (
     document.currentScript !== undefined &&
     document.currentScript !== null &&
     "src" in document.currentScript &&
     document.currentScript.src !== ""
 ) {
-    // Default to the directory where this script resides.
     try {
-        uniqueMessageSuffix = new URL(
-            document.currentScript.src
-        ).searchParams.get("uniqueMessageSuffix");
+        ID = new URL(document.currentScript.src).searchParams.get("id");
     } catch (_) {
-        // uniqueMessageSuffix remains null.
+        // ID remains null.
     }
 }
-if (uniqueMessageSuffix) {
+
+if (ID) {
     window.addEventListener("message", (event) => {
         // We only accept messages from ourselves.
         if (event.source !== window) {
             return;
         }
 
-        const { type, index, data } = event.data;
-        if (type === `FROM_RUFFLE${uniqueMessageSuffix}`) {
-            // Ping back.
-            const message = {
-                type: `TO_RUFFLE${uniqueMessageSuffix}`,
-                index,
-                data,
-            };
-            window.postMessage(message, "*");
+        const { to, index, data } = event.data;
+        if (to === `ruffle_page${ID}`) {
+            const response = handleMessage(data);
+            if (response) {
+                const message = {
+                    to: `ruffle_content${ID}`,
+                    index,
+                    data: response,
+                };
+                window.postMessage(message, "*");
+            }
         }
     });
 }

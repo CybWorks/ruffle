@@ -1,11 +1,12 @@
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::object::value_object::ValueObject;
-use crate::avm1::{AvmString, Object, TObject};
+use crate::avm1::{Object, TObject};
 use crate::ecma_conversions::{
     f64_to_string, f64_to_wrapping_i16, f64_to_wrapping_i32, f64_to_wrapping_u16,
     f64_to_wrapping_u32,
 };
+use crate::string::AvmString;
 use gc_arena::Collect;
 use std::borrow::Cow;
 
@@ -238,18 +239,17 @@ impl<'gc> Value<'gc> {
         activation: &mut Activation<'_, 'gc, '_>,
     ) -> Result<Value<'gc>, Error<'gc>> {
         Ok(match self {
-            Value::Object(object) => object.call_method("valueOf", &[], activation)?,
+            Value::Object(object) => object.call_method("valueOf".into(), &[], activation)?,
             val => val.to_owned(),
         })
     }
 
     /// ECMA-262 2nd edition s. 11.8.5 Abstract relational comparison algorithm
-    #[allow(clippy::float_cmp)]
     pub fn abstract_lt(
         &self,
         other: Value<'gc>,
         activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Result<Value<'gc>, Error<'gc>> {
+    ) -> Result<Option<bool>, Error<'gc>> {
         let prim_self = self.to_primitive_num(activation)?;
         let prim_other = other.to_primitive_num(activation)?;
 
@@ -260,65 +260,49 @@ impl<'gc> Value<'gc> {
         let num_self = prim_self.primitive_as_number(activation);
         let num_other = prim_other.primitive_as_number(activation);
 
-        if num_self.is_nan() || num_other.is_nan() {
-            return Ok(Value::Undefined);
-        }
-
-        if num_self == num_other
-            || num_self == 0.0 && num_other == -0.0
-            || num_self == -0.0 && num_other == 0.0
-            || num_self.is_infinite() && num_self.is_sign_positive()
-            || num_other.is_infinite() && num_other.is_sign_negative()
-        {
-            return Ok(false.into());
-        }
-
-        if num_self.is_infinite() && num_self.is_sign_negative()
-            || num_other.is_infinite() && num_other.is_sign_positive()
-        {
-            return Ok(true.into());
-        }
-
-        Ok((num_self < num_other).into())
+        Ok(num_self
+            .partial_cmp(&num_other)
+            .map(|o| o == std::cmp::Ordering::Less))
     }
 
     /// ECMA-262 2nd edition s. 11.9.3 Abstract equality comparison algorithm
-    #[allow(clippy::unnested_or_patterns)]
     pub fn abstract_eq(
         &self,
         other: Value<'gc>,
         activation: &mut Activation<'_, 'gc, '_>,
         coerced: bool,
-    ) -> Result<Value<'gc>, Error<'gc>> {
+    ) -> Result<bool, Error<'gc>> {
         match (self, &other) {
-            (Value::Undefined, Value::Undefined) => Ok(true.into()),
-            (Value::Null, Value::Null) => Ok(true.into()),
+            (Value::Undefined, Value::Undefined) => Ok(true),
+            (Value::Null, Value::Null) => Ok(true),
             (Value::Number(a), Value::Number(b)) => {
                 if !coerced && a.is_nan() && b.is_nan() {
-                    return Ok(true.into());
+                    return Ok(true);
                 }
 
                 if a == b {
-                    return Ok(true.into());
+                    return Ok(true);
                 }
 
                 if *a == 0.0 && *b == -0.0 || *a == -0.0 && *b == 0.0 {
-                    return Ok(true.into());
+                    return Ok(true);
                 }
 
-                Ok(false.into())
+                Ok(false)
             }
-            (Value::String(a), Value::String(b)) => Ok((**a == **b).into()),
-            (Value::Bool(a), Value::Bool(b)) => Ok((a == b).into()),
-            (Value::Object(a), Value::Object(b)) => Ok(Object::ptr_eq(*a, *b).into()),
-            (Value::Object(a), Value::Undefined | Value::Null) => {
-                Ok(Object::ptr_eq(*a, activation.context.avm1.global_object_cell()).into())
-            }
-            (Value::Undefined | Value::Null, Value::Object(b)) => {
-                Ok(Object::ptr_eq(*b, activation.context.avm1.global_object_cell()).into())
-            }
-            (Value::Undefined, Value::Null) => Ok(true.into()),
-            (Value::Null, Value::Undefined) => Ok(true.into()),
+            (Value::String(a), Value::String(b)) => Ok(**a == **b),
+            (Value::Bool(a), Value::Bool(b)) => Ok(a == b),
+            (Value::Object(a), Value::Object(b)) => Ok(Object::ptr_eq(*a, *b)),
+            (Value::Object(a), Value::Undefined | Value::Null) => Ok(Object::ptr_eq(
+                *a,
+                activation.context.avm1.global_object_cell(),
+            )),
+            (Value::Undefined | Value::Null, Value::Object(b)) => Ok(Object::ptr_eq(
+                *b,
+                activation.context.avm1.global_object_cell(),
+            )),
+            (Value::Undefined, Value::Null) => Ok(true),
+            (Value::Null, Value::Undefined) => Ok(true),
             (Value::Number(_), Value::String(_)) => Ok(self.abstract_eq(
                 Value::Number(other.coerce_to_f64(activation)?),
                 activation,
@@ -338,7 +322,7 @@ impl<'gc> Value<'gc> {
             (Value::String(_), Value::Object(_)) => {
                 let non_obj_other = other.to_primitive_num(activation)?;
                 if !non_obj_other.is_primitive() {
-                    return Ok(false.into());
+                    return Ok(false);
                 }
 
                 Ok(self.abstract_eq(non_obj_other, activation, true)?)
@@ -346,7 +330,7 @@ impl<'gc> Value<'gc> {
             (Value::Number(_), Value::Object(_)) => {
                 let non_obj_other = other.to_primitive_num(activation)?;
                 if !non_obj_other.is_primitive() {
-                    return Ok(false.into());
+                    return Ok(false);
                 }
 
                 Ok(self.abstract_eq(non_obj_other, activation, true)?)
@@ -354,7 +338,7 @@ impl<'gc> Value<'gc> {
             (Value::Object(_), Value::String(_)) => {
                 let non_obj_self = self.to_primitive_num(activation)?;
                 if !non_obj_self.is_primitive() {
-                    return Ok(false.into());
+                    return Ok(false);
                 }
 
                 Ok(non_obj_self.abstract_eq(other, activation, true)?)
@@ -362,12 +346,12 @@ impl<'gc> Value<'gc> {
             (Value::Object(_), Value::Number(_)) => {
                 let non_obj_self = self.to_primitive_num(activation)?;
                 if !non_obj_self.is_primitive() {
-                    return Ok(false.into());
+                    return Ok(false);
                 }
 
                 Ok(non_obj_self.abstract_eq(other, activation, true)?)
             }
-            _ => Ok(false.into()),
+            _ => Ok(false),
         }
     }
 
@@ -436,10 +420,12 @@ impl<'gc> Value<'gc> {
         activation: &mut Activation<'_, 'gc, '_>,
     ) -> Result<AvmString<'gc>, Error<'gc>> {
         Ok(match self {
-            Value::Object(object) => match object.call_method("toString", &[], activation)? {
-                Value::String(s) => s,
-                _ => "[type Object]".into(),
-            },
+            Value::Object(object) => {
+                match object.call_method("toString".into(), &[], activation)? {
+                    Value::String(s) => s,
+                    _ => "[type Object]".into(),
+                }
+            }
             Value::Undefined => {
                 if activation.swf_version() >= 7 {
                     "undefined".into()
@@ -489,21 +475,6 @@ impl<'gc> Value<'gc> {
     pub fn coerce_to_object(&self, activation: &mut Activation<'_, 'gc, '_>) -> Object<'gc> {
         ValueObject::boxed(activation, self.to_owned())
     }
-
-    pub fn call(
-        &self,
-        name: &str,
-        activation: &mut Activation<'_, 'gc, '_>,
-        this: Object<'gc>,
-        base_proto: Option<Object<'gc>>,
-        args: &[Value<'gc>],
-    ) -> Result<Value<'gc>, Error<'gc>> {
-        if let Value::Object(object) = self {
-            object.call(name, activation, this, base_proto, args)
-        } else {
-            Ok(Value::Undefined)
-        }
-    }
 }
 
 #[cfg(test)]
@@ -516,7 +487,8 @@ mod test {
     use crate::avm1::object::{Object, TObject};
     use crate::avm1::property::Attribute;
     use crate::avm1::test_utils::with_avm;
-    use crate::avm1::{AvmString, Value};
+    use crate::avm1::Value;
+    use crate::string::AvmString;
 
     #[test]
     fn to_primitive_num() {
@@ -621,19 +593,19 @@ mod test {
             let a = Value::Number(1.0);
             let b = Value::Number(2.0);
 
-            assert_eq!(a.abstract_lt(b, activation).unwrap(), true.into());
+            assert_eq!(a.abstract_lt(b, activation).unwrap(), Some(true));
 
             let nan = Value::Number(f64::NAN);
-            assert_eq!(a.abstract_lt(nan, activation).unwrap(), Value::Undefined);
+            assert_eq!(a.abstract_lt(nan, activation).unwrap(), None);
 
             let inf = Value::Number(f64::INFINITY);
-            assert_eq!(a.abstract_lt(inf, activation).unwrap(), true.into());
+            assert_eq!(a.abstract_lt(inf, activation).unwrap(), Some(true));
 
             let neg_inf = Value::Number(f64::NEG_INFINITY);
-            assert_eq!(a.abstract_lt(neg_inf, activation).unwrap(), false.into());
+            assert_eq!(a.abstract_lt(neg_inf, activation).unwrap(), Some(false));
 
             let zero = Value::Number(0.0);
-            assert_eq!(a.abstract_lt(zero, activation).unwrap(), false.into());
+            assert_eq!(a.abstract_lt(zero, activation).unwrap(), Some(false));
 
             Ok(())
         });
@@ -645,19 +617,19 @@ mod test {
             let a = Value::Number(1.0);
             let b = Value::Number(2.0);
 
-            assert_eq!(b.abstract_lt(a, activation).unwrap(), false.into());
+            assert_eq!(b.abstract_lt(a, activation).unwrap(), Some(false));
 
             let nan = Value::Number(f64::NAN);
-            assert_eq!(nan.abstract_lt(a, activation).unwrap(), Value::Undefined);
+            assert_eq!(nan.abstract_lt(a, activation).unwrap(), None);
 
             let inf = Value::Number(f64::INFINITY);
-            assert_eq!(inf.abstract_lt(a, activation).unwrap(), false.into());
+            assert_eq!(inf.abstract_lt(a, activation).unwrap(), Some(false));
 
             let neg_inf = Value::Number(f64::NEG_INFINITY);
-            assert_eq!(neg_inf.abstract_lt(a, activation).unwrap(), true.into());
+            assert_eq!(neg_inf.abstract_lt(a, activation).unwrap(), Some(true));
 
             let zero = Value::Number(0.0);
-            assert_eq!(zero.abstract_lt(a, activation).unwrap(), true.into());
+            assert_eq!(zero.abstract_lt(a, activation).unwrap(), Some(true));
 
             Ok(())
         });
@@ -675,7 +647,7 @@ mod test {
                 "b".to_owned(),
             ));
 
-            assert_eq!(a.abstract_lt(b, activation).unwrap(), true.into());
+            assert_eq!(a.abstract_lt(b, activation).unwrap(), Some(true));
 
             Ok(())
         })
@@ -693,7 +665,7 @@ mod test {
                 "b".to_owned(),
             ));
 
-            assert_eq!(b.abstract_lt(a, activation).unwrap(), false.into());
+            assert_eq!(b.abstract_lt(a, activation).unwrap(), Some(false));
 
             Ok(())
         })

@@ -1,5 +1,5 @@
 import * as utils from "./utils";
-import { Options, bindBooleanOptions } from "./common";
+import { Options, bindOptions } from "./common";
 
 let activeTab: chrome.tabs.Tab | browser.tabs.Tab;
 let savedOptions: Options;
@@ -54,7 +54,9 @@ async function queryTabStatus(
 
     let response;
     try {
-        response = await utils.tabs.sendMessage(activeTab.id!, {});
+        response = await utils.tabs.sendMessage(activeTab.id!, {
+            type: "ping",
+        });
     } catch (e) {
         listener("status_result_protected");
         reloadButton.disabled = true;
@@ -66,7 +68,7 @@ async function queryTabStatus(
         return;
     }
 
-    tabOptions = response.tabSettings;
+    tabOptions = response.tabOptions;
 
     if (response.loaded) {
         listener("status_result_running");
@@ -112,7 +114,7 @@ function displayTabStatus() {
 }
 
 window.addEventListener("DOMContentLoaded", () => {
-    bindBooleanOptions((options) => {
+    bindOptions((options) => {
         savedOptions = options;
         optionsChanged();
     });

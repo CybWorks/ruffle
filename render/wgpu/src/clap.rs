@@ -4,17 +4,17 @@ pub enum GraphicsBackend {
     Vulkan,
     Metal,
     Dx12,
-    Dx11,
+    Gl,
 }
 
-impl From<GraphicsBackend> for wgpu::BackendBit {
+impl From<GraphicsBackend> for wgpu::Backends {
     fn from(backend: GraphicsBackend) -> Self {
         match backend {
-            GraphicsBackend::Default => wgpu::BackendBit::PRIMARY | wgpu::BackendBit::DX11,
-            GraphicsBackend::Vulkan => wgpu::BackendBit::VULKAN,
-            GraphicsBackend::Metal => wgpu::BackendBit::METAL,
-            GraphicsBackend::Dx12 => wgpu::BackendBit::DX12,
-            GraphicsBackend::Dx11 => wgpu::BackendBit::DX11,
+            GraphicsBackend::Default => wgpu::Backends::PRIMARY | wgpu::Backends::DX11,
+            GraphicsBackend::Vulkan => wgpu::Backends::VULKAN,
+            GraphicsBackend::Metal => wgpu::Backends::METAL,
+            GraphicsBackend::Dx12 => wgpu::Backends::DX12,
+            GraphicsBackend::Gl => wgpu::Backends::GL,
         }
     }
 }

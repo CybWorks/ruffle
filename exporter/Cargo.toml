@@ -2,18 +2,16 @@
 name = "exporter"
 version = "0.1.0"
 authors = ["Nathan Adams <dinnerbone@dinnerbone.com>"]
-edition = "2018"
+edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-clap = "3.0.0-beta.4"
+clap = "3.0.0-beta.5"
+futures = "0.3"
 ruffle_core = { path = "../core" }
 ruffle_render_wgpu = { path = "../render/wgpu", features = ["clap"] }
-env_logger = "0.9.0"
 image = "0.23.14"
 log = "0.4"
-futures = "0.3.17"
-path-slash = "0.1.4"
 walkdir = "2.3.2"
 indicatif = "0.16"
 

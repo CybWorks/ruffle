@@ -1,22 +1,19 @@
 //! Array-structured objects
 
-use crate::avm1::AvmString;
 use crate::avm2::activation::Activation;
 use crate::avm2::array::ArrayStorage;
-use crate::avm2::class::Class;
 use crate::avm2::names::{Namespace, QName};
 use crate::avm2::object::script_object::ScriptObjectData;
-use crate::avm2::object::{Object, ObjectPtr, TObject};
-use crate::avm2::scope::Scope;
+use crate::avm2::object::{ClassObject, Object, ObjectPtr, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
-use crate::{impl_avm2_custom_object, impl_avm2_custom_object_instance};
+use crate::string::AvmString;
 use gc_arena::{Collect, GcCell, MutationContext};
 use std::cell::{Ref, RefMut};
 
 /// A class instance allocator that allocates array objects.
 pub fn array_allocator<'gc>(
-    class: Object<'gc>,
+    class: ClassObject<'gc>,
     proto: Object<'gc>,
     activation: &mut Activation<'_, 'gc, '_>,
 ) -> Result<Object<'gc>, Error> {
@@ -71,15 +68,24 @@ impl<'gc> ArrayObject<'gc> {
         .into();
         instance.install_instance_traits(activation, class)?;
 
-        class.call_native_init(Some(instance), &[], activation, Some(class))?;
+        class.call_native_init(Some(instance), &[], activation)?;
 
         Ok(instance)
     }
 }
 
 impl<'gc> TObject<'gc> for ArrayObject<'gc> {
-    impl_avm2_custom_object!(base);
-    impl_avm2_custom_object_instance!(base);
+    fn base(&self) -> Ref<ScriptObjectData<'gc>> {
+        Ref::map(self.0.read(), |read| &read.base)
+    }
+
+    fn base_mut(&self, mc: MutationContext<'gc, '_>) -> RefMut<ScriptObjectData<'gc>> {
+        RefMut::map(self.0.write(mc), |write| &mut write.base)
+    }
+
+    fn as_ptr(&self) -> *const ObjectPtr {
+        self.0.as_ptr() as *const ObjectPtr
+    }
 
     fn get_property_local(
         self,
@@ -158,27 +164,19 @@ impl<'gc> TObject<'gc> for ArrayObject<'gc> {
         Ok(())
     }
 
-    fn is_property_overwritable(
-        self,
+    fn delete_property_local(
+        &self,
         gc_context: MutationContext<'gc, '_>,
         name: &QName<'gc>,
-    ) -> bool {
-        self.0.write(gc_context).base.is_property_overwritable(name)
-    }
-
-    fn is_property_final(self, name: &QName<'gc>) -> bool {
-        self.0.read().base.is_property_final(name)
-    }
-
-    fn delete_property(&self, gc_context: MutationContext<'gc, '_>, name: &QName<'gc>) -> bool {
+    ) -> Result<bool, Error> {
         if name.namespace().is_public() {
             if let Ok(index) = name.local_name().parse::<usize>() {
                 self.0.write(gc_context).array.delete(index);
-                return true;
+                return Ok(true);
             }
         }
 
-        self.0.write(gc_context).base.delete_property(name)
+        Ok(self.0.write(gc_context).base.delete_property(name))
     }
 
     fn has_own_property(self, name: &QName<'gc>) -> Result<bool, Error> {
@@ -199,6 +197,49 @@ impl<'gc> TObject<'gc> for ArrayObject<'gc> {
         }
 
         self.0.read().base.resolve_any(local_name)
+    }
+
+    fn get_next_enumerant(
+        self,
+        last_index: u32,
+        _activation: &mut Activation<'_, 'gc, '_>,
+    ) -> Result<Option<u32>, Error> {
+        let read = self.0.read();
+        let last_enumerant = read.base.get_last_enumerant();
+        let array_length = read.array.length() as u32;
+
+        if last_index < last_enumerant + array_length {
+            Ok(Some(last_index.saturating_add(1)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn get_enumerant_name(
+        self,
+        index: u32,
+        _activation: &mut Activation<'_, 'gc, '_>,
+    ) -> Result<Value<'gc>, Error> {
+        let arr_len = self.0.read().array.length() as u32;
+        if arr_len >= index {
+            Ok(index
+                .checked_sub(1)
+                .map(|index| index.into())
+                .unwrap_or(Value::Undefined))
+        } else {
+            Ok(self
+                .base()
+                .get_enumerant_name(index - arr_len)
+                .unwrap_or(Value::Undefined))
+        }
+    }
+
+    fn property_is_enumerable(&self, name: &QName<'gc>) -> bool {
+        name.local_name()
+            .parse::<u32>()
+            .map(|index| self.0.read().array.length() as u32 >= index)
+            .unwrap_or(false)
+            || self.base().property_is_enumerable(name)
     }
 
     fn to_string(&self, _mc: MutationContext<'gc, '_>) -> Result<Value<'gc>, Error> {

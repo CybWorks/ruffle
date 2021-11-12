@@ -4,14 +4,14 @@ use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::property::Attribute;
 use crate::avm1::property_map::PropertyMap;
-use crate::avm1::{AvmString, Object, ObjectPtr, ScriptObject, TDisplayObject, TObject, Value};
+use crate::avm1::{Object, ObjectPtr, ScriptObject, TDisplayObject, TObject, Value};
 use crate::avm_warn;
 use crate::context::UpdateContext;
 use crate::display_object::{DisplayObject, EditText, MovieClip, TDisplayObjectContainer};
-use crate::string_utils::swf_string_eq;
+use crate::string::utils::swf_string_eq;
+use crate::string::AvmString;
 use crate::types::Percent;
 use gc_arena::{Collect, GcCell, MutationContext};
-use std::borrow::Cow;
 use std::fmt;
 
 /// The type string for MovieClip objects.
@@ -67,14 +67,14 @@ impl<'gc> StageObject<'gc> {
         self,
         gc_context: MutationContext<'gc, '_>,
         text_field: EditText<'gc>,
-        variable_name: &str,
+        variable_name: AvmString<'gc>,
     ) {
         self.0
             .write(gc_context)
             .text_field_bindings
             .push(TextFieldBinding {
                 text_field,
-                variable_name: variable_name.to_string(),
+                variable_name,
             })
     }
 
@@ -146,7 +146,7 @@ impl<'gc> StageObject<'gc> {
 #[collect(no_drop)]
 struct TextFieldBinding<'gc> {
     text_field: EditText<'gc>,
-    variable_name: String,
+    variable_name: AvmString<'gc>,
 }
 
 impl fmt::Debug for StageObject<'_> {
@@ -162,9 +162,10 @@ impl fmt::Debug for StageObject<'_> {
 impl<'gc> TObject<'gc> for StageObject<'gc> {
     fn get_local_stored(
         &self,
-        name: &str,
+        name: impl Into<AvmString<'gc>>,
         activation: &mut Activation<'_, 'gc, '_>,
     ) -> Option<Value<'gc>> {
+        let name = name.into();
         let obj = self.0.read();
         let props = activation.context.avm1.display_properties;
         let case_sensitive = activation.is_case_sensitive();
@@ -173,14 +174,14 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
             // 1) Actual properties on the underlying object
             obj.base.get_local_stored(name, activation)
         } else if let Some(level) =
-            Self::get_level_by_path(name, &mut activation.context, case_sensitive)
+            Self::get_level_by_path(&name, &mut activation.context, case_sensitive)
         {
             // 2) _levelN
             Some(level)
         } else if let Some(child) = obj
             .display_object
             .as_container()
-            .and_then(|o| o.child_by_name(name, case_sensitive))
+            .and_then(|o| o.child_by_name(&name, case_sensitive))
         {
             // 3) Child display objects with the given instance name
             Some(child.object())
@@ -194,11 +195,10 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
 
     fn set_local(
         &self,
-        name: &str,
+        name: AvmString<'gc>,
         value: Value<'gc>,
         activation: &mut Activation<'_, 'gc, '_>,
         this: Object<'gc>,
-        base_proto: Option<Object<'gc>>,
     ) -> Result<(), Error<'gc>> {
         let obj = self.0.read();
         let props = activation.context.avm1.display_properties;
@@ -208,10 +208,10 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
         for binding in obj
             .text_field_bindings
             .iter()
-            .filter(|binding| swf_string_eq(&binding.variable_name, name, case_sensitive))
+            .filter(|binding| swf_string_eq(&binding.variable_name, &name, case_sensitive))
         {
             let _ = binding.text_field.set_html_text(
-                value.coerce_to_string(activation)?.to_string(),
+                &value.coerce_to_string(activation)?,
                 &mut activation.context,
             );
         }
@@ -222,36 +222,40 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
 
         if base.has_own_property(activation, name) {
             // 1) Actual properties on the underlying object
-            base.set_local(name, value, activation, this, base_proto)
+            base.set_local(name, value, activation, this)
         } else if let Some(property) = props.read().get_by_name(name) {
             // 2) Display object properties such as _x, _y
             property.set(activation, display_object, value)?;
             Ok(())
         } else {
             // 3) TODO: Prototype
-            base.set_local(name, value, activation, this, base_proto)
+            base.set_local(name, value, activation, this)
         }
     }
 
     fn call(
         &self,
-        name: &str,
+        name: AvmString<'gc>,
         activation: &mut Activation<'_, 'gc, '_>,
         this: Object<'gc>,
-        base_proto: Option<Object<'gc>>,
         args: &[Value<'gc>],
     ) -> Result<Value<'gc>, Error<'gc>> {
-        self.0
-            .read()
-            .base
-            .call(name, activation, this, base_proto, args)
+        self.0.read().base.call(name, activation, this, args)
     }
 
-    fn getter(&self, name: &str, activation: &mut Activation<'_, 'gc, '_>) -> Option<Object<'gc>> {
+    fn getter(
+        &self,
+        name: AvmString<'gc>,
+        activation: &mut Activation<'_, 'gc, '_>,
+    ) -> Option<Object<'gc>> {
         self.0.read().base.getter(name, activation)
     }
 
-    fn setter(&self, name: &str, activation: &mut Activation<'_, 'gc, '_>) -> Option<Object<'gc>> {
+    fn setter(
+        &self,
+        name: AvmString<'gc>,
+        activation: &mut Activation<'_, 'gc, '_>,
+    ) -> Option<Object<'gc>> {
         self.0.read().base.setter(name, activation)
     }
 
@@ -264,7 +268,7 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
         self.0.read().base.create_bare_object(activation, this)
     }
 
-    fn delete(&self, activation: &mut Activation<'_, 'gc, '_>, name: &str) -> bool {
+    fn delete(&self, activation: &mut Activation<'_, 'gc, '_>, name: AvmString<'gc>) -> bool {
         self.0.read().base.delete(activation, name)
     }
 
@@ -275,7 +279,7 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
     fn define_value(
         &self,
         gc_context: MutationContext<'gc, '_>,
-        name: &str,
+        name: impl Into<AvmString<'gc>>,
         value: Value<'gc>,
         attributes: Attribute,
     ) {
@@ -288,7 +292,7 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
     fn set_attributes(
         &self,
         gc_context: MutationContext<'gc, '_>,
-        name: Option<&str>,
+        name: Option<AvmString<'gc>>,
         set_attributes: Attribute,
         clear_attributes: Attribute,
     ) {
@@ -303,7 +307,7 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
     fn add_property(
         &self,
         gc_context: MutationContext<'gc, '_>,
-        name: &str,
+        name: AvmString<'gc>,
         get: Object<'gc>,
         set: Option<Object<'gc>>,
         attributes: Attribute,
@@ -317,7 +321,7 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
     fn add_property_with_case(
         &self,
         activation: &mut Activation<'_, 'gc, '_>,
-        name: &str,
+        name: AvmString<'gc>,
         get: Object<'gc>,
         set: Option<Object<'gc>>,
         attributes: Attribute,
@@ -331,16 +335,20 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
     fn call_watcher(
         &self,
         activation: &mut Activation<'_, 'gc, '_>,
-        name: &str,
+        name: AvmString<'gc>,
         value: &mut Value<'gc>,
+        this: Object<'gc>,
     ) -> Result<(), Error<'gc>> {
-        self.0.read().base.call_watcher(activation, name, value)
+        self.0
+            .read()
+            .base
+            .call_watcher(activation, name, value, this)
     }
 
     fn watch(
         &self,
         activation: &mut Activation<'_, 'gc, '_>,
-        name: Cow<str>,
+        name: AvmString<'gc>,
         callback: Object<'gc>,
         user_data: Value<'gc>,
     ) {
@@ -350,11 +358,11 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
             .watch(activation, name, callback, user_data);
     }
 
-    fn unwatch(&self, activation: &mut Activation<'_, 'gc, '_>, name: Cow<str>) -> bool {
+    fn unwatch(&self, activation: &mut Activation<'_, 'gc, '_>, name: AvmString<'gc>) -> bool {
         self.0.read().base.unwatch(activation, name)
     }
 
-    fn has_property(&self, activation: &mut Activation<'_, 'gc, '_>, name: &str) -> bool {
+    fn has_property(&self, activation: &mut Activation<'_, 'gc, '_>, name: AvmString<'gc>) -> bool {
         let obj = self.0.read();
         if obj.base.has_property(activation, name) {
             return true;
@@ -365,7 +373,7 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
             .avm1
             .display_properties
             .read()
-            .get_by_name(name)
+            .get_by_name(&name)
             .is_some()
         {
             return true;
@@ -375,44 +383,52 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
         if obj
             .display_object
             .as_container()
-            .and_then(|o| o.child_by_name(name, case_sensitive))
+            .and_then(|o| o.child_by_name(&name, case_sensitive))
             .is_some()
         {
             return true;
         }
 
-        if Self::get_level_by_path(name, &mut activation.context, case_sensitive).is_some() {
+        if Self::get_level_by_path(&name, &mut activation.context, case_sensitive).is_some() {
             return true;
         }
 
         false
     }
 
-    fn has_own_property(&self, activation: &mut Activation<'_, 'gc, '_>, name: &str) -> bool {
+    fn has_own_property(
+        &self,
+        activation: &mut Activation<'_, 'gc, '_>,
+        name: AvmString<'gc>,
+    ) -> bool {
         // Note that `hasOwnProperty` does NOT return true for child display objects.
         self.0.read().base.has_own_property(activation, name)
     }
 
-    fn has_own_virtual(&self, activation: &mut Activation<'_, 'gc, '_>, name: &str) -> bool {
+    fn has_own_virtual(
+        &self,
+        activation: &mut Activation<'_, 'gc, '_>,
+        name: AvmString<'gc>,
+    ) -> bool {
         self.0.read().base.has_own_virtual(activation, name)
     }
 
-    fn is_property_enumerable(&self, activation: &mut Activation<'_, 'gc, '_>, name: &str) -> bool {
+    fn is_property_enumerable(
+        &self,
+        activation: &mut Activation<'_, 'gc, '_>,
+        name: AvmString<'gc>,
+    ) -> bool {
         self.0.read().base.is_property_enumerable(activation, name)
     }
 
-    fn get_keys(&self, activation: &mut Activation<'_, 'gc, '_>) -> Vec<String> {
+    fn get_keys(&self, activation: &mut Activation<'_, 'gc, '_>) -> Vec<AvmString<'gc>> {
         // Keys from the underlying object are listed first, followed by
         // child display objects in order from highest depth to lowest depth.
         let obj = self.0.read();
         let mut keys = obj.base.get_keys(activation);
 
         if let Some(ctr) = obj.display_object.as_container() {
-            keys.extend(
-                ctr.iter_render_list()
-                    .rev()
-                    .map(|child| child.name().to_string()),
-            );
+            keys.extend(ctr.iter_render_list().rev().map(|child| child.name()));
         }
 
         keys
@@ -530,7 +546,7 @@ unsafe impl<'gc> Collect for DisplayProperty<'gc> {
 /// The map from key/index to function pointers for special display object properties.
 #[derive(Collect)]
 #[collect(no_drop)]
-pub struct DisplayPropertyMap<'gc>(PropertyMap<DisplayProperty<'gc>>);
+pub struct DisplayPropertyMap<'gc>(PropertyMap<'gc, DisplayProperty<'gc>>);
 
 impl<'gc> DisplayPropertyMap<'gc> {
     /// Creates the display property map.
@@ -539,38 +555,42 @@ impl<'gc> DisplayPropertyMap<'gc> {
 
         // Order is important:
         // should match the SWF specs for GetProperty/SetProperty.
-        property_map.add_property("_x", x, Some(set_x));
-        property_map.add_property("_y", y, Some(set_y));
-        property_map.add_property("_xscale", x_scale, Some(set_x_scale));
-        property_map.add_property("_yscale", y_scale, Some(set_y_scale));
-        property_map.add_property("_currentframe", current_frame, None);
-        property_map.add_property("_totalframes", total_frames, None);
-        property_map.add_property("_alpha", alpha, Some(set_alpha));
-        property_map.add_property("_visible", visible, Some(set_visible));
-        property_map.add_property("_width", width, Some(set_width));
-        property_map.add_property("_height", height, Some(set_height));
-        property_map.add_property("_rotation", rotation, Some(set_rotation));
-        property_map.add_property("_target", target, None);
-        property_map.add_property("_framesloaded", frames_loaded, None);
-        property_map.add_property("_name", name, Some(set_name));
-        property_map.add_property("_droptarget", drop_target, None);
-        property_map.add_property("_url", url, None);
-        property_map.add_property("_highquality", high_quality, Some(set_high_quality));
-        property_map.add_property("_focusrect", focus_rect, Some(set_focus_rect));
-        property_map.add_property("_soundbuftime", sound_buf_time, Some(set_sound_buf_time));
-        property_map.add_property("_quality", quality, Some(set_quality));
-        property_map.add_property("_xmouse", x_mouse, None);
-        property_map.add_property("_ymouse", y_mouse, None);
+        property_map.add_property("_x".into(), x, Some(set_x));
+        property_map.add_property("_y".into(), y, Some(set_y));
+        property_map.add_property("_xscale".into(), x_scale, Some(set_x_scale));
+        property_map.add_property("_yscale".into(), y_scale, Some(set_y_scale));
+        property_map.add_property("_currentframe".into(), current_frame, None);
+        property_map.add_property("_totalframes".into(), total_frames, None);
+        property_map.add_property("_alpha".into(), alpha, Some(set_alpha));
+        property_map.add_property("_visible".into(), visible, Some(set_visible));
+        property_map.add_property("_width".into(), width, Some(set_width));
+        property_map.add_property("_height".into(), height, Some(set_height));
+        property_map.add_property("_rotation".into(), rotation, Some(set_rotation));
+        property_map.add_property("_target".into(), target, None);
+        property_map.add_property("_framesloaded".into(), frames_loaded, None);
+        property_map.add_property("_name".into(), name, Some(set_name));
+        property_map.add_property("_droptarget".into(), drop_target, None);
+        property_map.add_property("_url".into(), url, None);
+        property_map.add_property("_highquality".into(), high_quality, Some(set_high_quality));
+        property_map.add_property("_focusrect".into(), focus_rect, Some(set_focus_rect));
+        property_map.add_property(
+            "_soundbuftime".into(),
+            sound_buf_time,
+            Some(set_sound_buf_time),
+        );
+        property_map.add_property("_quality".into(), quality, Some(set_quality));
+        property_map.add_property("_xmouse".into(), x_mouse, None);
+        property_map.add_property("_ymouse".into(), y_mouse, None);
 
         GcCell::allocate(gc_context, property_map)
     }
 
     /// Gets a property slot by name.
     /// Used by `GetMember`, `GetVariable`, `SetMember`, and `SetVariable`.
-    pub fn get_by_name(&self, name: &str) -> Option<&DisplayProperty<'gc>> {
+    pub fn get_by_name(&self, name: impl AsRef<str>) -> Option<&DisplayProperty<'gc>> {
         // Display object properties are case insensitive, regardless of SWF version!?
         // TODO: Another string alloc; optimize this eventually.
-        self.0.get(name, false)
+        self.0.get(name.as_ref(), false)
     }
 
     /// Gets a property slot by SWF4 index.
@@ -583,7 +603,7 @@ impl<'gc> DisplayPropertyMap<'gc> {
 
     fn add_property(
         &mut self,
-        name: &str,
+        name: AvmString<'gc>,
         get: DisplayGetter<'gc>,
         set: Option<DisplaySetter<'gc>>,
     ) {
@@ -782,7 +802,7 @@ fn set_name<'gc>(
     val: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     let name = val.coerce_to_string(activation)?;
-    this.set_name(activation.context.gc_context, &name);
+    this.set_name(activation.context.gc_context, name);
     Ok(())
 }
 

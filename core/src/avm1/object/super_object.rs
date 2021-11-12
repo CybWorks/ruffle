@@ -2,14 +2,13 @@
 
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
+use crate::avm1::function::ExecutionReason;
 use crate::avm1::object::script_object::TYPE_OF_OBJECT;
 use crate::avm1::object::search_prototype;
 use crate::avm1::property::Attribute;
-use crate::avm1::{Object, ObjectPtr, ScriptObject, TObject, Value};
-use crate::avm_warn;
+use crate::avm1::{AvmString, Object, ObjectPtr, ScriptObject, TObject, Value};
 use crate::display_object::DisplayObject;
 use gc_arena::{Collect, GcCell, MutationContext};
-use std::borrow::Cow;
 
 /// Implementation of the `super` object in AS2.
 ///
@@ -26,42 +25,49 @@ pub struct SuperObjectData<'gc> {
     /// The object present as `this` throughout the superchain.
     this: Object<'gc>,
 
-    /// The `proto` that the currently-executing method was pulled from.
-    base_proto: Object<'gc>,
+    /// The prototype depth of the currently-executing method.
+    depth: u8,
 }
 
 impl<'gc> SuperObject<'gc> {
     /// Construct a `super` for an incoming stack frame.
-    ///
-    /// `this` and `base_proto` must be the values provided to `Executable::exec`.
-    pub fn new(
-        activation: &mut Activation<'_, 'gc, '_>,
-        this: Object<'gc>,
-        base_proto: Object<'gc>,
-    ) -> Self {
+    pub fn new(activation: &mut Activation<'_, 'gc, '_>, this: Object<'gc>, depth: u8) -> Self {
         Self(GcCell::allocate(
             activation.context.gc_context,
-            SuperObjectData { this, base_proto },
+            SuperObjectData { this, depth },
         ))
+    }
+
+    pub fn this(&self) -> Object<'gc> {
+        self.0.read().this
+    }
+
+    fn base_proto(&self, activation: &mut Activation<'_, 'gc, '_>) -> Object<'gc> {
+        let read = self.0.read();
+        let depth = read.depth;
+        let mut proto = read.this;
+        for _ in 0..depth {
+            proto = proto.proto(activation).coerce_to_object(activation);
+        }
+        proto
     }
 }
 
 impl<'gc> TObject<'gc> for SuperObject<'gc> {
     fn get_local_stored(
         &self,
-        _name: &str,
+        _name: impl Into<AvmString<'gc>>,
         _activation: &mut Activation<'_, 'gc, '_>,
     ) -> Option<Value<'gc>> {
-        Some(Value::Undefined)
+        None
     }
 
     fn set_local(
         &self,
-        _name: &str,
+        _name: AvmString<'gc>,
         _value: Value<'gc>,
         _activation: &mut Activation<'_, 'gc, '_>,
         _this: Object<'gc>,
-        _base_proto: Option<Object<'gc>>,
     ) -> Result<(), Error<'gc>> {
         //TODO: What happens if you set `super.__proto__`?
         Ok(())
@@ -69,45 +75,69 @@ impl<'gc> TObject<'gc> for SuperObject<'gc> {
 
     fn call(
         &self,
-        name: &str,
+        name: AvmString<'gc>,
         activation: &mut Activation<'_, 'gc, '_>,
         _this: Object<'gc>,
-        _base_proto: Option<Object<'gc>>,
         args: &[Value<'gc>],
     ) -> Result<Value<'gc>, Error<'gc>> {
-        if let Value::Object(proto) = self.proto(activation) {
-            let constructor = proto
-                .get("__constructor__", activation)?
-                .coerce_to_object(activation);
-            let this = self.0.read().this;
-            constructor.call(name, activation, this, Some(proto), args)
-        } else {
-            Ok(Value::Undefined)
+        let constructor = self
+            .base_proto(activation)
+            .get("__constructor__", activation)?
+            .coerce_to_object(activation);
+        match constructor.as_executable() {
+            Some(exec) => exec.exec(
+                &name,
+                activation,
+                self.0.read().this,
+                self.0.read().depth + 1,
+                args,
+                ExecutionReason::FunctionCall,
+                constructor,
+            ),
+            None => Ok(Value::Undefined),
         }
     }
 
     fn call_method(
         &self,
-        name: &str,
+        name: AvmString<'gc>,
         args: &[Value<'gc>],
         activation: &mut Activation<'_, 'gc, '_>,
     ) -> Result<Value<'gc>, Error<'gc>> {
         let this = self.0.read().this;
-        let (method, base_proto) =
-            search_prototype(self.proto(activation), name, activation, this)?;
+        let (method, depth) =
+            match search_prototype(self.proto(activation), name, activation, this)? {
+                Some((Value::Object(method), depth)) => (method, depth),
+                _ => return Ok(Value::Undefined),
+            };
 
-        if method.is_primitive() {
-            avm_warn!(activation, "Super method {} is not callable", name);
+        match method.as_executable() {
+            Some(exec) => exec.exec(
+                &name,
+                activation,
+                this,
+                self.0.read().depth + depth + 1,
+                args,
+                ExecutionReason::FunctionCall,
+                method,
+            ),
+            None => method.call(name, activation, this, args),
         }
-
-        method.call(name, activation, this, base_proto, args)
     }
 
-    fn getter(&self, name: &str, activation: &mut Activation<'_, 'gc, '_>) -> Option<Object<'gc>> {
+    fn getter(
+        &self,
+        name: AvmString<'gc>,
+        activation: &mut Activation<'_, 'gc, '_>,
+    ) -> Option<Object<'gc>> {
         self.0.read().this.getter(name, activation)
     }
 
-    fn setter(&self, name: &str, activation: &mut Activation<'_, 'gc, '_>) -> Option<Object<'gc>> {
+    fn setter(
+        &self,
+        name: AvmString<'gc>,
+        activation: &mut Activation<'_, 'gc, '_>,
+    ) -> Option<Object<'gc>> {
         self.0.read().this.setter(name, activation)
     }
 
@@ -125,19 +155,19 @@ impl<'gc> TObject<'gc> for SuperObject<'gc> {
         }
     }
 
-    fn delete(&self, _activation: &mut Activation<'_, 'gc, '_>, _name: &str) -> bool {
+    fn delete(&self, _activation: &mut Activation<'_, 'gc, '_>, _name: AvmString<'gc>) -> bool {
         //`super` cannot have properties deleted from it
         false
     }
 
     fn proto(&self, activation: &mut Activation<'_, 'gc, '_>) -> Value<'gc> {
-        self.0.read().base_proto.proto(activation)
+        self.base_proto(activation).proto(activation)
     }
 
     fn define_value(
         &self,
         _gc_context: MutationContext<'gc, '_>,
-        _name: &str,
+        _name: impl Into<AvmString<'gc>>,
         _value: Value<'gc>,
         _attributes: Attribute,
     ) {
@@ -147,7 +177,7 @@ impl<'gc> TObject<'gc> for SuperObject<'gc> {
     fn set_attributes(
         &self,
         _gc_context: MutationContext<'gc, '_>,
-        _name: Option<&str>,
+        _name: Option<AvmString<'gc>>,
         _set_attributes: Attribute,
         _clear_attributes: Attribute,
     ) {
@@ -157,7 +187,7 @@ impl<'gc> TObject<'gc> for SuperObject<'gc> {
     fn add_property(
         &self,
         _gc_context: MutationContext<'gc, '_>,
-        _name: &str,
+        _name: AvmString<'gc>,
         _get: Object<'gc>,
         _set: Option<Object<'gc>>,
         _attributes: Attribute,
@@ -168,7 +198,7 @@ impl<'gc> TObject<'gc> for SuperObject<'gc> {
     fn add_property_with_case(
         &self,
         _activation: &mut Activation<'_, 'gc, '_>,
-        _name: &str,
+        _name: AvmString<'gc>,
         _get: Object<'gc>,
         _set: Option<Object<'gc>>,
         _attributes: Attribute,
@@ -179,44 +209,60 @@ impl<'gc> TObject<'gc> for SuperObject<'gc> {
     fn call_watcher(
         &self,
         activation: &mut Activation<'_, 'gc, '_>,
-        name: &str,
+        name: AvmString<'gc>,
         value: &mut Value<'gc>,
+        this: Object<'gc>,
     ) -> Result<(), Error<'gc>> {
-        self.0.read().this.call_watcher(activation, name, value)
+        self.0
+            .read()
+            .this
+            .call_watcher(activation, name, value, this)
     }
 
     fn watch(
         &self,
         _activation: &mut Activation<'_, 'gc, '_>,
-        _name: Cow<str>,
+        _name: AvmString<'gc>,
         _callback: Object<'gc>,
         _user_data: Value<'gc>,
     ) {
         //`super` cannot have properties defined on it
     }
 
-    fn unwatch(&self, _activation: &mut Activation<'_, 'gc, '_>, _name: Cow<str>) -> bool {
+    fn unwatch(&self, _activation: &mut Activation<'_, 'gc, '_>, _name: AvmString<'gc>) -> bool {
         //`super` cannot have properties defined on it
         false
     }
 
-    fn has_property(&self, activation: &mut Activation<'_, 'gc, '_>, name: &str) -> bool {
+    fn has_property(&self, activation: &mut Activation<'_, 'gc, '_>, name: AvmString<'gc>) -> bool {
         self.0.read().this.has_property(activation, name)
     }
 
-    fn has_own_property(&self, activation: &mut Activation<'_, 'gc, '_>, name: &str) -> bool {
+    fn has_own_property(
+        &self,
+        activation: &mut Activation<'_, 'gc, '_>,
+        name: AvmString<'gc>,
+    ) -> bool {
         self.0.read().this.has_own_property(activation, name)
     }
 
-    fn has_own_virtual(&self, activation: &mut Activation<'_, 'gc, '_>, name: &str) -> bool {
+    fn has_own_virtual(
+        &self,
+        activation: &mut Activation<'_, 'gc, '_>,
+        name: AvmString<'gc>,
+    ) -> bool {
         self.0.read().this.has_own_virtual(activation, name)
     }
 
-    fn is_property_enumerable(&self, activation: &mut Activation<'_, 'gc, '_>, name: &str) -> bool {
+    fn is_property_enumerable(
+        &self,
+        activation: &mut Activation<'_, 'gc, '_>,
+        name: AvmString<'gc>,
+    ) -> bool {
         self.0.read().this.is_property_enumerable(activation, name)
     }
 
-    fn get_keys(&self, _activation: &mut Activation<'_, 'gc, '_>) -> Vec<String> {
+    fn get_keys(&self, _activation: &mut Activation<'_, 'gc, '_>) -> Vec<AvmString<'gc>> {
         vec![]
     }
 

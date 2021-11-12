@@ -27,25 +27,25 @@ pub fn format_list<'a>(values: &[&'a str], connector: &'a str) -> Cow<'a, str> {
     }
 }
 
-pub fn get_backend_names(backends: wgpu::BackendBit) -> Vec<&'static str> {
+pub fn get_backend_names(backends: wgpu::Backends) -> Vec<&'static str> {
     let mut names = Vec::new();
 
-    if backends.contains(wgpu::BackendBit::VULKAN) {
+    if backends.contains(wgpu::Backends::VULKAN) {
         names.push("Vulkan");
     }
-    if backends.contains(wgpu::BackendBit::DX12) {
+    if backends.contains(wgpu::Backends::DX12) {
         names.push("DirectX 12");
     }
-    if backends.contains(wgpu::BackendBit::DX11) {
+    if backends.contains(wgpu::Backends::DX11) {
         names.push("DirectX 11");
     }
-    if backends.contains(wgpu::BackendBit::METAL) {
+    if backends.contains(wgpu::Backends::METAL) {
         names.push("Metal");
     }
-    if backends.contains(wgpu::BackendBit::GL) {
+    if backends.contains(wgpu::Backends::GL) {
         names.push("Open GL");
     }
-    if backends.contains(wgpu::BackendBit::BROWSER_WEBGPU) {
+    if backends.contains(wgpu::Backends::BROWSER_WEBGPU) {
         names.push("Web GPU");
     }
 
@@ -55,7 +55,7 @@ pub fn get_backend_names(backends: wgpu::BackendBit) -> Vec<&'static str> {
 pub fn create_buffer_with_data(
     device: &wgpu::Device,
     data: &[u8],
-    usage: wgpu::BufferUsage,
+    usage: wgpu::BufferUsages,
     label: Option<String>,
 ) -> wgpu::Buffer {
     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -75,6 +75,7 @@ pub struct BufferDimensions {
 }
 
 impl BufferDimensions {
+    #[allow(dead_code)]
     pub fn new(width: usize, height: usize) -> Self {
         let bytes_per_pixel = size_of::<u32>();
         let unpadded_bytes_per_row = width * bytes_per_pixel;

@@ -4,13 +4,12 @@ use flate2::Compression;
 use gc_arena::Collect;
 use std::cell::Cell;
 use std::cmp;
-use std::convert::{TryFrom, TryInto};
 use std::fmt::{self, Display, Formatter};
 use std::io::prelude::*;
 use std::io::{self, Read, SeekFrom};
 use std::str::FromStr;
 
-#[derive(Clone, Collect, Debug)]
+#[derive(Clone, Collect, Debug, Copy, PartialEq, Eq)]
 #[collect(no_drop)]
 pub enum Endian {
     Big,
@@ -48,6 +47,13 @@ impl FromStr for CompressionAlgorithm {
     }
 }
 
+#[derive(Clone, Collect, Debug, Copy, PartialEq, Eq)]
+#[collect(no_drop)]
+pub enum ObjectEncoding {
+    Amf0 = 0,
+    Amf3 = 3,
+}
+
 #[derive(Clone, Collect, Debug)]
 #[collect(no_drop)]
 pub struct ByteArrayStorage {
@@ -59,6 +65,9 @@ pub struct ByteArrayStorage {
 
     /// This represents what endian to use while reading/writing data.
     endian: Endian,
+
+    /// The encoding used when serializing/deserializing using readObject/writeObject
+    object_encoding: ObjectEncoding,
 }
 
 impl ByteArrayStorage {
@@ -68,6 +77,17 @@ impl ByteArrayStorage {
             bytes: Vec::new(),
             position: Cell::new(0),
             endian: Endian::Big,
+            object_encoding: ObjectEncoding::Amf3,
+        }
+    }
+
+    /// Create a new ByteArrayStorage using an already existing vector
+    pub fn from_vec(bytes: Vec<u8>) -> ByteArrayStorage {
+        ByteArrayStorage {
+            bytes,
+            position: Cell::new(0),
+            endian: Endian::Big,
+            object_encoding: ObjectEncoding::Amf3,
         }
     }
 
@@ -76,6 +96,13 @@ impl ByteArrayStorage {
     pub fn write_bytes(&mut self, buf: &[u8]) -> Result<(), Error> {
         self.write_at(buf, self.position.get())?;
         self.position.set(self.position.get() + buf.len());
+        Ok(())
+    }
+
+    #[inline]
+    pub fn write_bytes_within(&mut self, start: usize, amnt: usize) -> Result<(), Error> {
+        self.write_at_within(start, amnt, self.position.get())?;
+        self.position.set(self.position.get() + amnt);
         Ok(())
     }
 
@@ -105,13 +132,10 @@ impl ByteArrayStorage {
         if self.len() < new_len {
             self.set_length(new_len);
         }
-        // SAFETY:
-        // The storage is garunteed to be at least the size of new_len because we just resized it.
-        unsafe {
-            self.bytes
-                .get_unchecked_mut(offset..new_len)
-                .copy_from_slice(buf)
-        }
+        self.bytes
+            .get_mut(offset..new_len)
+            .expect("ByteArray write out of bounds")
+            .copy_from_slice(buf);
         Ok(())
     }
 
@@ -123,6 +147,32 @@ impl ByteArrayStorage {
             .and_then(|bytes| bytes.get_mut(..buf.len()))
             .ok_or("RangeError: The specified range is invalid")?
             .copy_from_slice(buf);
+        Ok(())
+    }
+
+    /// Write bytes at any offset in the ByteArray from within the current ByteArray using a memmove.
+    /// Will automatically grow the ByteArray to fit the new buffer
+    pub fn write_at_within(
+        &mut self,
+        start: usize,
+        amnt: usize,
+        offset: usize,
+    ) -> Result<(), Error> {
+        // First verify that reading from `start` to `amnt` is valid
+        let end = start
+            .checked_add(amnt)
+            .filter(|result| *result <= self.len())
+            .ok_or("RangeError: Reached EOF")?;
+
+        // Second we resize our underlying buffer to ensure that writing `amnt` from `offset` is valid.
+        let new_len = offset
+            .checked_add(amnt)
+            .ok_or("RangeError: Cannot overflow usize")?;
+        if self.len() < new_len {
+            self.set_length(new_len);
+        }
+
+        self.bytes.copy_within(start..end, offset);
         Ok(())
     }
 
@@ -229,7 +279,7 @@ impl ByteArrayStorage {
     }
 
     #[inline]
-    pub fn bytes(&self) -> &Vec<u8> {
+    pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
 
@@ -254,18 +304,23 @@ impl ByteArrayStorage {
     }
 
     #[inline]
-    pub fn add_position(&self, amnt: usize) {
-        self.position.set(self.position.get() + amnt);
-    }
-
-    #[inline]
-    pub fn endian(&self) -> &Endian {
-        &self.endian
+    pub fn endian(&self) -> Endian {
+        self.endian
     }
 
     #[inline]
     pub fn set_endian(&mut self, new_endian: Endian) {
         self.endian = new_endian;
+    }
+
+    #[inline]
+    pub fn object_encoding(&self) -> ObjectEncoding {
+        self.object_encoding
+    }
+
+    #[inline]
+    pub fn set_object_encoding(&mut self, new_object_encoding: ObjectEncoding) {
+        self.object_encoding = new_object_encoding;
     }
 
     #[inline]

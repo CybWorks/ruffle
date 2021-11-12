@@ -23,8 +23,8 @@ pub fn instance_init<'gc>(
 
         if this.as_sound().is_none() {
             let class_object = this
-                .as_class_object()
-                .ok_or("Attempted to construct non-instance Sound.")?;
+                .instance_of()
+                .ok_or("Attempted to construct Sound on a bare object.")?;
 
             if let Some((movie, symbol)) = activation
                 .context
@@ -40,7 +40,7 @@ pub fn instance_init<'gc>(
                 {
                     this.set_sound(activation.context.gc_context, *sound);
                 } else {
-                    log::warn!("Attempted to construct subclass of Sound, {}, which is associated with non-Sound character {}", class_object.as_class().expect("Class object is also a class").read().name().local_name(), symbol);
+                    log::warn!("Attempted to construct subclass of Sound, {}, which is associated with non-Sound character {}", class_object.inner_class_definition().read().name().local_name(), symbol);
                 }
             }
         }
@@ -124,7 +124,7 @@ pub fn play<'gc>(
             .get(1)
             .cloned()
             .unwrap_or_else(|| 0.into())
-            .coerce_to_i32(activation)? as u16;
+            .coerce_to_i32(activation)?;
         let sound_transform = args
             .get(2)
             .cloned()
@@ -138,14 +138,8 @@ pub fn play<'gc>(
             }
         }
 
-        let sample_rate = if let Some(format) = activation.context.audio.get_sound_format(sound) {
-            format.sample_rate
-        } else {
-            return Ok(Value::Null);
-        };
-
         let in_sample = if position > 0.0 {
-            Some((position / 1000.0 * sample_rate as f64) as u32)
+            Some((position / 1000.0 * 44100.0) as u32)
         } else {
             None
         };
@@ -154,7 +148,7 @@ pub fn play<'gc>(
             event: SoundEvent::Start,
             in_sample,
             out_sample: None,
-            num_loops,
+            num_loops: num_loops.max(1) as u16,
             envelope: None,
         };
 

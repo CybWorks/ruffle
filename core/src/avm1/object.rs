@@ -21,17 +21,16 @@ use crate::avm1::object::drop_shadow_filter::DropShadowFilterObject;
 use crate::avm1::object::glow_filter::GlowFilterObject;
 use crate::avm1::object::gradient_bevel_filter::GradientBevelFilterObject;
 use crate::avm1::object::gradient_glow_filter::GradientGlowFilterObject;
+use crate::avm1::object::text_format_object::TextFormatObject;
 use crate::avm1::object::transform_object::TransformObject;
 use crate::avm1::object::xml_attributes_object::XmlAttributesObject;
 use crate::avm1::object::xml_idmap_object::XmlIdMapObject;
 use crate::avm1::object::xml_object::XmlObject;
-use crate::avm1::{ScriptObject, SoundObject, StageObject, Value};
-use crate::avm_warn;
+use crate::avm1::{AvmString, ScriptObject, SoundObject, StageObject, Value};
 use crate::display_object::DisplayObject;
 use crate::xml::XmlNode;
 use gc_arena::{Collect, MutationContext};
 use ruffle_macros::enum_trait_object;
-use std::borrow::Cow;
 use std::fmt::Debug;
 
 pub mod array_object;
@@ -53,6 +52,7 @@ pub mod shared_object;
 pub mod sound_object;
 pub mod stage_object;
 pub mod super_object;
+pub mod text_format_object;
 pub mod transform_object;
 pub mod value_object;
 pub mod xml_attributes_object;
@@ -90,6 +90,7 @@ pub mod xml_object;
         GradientGlowFilterObject(GradientGlowFilterObject<'gc>),
         DateObject(DateObject<'gc>),
         BitmapData(BitmapDataObject<'gc>),
+        TextFormatObject(TextFormatObject<'gc>),
     }
 )]
 pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy {
@@ -99,24 +100,32 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     /// `get_stored` to do ordinary property look-up and resolution.
     fn get_local_stored(
         &self,
-        name: &str,
+        name: impl Into<AvmString<'gc>>,
         activation: &mut Activation<'_, 'gc, '_>,
     ) -> Option<Value<'gc>>;
 
     /// Retrieve a named property from the object, or its prototype.
     fn get(
         &self,
-        name: &str,
+        name: impl Into<AvmString<'gc>>,
         activation: &mut Activation<'_, 'gc, '_>,
     ) -> Result<Value<'gc>, Error<'gc>> {
-        let this = (*self).into();
-        Ok(search_prototype(Value::Object(this), name, activation, this)?.0)
+        // TODO: Extract logic to a `lookup` function.
+        let (this, proto) = if let Some(super_object) = self.as_super_object() {
+            (super_object.this(), super_object.proto(activation))
+        } else {
+            ((*self).into(), Value::Object((*self).into()))
+        };
+        match search_prototype(proto, name.into(), activation, this)? {
+            Some((value, _depth)) => Ok(value),
+            None => Ok(Value::Undefined),
+        }
     }
 
     /// Retrieve a non-virtual property from the object, or its prototype.
     fn get_stored(
         &self,
-        name: &str,
+        name: AvmString<'gc>,
         activation: &mut Activation<'_, 'gc, '_>,
     ) -> Result<Value<'gc>, Error<'gc>> {
         let this = (*self).into();
@@ -142,32 +151,35 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
 
     fn set_local(
         &self,
-        name: &str,
+        name: AvmString<'gc>,
         value: Value<'gc>,
         activation: &mut Activation<'_, 'gc, '_>,
         this: Object<'gc>,
-        base_proto: Option<Object<'gc>>,
     ) -> Result<(), Error<'gc>>;
 
     /// Set a named property on this object, or its prototype.
     fn set(
         &self,
-        name: &str,
+        name: impl Into<AvmString<'gc>>,
         value: Value<'gc>,
         activation: &mut Activation<'_, 'gc, '_>,
     ) -> Result<(), Error<'gc>> {
+        let name = name.into();
         if name.is_empty() {
             return Ok(());
         }
 
         let mut value = value;
-        let watcher_result = self.call_watcher(activation, name, &mut value);
+        let (this, mut proto) = if let Some(super_object) = self.as_super_object() {
+            (super_object.this(), super_object.proto(activation))
+        } else {
+            ((*self).into(), Value::Object((*self).into()))
+        };
+        let watcher_result = self.call_watcher(activation, name, &mut value, this);
 
-        let this = (*self).into();
         if !self.has_own_property(activation, name) {
             // Before actually inserting a new property, we need to crawl the
             // prototype chain for virtual setters.
-            let mut proto = Value::Object(this);
             while let Value::Object(this_proto) = proto {
                 if this_proto.has_own_virtual(activation, name) {
                     if let Some(setter) = this_proto.setter(name, activation) {
@@ -176,7 +188,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
                                 "[Setter]",
                                 activation,
                                 this,
-                                Some(this_proto),
+                                1,
                                 &[value],
                                 ExecutionReason::Special,
                                 setter,
@@ -190,7 +202,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
             }
         }
 
-        let result = self.set_local(name, value, activation, this, Some(this));
+        let result = self.set_local(name, value, activation, this);
         watcher_result.and(result)
     }
 
@@ -201,10 +213,9 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     /// it can be changed by `Function.apply`/`Function.call`.
     fn call(
         &self,
-        name: &str,
+        name: AvmString<'gc>,
         activation: &mut Activation<'_, 'gc, '_>,
         this: Object<'gc>,
-        base_proto: Option<Object<'gc>>,
         args: &[Value<'gc>],
     ) -> Result<Value<'gc>, Error<'gc>>;
 
@@ -237,25 +248,47 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     /// `this` parameter.
     fn call_method(
         &self,
-        name: &str,
+        name: AvmString<'gc>,
         args: &[Value<'gc>],
         activation: &mut Activation<'_, 'gc, '_>,
     ) -> Result<Value<'gc>, Error<'gc>> {
         let this = (*self).into();
-        let (method, base_proto) = search_prototype(Value::Object(this), name, activation, this)?;
+        let (method, depth) = match search_prototype(Value::Object(this), name, activation, this)? {
+            Some((Value::Object(method), depth)) => (method, depth),
+            _ => return Ok(Value::Undefined),
+        };
 
-        if method.is_primitive() {
-            avm_warn!(activation, "Object method {} is not callable", name);
+        // If the method was found on the object itself, change `depth` as-if
+        // the method was found on the object's prototype.
+        let depth = depth.max(1);
+
+        match method.as_executable() {
+            Some(exec) => exec.exec(
+                &name,
+                activation,
+                this,
+                depth,
+                args,
+                ExecutionReason::FunctionCall,
+                method,
+            ),
+            None => method.call(name, activation, this, args),
         }
-
-        method.call(name, activation, this, base_proto, args)
     }
 
     /// Retrive a getter defined on this object.
-    fn getter(&self, name: &str, activation: &mut Activation<'_, 'gc, '_>) -> Option<Object<'gc>>;
+    fn getter(
+        &self,
+        name: AvmString<'gc>,
+        activation: &mut Activation<'_, 'gc, '_>,
+    ) -> Option<Object<'gc>>;
 
     /// Retrive a setter defined on this object.
-    fn setter(&self, name: &str, activation: &mut Activation<'_, 'gc, '_>) -> Option<Object<'gc>>;
+    fn setter(
+        &self,
+        name: AvmString<'gc>,
+        activation: &mut Activation<'_, 'gc, '_>,
+    ) -> Option<Object<'gc>>;
 
     /// Construct a host object of some kind and return its cell.
     ///
@@ -273,7 +306,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     /// Delete a named property from the object.
     ///
     /// Returns false if the property cannot be deleted.
-    fn delete(&self, activation: &mut Activation<'_, 'gc, '_>, name: &str) -> bool;
+    fn delete(&self, activation: &mut Activation<'_, 'gc, '_>, name: AvmString<'gc>) -> bool;
 
     /// Retrieve the `__proto__` of a given object.
     ///
@@ -296,7 +329,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     fn define_value(
         &self,
         gc_context: MutationContext<'gc, '_>,
-        name: &str,
+        name: impl Into<AvmString<'gc>>,
         value: Value<'gc>,
         attributes: Attribute,
     );
@@ -311,7 +344,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     fn set_attributes(
         &self,
         gc_context: MutationContext<'gc, '_>,
-        name: Option<&str>,
+        name: Option<AvmString<'gc>>,
         set_attributes: Attribute,
         clear_attributes: Attribute,
     );
@@ -329,7 +362,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     fn add_property(
         &self,
         gc_context: MutationContext<'gc, '_>,
-        name: &str,
+        name: AvmString<'gc>,
         get: Object<'gc>,
         set: Option<Object<'gc>>,
         attributes: Attribute,
@@ -348,7 +381,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     fn add_property_with_case(
         &self,
         activation: &mut Activation<'_, 'gc, '_>,
-        name: &str,
+        name: AvmString<'gc>,
         get: Object<'gc>,
         set: Option<Object<'gc>>,
         attributes: Attribute,
@@ -358,8 +391,9 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     fn call_watcher(
         &self,
         activation: &mut Activation<'_, 'gc, '_>,
-        name: &str,
+        name: AvmString<'gc>,
         value: &mut Value<'gc>,
+        this: Object<'gc>,
     ) -> Result<(), Error<'gc>>;
 
     /// Set the 'watcher' of a given property.
@@ -368,7 +402,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     fn watch(
         &self,
         activation: &mut Activation<'_, 'gc, '_>,
-        name: Cow<str>,
+        name: AvmString<'gc>,
         callback: Object<'gc>,
         user_data: Value<'gc>,
     );
@@ -377,24 +411,36 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     ///
     /// The return value will indicate if there was a watcher present before this method was
     /// called.
-    fn unwatch(&self, activation: &mut Activation<'_, 'gc, '_>, name: Cow<str>) -> bool;
+    fn unwatch(&self, activation: &mut Activation<'_, 'gc, '_>, name: AvmString<'gc>) -> bool;
 
     /// Checks if the object has a given named property.
-    fn has_property(&self, activation: &mut Activation<'_, 'gc, '_>, name: &str) -> bool;
+    fn has_property(&self, activation: &mut Activation<'_, 'gc, '_>, name: AvmString<'gc>) -> bool;
 
     /// Checks if the object has a given named property on itself (and not,
     /// say, the object's prototype or superclass)
-    fn has_own_property(&self, activation: &mut Activation<'_, 'gc, '_>, name: &str) -> bool;
+    fn has_own_property(
+        &self,
+        activation: &mut Activation<'_, 'gc, '_>,
+        name: AvmString<'gc>,
+    ) -> bool;
 
     /// Checks if the object has a given named property on itself that is
     /// virtual.
-    fn has_own_virtual(&self, activation: &mut Activation<'_, 'gc, '_>, name: &str) -> bool;
+    fn has_own_virtual(
+        &self,
+        activation: &mut Activation<'_, 'gc, '_>,
+        name: AvmString<'gc>,
+    ) -> bool;
 
     /// Checks if a named property appears when enumerating the object.
-    fn is_property_enumerable(&self, activation: &mut Activation<'_, 'gc, '_>, name: &str) -> bool;
+    fn is_property_enumerable(
+        &self,
+        activation: &mut Activation<'_, 'gc, '_>,
+        name: AvmString<'gc>,
+    ) -> bool;
 
     /// Enumerate the object.
-    fn get_keys(&self, activation: &mut Activation<'_, 'gc, '_>) -> Vec<String>;
+    fn get_keys(&self, activation: &mut Activation<'_, 'gc, '_>) -> Vec<AvmString<'gc>>;
 
     /// Get the object's type string.
     fn type_of(&self) -> &'static str;
@@ -565,6 +611,11 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         None
     }
 
+    /// Get the underlying `TextFormatObject`, if it exists
+    fn as_text_format_object(&self) -> Option<TextFormatObject<'gc>> {
+        None
+    }
+
     fn as_ptr(&self) -> *const ObjectPtr;
 
     /// Check if this object is in the prototype chain of the specified test object.
@@ -624,18 +675,18 @@ impl<'gc> Object<'gc> {
 
 /// Perform a prototype lookup of a given object.
 ///
-/// This function returns both the `ReturnValue` and the prototype that
-/// generated the value. If the property did not resolve, then it returns
-/// `undefined` and `None` for the prototype.
+/// This function returns both the `Value` and the prototype depth from which
+/// it was grabbed from. If the property did not resolve, then it returns
+/// `Ok(None)`.
 ///
-/// The second return value can and should be used to populate the `base_proto`
-/// property necessary to make `super` work.
+/// The prototype depth can and should be used to populate the `depth`
+/// parameter necessary to make `super` work.
 pub fn search_prototype<'gc>(
     mut proto: Value<'gc>,
-    name: &str,
+    name: AvmString<'gc>,
     activation: &mut Activation<'_, 'gc, '_>,
     this: Object<'gc>,
-) -> Result<(Value<'gc>, Option<Object<'gc>>), Error<'gc>> {
+) -> Result<Option<(Value<'gc>, u8)>, Error<'gc>> {
     let mut depth = 0;
 
     while let Value::Object(p) = proto {
@@ -649,7 +700,7 @@ pub fn search_prototype<'gc>(
                     "[Getter]",
                     activation,
                     this,
-                    Some(p),
+                    1,
                     &[],
                     ExecutionReason::Special,
                     getter,
@@ -659,17 +710,17 @@ pub fn search_prototype<'gc>(
                     Err(Error::ThrownValue(e)) => return Err(Error::ThrownValue(e)),
                     Err(_) => Value::Undefined,
                 };
-                return Ok((value, Some(p)));
+                return Ok(Some((value, depth)));
             }
         }
 
         if let Some(value) = p.get_local_stored(name, activation) {
-            return Ok((value, Some(p)));
+            return Ok(Some((value, depth)));
         }
 
         proto = p.proto(activation);
         depth += 1;
     }
 
-    Ok((Value::Undefined, None))
+    Ok(None)
 }

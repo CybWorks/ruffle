@@ -6,9 +6,9 @@ use crate::avm2::class::Class;
 use crate::avm2::method::{Method, NativeMethodImpl};
 use crate::avm2::names::{Namespace, QName};
 use crate::avm2::object::{array_allocator, ArrayObject, Object, TObject};
-use crate::avm2::string::AvmString;
 use crate::avm2::value::Value;
 use crate::avm2::Error;
+use crate::string::AvmString;
 use bitflags::bitflags;
 use gc_arena::{GcCell, MutationContext};
 use std::cmp::{min, Ordering};
@@ -136,7 +136,8 @@ pub fn resolve_array_hole<'gc>(
                     &QName::new(
                         Namespace::public(),
                         AvmString::new(activation.context.gc_context, i.to_string()),
-                    ),
+                    )
+                    .into(),
                     activation,
                 )
             })
@@ -215,14 +216,11 @@ pub fn to_locale_string<'gc>(
     join_inner(act, this, &[",".into()], |v, activation| {
         let o = v.coerce_to_object(activation)?;
 
-        let tls = o.get_property(
-            o,
-            &QName::new(Namespace::public(), "toLocaleString"),
+        o.call_property(
+            &QName::new(Namespace::public(), "toLocaleString").into(),
+            &[],
             activation,
-        )?;
-
-        tls.coerce_to_object(activation)?
-            .call(Some(o), &[], activation, o.proto())
+        )
     })
 }
 
@@ -278,7 +276,7 @@ impl<'gc> ArrayIter<'gc> {
         let length = array_object
             .get_property(
                 array_object,
-                &QName::new(Namespace::public(), "length"),
+                &QName::new(Namespace::public(), "length").into(),
                 activation,
             )?
             .coerce_to_u32(activation)?;
@@ -310,7 +308,8 @@ impl<'gc> ArrayIter<'gc> {
                         &QName::new(
                             Namespace::public(),
                             AvmString::new(activation.context.gc_context, i.to_string()),
-                        ),
+                        )
+                        .into(),
                         activation,
                     )
                     .map(|val| (i, val)),
@@ -340,7 +339,8 @@ impl<'gc> ArrayIter<'gc> {
                         &QName::new(
                             Namespace::public(),
                             AvmString::new(activation.context.gc_context, i.to_string()),
-                        ),
+                        )
+                        .into(),
                         activation,
                     )
                     .map(|val| (i, val)),
@@ -374,12 +374,7 @@ pub fn for_each<'gc>(
         while let Some(r) = iter.next(activation) {
             let (i, item) = r?;
 
-            callback.call(
-                receiver,
-                &[item, i.into(), this.into()],
-                activation,
-                receiver.and_then(|r| r.proto()),
-            )?;
+            callback.call(receiver, &[item, i.into(), this.into()], activation)?;
         }
     }
 
@@ -409,12 +404,7 @@ pub fn map<'gc>(
 
         while let Some(r) = iter.next(activation) {
             let (i, item) = r?;
-            let new_item = callback.call(
-                receiver,
-                &[item, i.into(), this.into()],
-                activation,
-                receiver.and_then(|r| r.proto()),
-            )?;
+            let new_item = callback.call(receiver, &[item, i.into(), this.into()], activation)?;
 
             new_array.push(new_item);
         }
@@ -449,12 +439,7 @@ pub fn filter<'gc>(
         while let Some(r) = iter.next(activation) {
             let (i, item) = r?;
             let is_allowed = callback
-                .call(
-                    receiver,
-                    &[item.clone(), i.into(), this.into()],
-                    activation,
-                    receiver.and_then(|r| r.proto()),
-                )?
+                .call(receiver, &[item.clone(), i.into(), this.into()], activation)?
                 .coerce_to_boolean();
 
             if is_allowed {
@@ -492,12 +477,7 @@ pub fn every<'gc>(
             let (i, item) = r?;
 
             let result = callback
-                .call(
-                    receiver,
-                    &[item, i.into(), this.into()],
-                    activation,
-                    receiver.and_then(|r| r.proto()),
-                )?
+                .call(receiver, &[item, i.into(), this.into()], activation)?
                 .coerce_to_boolean();
 
             if !result {
@@ -535,12 +515,7 @@ pub fn some<'gc>(
             let (i, item) = r?;
 
             let result = callback
-                .call(
-                    receiver,
-                    &[item, i.into(), this.into()],
-                    activation,
-                    receiver.and_then(|r| r.proto()),
-                )?
+                .call(receiver, &[item, i.into(), this.into()], activation)?
                 .coerce_to_boolean();
 
             if result {
@@ -1078,7 +1053,7 @@ pub fn sort<'gc>(
                 options,
                 constrain(|activation, a, b| {
                     let order = v
-                        .call(None, &[a, b], activation, None)?
+                        .call(None, &[a, b], activation)?
                         .coerce_to_number(activation)?;
 
                     if order > 0.0 {
@@ -1208,14 +1183,14 @@ pub fn sort_on<'gc>(
                         let a_object = a.coerce_to_object(activation)?;
                         let a_field = a_object.get_property(
                             a_object,
-                            &QName::new(Namespace::public(), *field_name),
+                            &QName::new(Namespace::public(), *field_name).into(),
                             activation,
                         )?;
 
                         let b_object = b.coerce_to_object(activation)?;
                         let b_field = b_object.get_property(
                             b_object,
-                            &QName::new(Namespace::public(), *field_name),
+                            &QName::new(Namespace::public(), *field_name).into(),
                             activation,
                         )?;
 

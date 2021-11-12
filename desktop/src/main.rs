@@ -16,7 +16,7 @@ mod ui;
 
 use crate::custom_event::RuffleEvent;
 use crate::executor::GlutinAsyncExecutor;
-use clap::Clap;
+use clap::Parser;
 use isahc::{config::RedirectPolicy, prelude::*, HttpClient};
 use ruffle_core::{
     backend::{
@@ -28,7 +28,7 @@ use ruffle_core::{
         video,
     },
     config::Letterbox,
-    Player,
+    Player, StageDisplayState,
 };
 use ruffle_render_wgpu::WgpuRenderBackend;
 use std::path::{Path, PathBuf};
@@ -46,45 +46,39 @@ use winit::event::{
     ElementState, KeyboardInput, MouseButton, MouseScrollDelta, VirtualKeyCode, WindowEvent,
 };
 use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::{Fullscreen, Icon, Window, WindowBuilder};
+use winit::window::{Icon, Window, WindowBuilder};
 
-#[derive(Clap, Debug)]
+#[derive(Parser, Debug)]
 #[clap(
     name = "Ruffle",
     author,
     version = include_str!(concat!(env!("OUT_DIR"), "/version-info.txt")),
 )]
 struct Opt {
-    /// Path to a flash movie (swf) to play
+    /// Path to a Flash movie (SWF) to play.
     #[clap(name = "FILE", parse(from_os_str))]
     input_path: Option<PathBuf>,
 
     /// A "flashvars" parameter to provide to the movie.
-    /// This can be repeated multiple times, for example -Pkey=value -Pfoo=bar
-    #[clap(short = 'P', number_of_values = 1)]
+    /// This can be repeated multiple times, for example -Pkey=value -Pfoo=bar.
+    #[clap(short = 'P', number_of_values = 1, multiple_occurrences = true)]
     parameters: Vec<String>,
 
     /// Type of graphics backend to use. Not all options may be supported by your current system.
     /// Default will attempt to pick the most supported graphics backend.
-    #[clap(
-        long,
-        short,
-        case_insensitive = true,
-        default_value = "default",
-        arg_enum
-    )]
+    #[clap(long, short, default_value = "default", arg_enum)]
     graphics: GraphicsBackend,
 
     /// Power preference for the graphics device used. High power usage tends to prefer dedicated GPUs,
     /// whereas a low power usage tends prefer integrated GPUs.
-    #[clap(long, short, case_insensitive = true, default_value = "high", arg_enum)]
+    #[clap(long, short, default_value = "high", arg_enum)]
     power: PowerPreference,
 
-    /// Width of window in pixels
+    /// Width of window in pixels.
     #[clap(long, display_order = 1)]
     width: Option<f64>,
 
-    /// Height of window in pixels
+    /// Height of window in pixels.
     #[clap(long, display_order = 2)]
     height: Option<f64>,
 
@@ -93,11 +87,11 @@ struct Opt {
     #[cfg(feature = "render_trace")]
     trace_path: Option<PathBuf>,
 
-    /// (Optional) Proxy to use when loading movies via URL
-    #[clap(long, case_insensitive = true)]
+    /// Proxy to use when loading movies via URL.
+    #[clap(long)]
     proxy: Option<Url>,
 
-    /// (Optional) Replace all embedded http URLs with https
+    /// Replace all embedded HTTP URLs with HTTPS.
     #[clap(long, takes_value = false)]
     upgrade_to_https: bool,
 
@@ -134,7 +128,9 @@ fn load_movie_from_path(
             .map_err(|_| "Path must be absolute and cannot be a URL")?
     } else {
         Url::parse(path.to_str().unwrap_or_default())
-            .map_err(|_| "Input path is not a file and could not be parsed as a URL.")?
+            .ok()
+            .filter(|url| url.host().is_some())
+            .ok_or("Input path is not a file and could not be parsed as a URL.")?
     };
 
     let mut movie = if movie_url.scheme() == "file" {
@@ -352,9 +348,8 @@ impl App {
                                 ..
                             } if modifiers.alt() => {
                                 if !fullscreen_down {
-                                    window.set_fullscreen(match window.fullscreen() {
-                                        None => Some(Fullscreen::Borderless(None)),
-                                        Some(_) => None,
+                                    player.lock().unwrap().update(|uc| {
+                                        uc.stage.toggle_display_state(uc);
                                     });
                                 }
                                 fullscreen_down = true;
@@ -380,7 +375,9 @@ impl App {
                                     },
                                 ..
                             } => {
-                                window.set_fullscreen(None);
+                                player.lock().unwrap().update(|uc| {
+                                    uc.stage.set_display_state(uc, StageDisplayState::Normal);
+                                });
                                 return;
                             }
                             _ => (),

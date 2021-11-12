@@ -4,6 +4,7 @@ import {
     FLASH7_AND_8_MIMETYPE,
     FLASH_MOVIE_MIMETYPE,
     isBuiltInContextMenuVisible,
+    isFallbackElement,
     isScriptAccessAllowed,
     isSwfFilename,
     RufflePlayer,
@@ -53,6 +54,11 @@ export class RuffleEmbed extends RufflePlayer {
                 backgroundColor: this.attributes.getNamedItem("bgcolor")?.value,
                 base: this.attributes.getNamedItem("base")?.value,
                 menu: isBuiltInContextMenuVisible(menu),
+                salign: this.attributes.getNamedItem("salign")?.value ?? "",
+                quality:
+                    this.attributes.getNamedItem("quality")?.value ?? "high",
+                scale:
+                    this.attributes.getNamedItem("scale")?.value ?? "showAll",
             });
         }
     }
@@ -125,9 +131,16 @@ export class RuffleEmbed extends RufflePlayer {
      * @returns True if the element looks like a flash embed.
      */
     static isInterdictable(elem: HTMLElement): boolean {
+        // Don't polyfill if the element is inside a specific node.
+        if (isFallbackElement(elem)) {
+            return false;
+        }
+        // Don't polyfill when no file is specified.
         if (!elem.getAttribute("src")) {
             return false;
         }
+
+        // Check for MIME type.
         const type = elem.getAttribute("type")?.toLowerCase();
         if (
             type === FLASH_MIMETYPE.toLowerCase() ||

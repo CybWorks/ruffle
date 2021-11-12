@@ -6,7 +6,7 @@ use crate::font::{EvalParameters, Font};
 use crate::html::dimensions::{BoxBounds, Position, Size};
 use crate::html::text_format::{FormatSpans, TextFormat, TextSpan};
 use crate::shape_utils::DrawCommand;
-use crate::string_utils;
+use crate::string::utils as string_utils;
 use crate::tag_utils::SwfMovie;
 use gc_arena::Collect;
 use std::cmp::{max, min};
@@ -806,14 +806,20 @@ impl<'gc> LayoutBox<'gc> {
                 text_format,
                 *font,
                 *params,
-                color.clone(),
+                swf::Color::from_rgb(color.to_rgb(), 0xFF),
             )),
             LayoutContent::Bullet {
                 text_format,
                 font,
                 params,
                 color,
-            } => Some(("\u{2022}", text_format, *font, *params, color.clone())),
+            } => Some((
+                "\u{2022}",
+                text_format,
+                *font,
+                *params,
+                swf::Color::from_rgb(color.to_rgb(), 0xFF),
+            )),
             LayoutContent::Drawing(..) => None,
         }
     }

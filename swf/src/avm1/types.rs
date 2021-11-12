@@ -184,13 +184,21 @@ bitflags! {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TryBlock<'a> {
-    pub try_actions: &'a [u8],
-    pub catch: Option<(CatchVar<'a>, &'a [u8])>,
-    pub finally: Option<&'a [u8]>,
+    pub try_body: &'a [u8],
+    pub catch_body: Option<(CatchVar<'a>, &'a [u8])>,
+    pub finally_body: Option<&'a [u8]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CatchVar<'a> {
     Var(&'a SwfStr),
     Register(u8),
+}
+
+bitflags! {
+    pub struct TryFlags: u8 {
+        const CATCH_BLOCK = 1 << 0;
+        const FINALLY_BLOCK = 1 << 1;
+        const CATCH_IN_REGISTER = 1 << 2;
+    }
 }

@@ -4,8 +4,8 @@ use crate::avm2::globals::{SystemClasses, SystemPrototypes};
 use crate::avm2::method::Method;
 use crate::avm2::object::EventObject;
 use crate::avm2::script::{Script, TranslationUnit};
-use crate::avm2::string::AvmString;
 use crate::context::UpdateContext;
+use crate::string::AvmString;
 use crate::tag_utils::SwfSlice;
 use gc_arena::{Collect, MutationContext};
 use std::collections::HashMap;
@@ -49,7 +49,9 @@ pub use crate::avm2::array::ArrayStorage;
 pub use crate::avm2::domain::Domain;
 pub use crate::avm2::events::Event;
 pub use crate::avm2::names::{Namespace, QName};
-pub use crate::avm2::object::{ArrayObject, Object, ScriptObject, StageObject, TObject};
+pub use crate::avm2::object::{
+    ArrayObject, ClassObject, Object, ScriptObject, SoundChannelObject, StageObject, TObject,
+};
 pub use crate::avm2::value::Value;
 
 const BROADCAST_WHITELIST: [&str; 3] = ["enterFrame", "exitFrame", "frameConstructed"];
@@ -134,7 +136,7 @@ impl<'gc> Avm2<'gc> {
     ) -> Result<(), Error> {
         let mut init_activation = Activation::from_script(context.reborrow(), script)?;
 
-        let (method, scope) = script.init();
+        let (method, scope, _domain) = script.init();
         match method {
             Method::Native(method) => {
                 //This exists purely to check if the builtin is OK with being called with
@@ -159,12 +161,24 @@ impl<'gc> Avm2<'gc> {
         event: Event<'gc>,
         target: Object<'gc>,
     ) -> Result<bool, Error> {
+        let event_constr = context.avm2.classes().event;
+        Self::dispatch_event_with_class(context, event, event_constr, target)
+    }
+
+    /// Dispatch an event on an object with a specific Event type.
+    ///
+    /// The `bool` parameter reads true if the event was cancelled.
+    pub fn dispatch_event_with_class(
+        context: &mut UpdateContext<'_, 'gc, '_>,
+        event: Event<'gc>,
+        event_class: ClassObject<'gc>,
+        target: Object<'gc>,
+    ) -> Result<bool, Error> {
         use crate::avm2::events::dispatch_event;
 
-        let event_constr = context.avm2.classes().event;
         let mut activation = Activation::from_nothing(context.reborrow());
 
-        let event_object = EventObject::from_event(&mut activation, event_constr, event)?;
+        let event_object = EventObject::from_event(&mut activation, event_class, event)?;
 
         dispatch_event(&mut activation, target, event_object)
     }
@@ -208,7 +222,7 @@ impl<'gc> Avm2<'gc> {
     pub fn broadcast_event(
         context: &mut UpdateContext<'_, 'gc, '_>,
         event: Event<'gc>,
-        on_type: Object<'gc>,
+        on_type: ClassObject<'gc>,
     ) -> Result<(), Error> {
         let event_name = event.event_type();
         if !BROADCAST_WHITELIST.iter().any(|x| *x == event_name) {
@@ -250,12 +264,7 @@ impl<'gc> Avm2<'gc> {
         context: &mut UpdateContext<'_, 'gc, '_>,
     ) -> Result<(), Error> {
         let mut evt_activation = Activation::from_nothing(context.reborrow());
-        callable.call(
-            reciever,
-            args,
-            &mut evt_activation,
-            reciever.and_then(|r| r.proto()),
-        )?;
+        callable.call(reciever, args, &mut evt_activation)?;
 
         Ok(())
     }
@@ -292,7 +301,13 @@ impl<'gc> Avm2<'gc> {
 
     /// Push a value onto the operand stack.
     fn push(&mut self, value: impl Into<Value<'gc>>) {
-        let value = value.into();
+        let mut value = value.into();
+        if let Value::Object(o) = value {
+            if let Some(prim) = o.as_primitive() {
+                value = prim.clone();
+            }
+        }
+
         avm_debug!(self, "Stack push {}: {:?}", self.stack.len(), value);
         self.stack.push(value);
     }

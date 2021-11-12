@@ -221,6 +221,13 @@ struct BitReader<'a, 'b> {
 
 impl<'a, 'b> BitReader<'a, 'b> {
     #[inline]
+    fn new(data: &'b mut &'a [u8]) -> Self {
+        Self {
+            bits: bitstream_io::BitReader::new(data),
+        }
+    }
+
+    #[inline]
     fn read_bit(&mut self) -> io::Result<bool> {
         self.bits.read_bit()
     }
@@ -318,9 +325,7 @@ impl<'a> Reader<'a> {
     }
 
     fn bits<'b>(&'b mut self) -> BitReader<'a, 'b> {
-        BitReader {
-            bits: bitstream_io::BitReader::new(&mut self.input),
-        }
+        BitReader::new(&mut self.input)
     }
 
     #[inline]
@@ -2617,10 +2622,13 @@ pub mod tests {
         // Halfway parse the SWF file until we find the tag we're searching for.
         let mut reader = Reader::new(&swf_buf.data, swf_buf.header.version());
         loop {
-            let tag_start = &reader.get_ref();
+            let tag_start = reader.get_ref();
             let (swf_tag_code, tag_len) = reader.read_tag_code_and_length().unwrap();
-            let tag_data = &tag_start[..reader.pos(tag_start) + tag_len];
             let tag_end = &reader.get_ref()[tag_len..];
+
+            let full_tag_len = tag_end.as_ptr() as usize - tag_start.as_ptr() as usize;
+            let tag_data = &tag_start[..full_tag_len];
+
             // Skip tag data.
             *reader.get_mut() = tag_end;
 
@@ -3035,13 +3043,11 @@ pub mod tests {
                 Ok(tag) => tag,
                 Err(e) => panic!("Error parsing tag: {}", e),
             };
-            if parsed_tag != expected_tag {
-                // Failed, result doesn't match.
-                panic!(
-                    "Incorrectly parsed tag.\nRead:\n{:#?}\n\nExpected:\n{:#?}",
-                    parsed_tag, expected_tag
-                );
-            }
+            assert_eq!(
+                parsed_tag, expected_tag,
+                "Incorrectly parsed tag.\nRead:\n{:#?}\n\nExpected:\n{:#?}",
+                parsed_tag, expected_tag
+            );
         }
     }
 

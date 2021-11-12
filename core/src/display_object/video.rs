@@ -8,13 +8,13 @@ use crate::backend::render::BitmapInfo;
 use crate::backend::video::{EncodedFrame, VideoStreamHandle};
 use crate::bounding_box::BoundingBox;
 use crate::context::{RenderContext, UpdateContext};
-use crate::display_object::{DisplayObjectBase, TDisplayObject};
+use crate::display_object::{DisplayObjectBase, DisplayObjectPtr, TDisplayObject};
 use crate::prelude::*;
 use crate::tag_utils::{SwfMovie, SwfSlice};
-use crate::types::{Degrees, Percent};
 use crate::vminterface::{AvmObject, AvmType, Instantiator};
 use gc_arena::{Collect, GcCell, MutationContext};
 use std::borrow::{Borrow, BorrowMut};
+use std::cell::{Ref, RefMut};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use swf::{CharacterId, DefineVideoStream, VideoFrame};
@@ -276,7 +276,21 @@ impl<'gc> Video<'gc> {
 }
 
 impl<'gc> TDisplayObject<'gc> for Video<'gc> {
-    impl_display_object!(base);
+    fn base(&self) -> Ref<DisplayObjectBase<'gc>> {
+        Ref::map(self.0.read(), |r| &r.base)
+    }
+
+    fn base_mut<'a>(&'a self, mc: MutationContext<'gc, '_>) -> RefMut<'a, DisplayObjectBase<'gc>> {
+        RefMut::map(self.0.write(mc), |w| &mut w.base)
+    }
+
+    fn instantiate(&self, gc_context: MutationContext<'gc, '_>) -> DisplayObject<'gc> {
+        Self(GcCell::allocate(gc_context, self.0.read().clone())).into()
+    }
+
+    fn as_ptr(&self) -> *const DisplayObjectPtr {
+        self.0.as_ptr() as *const DisplayObjectPtr
+    }
 
     fn as_video(self) -> Option<Video<'gc>> {
         Some(self)
@@ -290,7 +304,7 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
         _instantiated_by: Instantiator,
         run_frame: bool,
     ) {
-        if self.avm_type() == AvmType::Avm1 {
+        if context.avm_type() == AvmType::Avm1 {
             context
                 .avm1
                 .add_to_exec_list(context.gc_context, (*self).into());
@@ -381,7 +395,7 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
     }
 
     fn construct_frame(&self, context: &mut UpdateContext<'_, 'gc, '_>) {
-        let vm_type = self.avm_type();
+        let vm_type = context.avm_type();
         if vm_type == AvmType::Avm2 && matches!(self.object2(), Avm2Value::Undefined) {
             let video_constr = context.avm2.classes().video;
             let mut activation = Avm2Activation::from_nothing(context.reborrow());
@@ -424,7 +438,7 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
             return;
         }
 
-        context.transform_stack.push(&*self.transform());
+        context.transform_stack.push(&*self.base().transform());
 
         if let Some((_frame_id, ref bitmap)) = self.0.read().decoded_frame {
             let mut transform = context.transform_stack.transform().clone();

@@ -3,7 +3,7 @@ use crate::avm1::debug::VariableDumper;
 use crate::avm1::globals::system::SystemProperties;
 use crate::avm1::object::Object;
 use crate::avm1::property::Attribute;
-use crate::avm1::{Avm1, AvmString, ScriptObject, TObject, Timers, Value};
+use crate::avm1::{Avm1, ScriptObject, TObject, Timers, Value};
 use crate::avm2::{Activation as Avm2Activation, Avm2, Domain as Avm2Domain};
 use crate::backend::{
     audio::{AudioBackend, AudioManager},
@@ -18,7 +18,10 @@ use crate::backend::{
 use crate::config::Letterbox;
 use crate::context::{ActionQueue, ActionType, RenderContext, UpdateContext};
 use crate::context_menu::{ContextMenuCallback, ContextMenuItem, ContextMenuState};
-use crate::display_object::{EditText, MorphShape, MovieClip, Stage};
+use crate::display_object::{
+    EditText, MorphShape, MovieClip, Stage, StageAlign, StageDisplayState, StageQuality,
+    StageScaleMode, TInteractiveObject,
+};
 use crate::events::{ButtonKeyCode, ClipEvent, ClipEventResult, KeyCode, PlayerEvent};
 use crate::external::Value as ExternalValue;
 use crate::external::{ExternalInterface, ExternalInterfaceProvider};
@@ -26,6 +29,7 @@ use crate::focus_tracker::FocusTracker;
 use crate::library::Library;
 use crate::loader::LoadManager;
 use crate::prelude::*;
+use crate::string::AvmString;
 use crate::tag_utils::SwfMovie;
 use crate::transform::TransformStack;
 use crate::vminterface::{AvmType, Instantiator};
@@ -35,6 +39,7 @@ use log::info;
 use rand::{rngs::SmallRng, SeedableRng};
 use std::collections::{HashMap, VecDeque};
 use std::ops::DerefMut;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -411,7 +416,7 @@ impl Player {
                 for (key, value) in context.swf.parameters().iter() {
                     object.define_value(
                         context.gc_context,
-                        key,
+                        AvmString::new(context.gc_context, key),
                         AvmString::new(context.gc_context, value).into(),
                         Attribute::empty(),
                     );
@@ -669,12 +674,22 @@ impl Player {
         let params = vec![root_clip.object(), Value::Object(item)];
 
         let _ = callback.call(
-            "[Context Menu Callback]",
+            "[Context Menu Callback]".into(),
             &mut activation,
             undefined,
-            None,
             &params,
         );
+    }
+
+    pub fn set_fullscreen(&mut self, is_fullscreen: bool) {
+        self.mutate_with_update_context(|context| {
+            let display_state = if is_fullscreen {
+                StageDisplayState::FullScreen
+            } else {
+                StageDisplayState::Normal
+            };
+            context.stage.set_display_state(context, display_state);
+        });
     }
 
     fn toggle_play_root_movie<'gc>(context: &mut UpdateContext<'_, 'gc, '_>) {
@@ -772,6 +787,57 @@ impl Player {
         })
     }
 
+    pub fn set_stage_align(&mut self, stage_align: &str) {
+        self.mutate_with_update_context(|context| {
+            let stage = context.stage;
+            if let Ok(stage_align) = StageAlign::from_str(stage_align) {
+                stage.set_align(context, stage_align);
+            }
+        })
+    }
+
+    pub fn set_quality(&mut self, quality: &str) {
+        self.mutate_with_update_context(|context| {
+            let stage = context.stage;
+            if let Ok(quality) = StageQuality::from_str(quality) {
+                stage.set_quality(context.gc_context, quality);
+            }
+        })
+    }
+
+    pub fn set_scale_mode(&mut self, scale_mode: &str) {
+        self.mutate_with_update_context(|context| {
+            let stage = context.stage;
+            if let Ok(scale_mode) = StageScaleMode::from_str(scale_mode) {
+                stage.set_scale_mode(context, scale_mode);
+            }
+        })
+    }
+
+    /// Handle an event sent into the player from the external windowing system
+    /// or an HTML element.
+    ///
+    /// Event handling is a complicated affair, involving several different
+    /// concerns that need to resolve with specific priority.
+    ///
+    /// 1. (In `avm_debug` builds) If Ctrl-Alt-V is pressed, dump all AVM1
+    ///    variables in the player.
+    /// 2. (In `avm_debug` builds) If Ctrl-Alt-D is pressed, toggle debug
+    ///    output for AVM1 and AVM2.
+    /// 3. If the incoming event is text input or key input that could be
+    ///    related to text input (e.g. pressing a letter key), we dispatch a
+    ///    key press event onto the stage.
+    /// 4. If the event from step 3 was not handled, we check if an `EditText`
+    ///    object is in focus and dispatch a text-control event to said object.
+    /// 5. If the incoming event is text input, and neither step 3 nor step 4
+    ///    resulted in an event being handled, we dispatch a text input event
+    ///    to the currently focused `EditText` (if present).
+    /// 6. Regardless of all prior event handling, we dispatch the event
+    ///    through the stage normally.
+    /// 7. Then, we dispatch the event through AVM1 global listener objects.
+    /// 8. The AVM1 action queue is drained.
+    /// 9. Mouse state is updated. This triggers button rollovers, which are a
+    ///    second wave of event processing.
     pub fn handle_event(&mut self, event: PlayerEvent) {
         if cfg!(feature = "avm_debug") {
             if let PlayerEvent::KeyDown {
@@ -861,7 +927,12 @@ impl Player {
                 let levels: Vec<_> = context.stage.iter_depth_list().collect();
                 for (_depth, level) in levels {
                     if let Some(button_event) = button_event {
-                        let state = level.handle_clip_event(context, button_event);
+                        let state = if let Some(interactive) = level.as_interactive() {
+                            interactive.handle_clip_event(context, button_event)
+                        } else {
+                            ClipEventResult::NotHandled
+                        };
+
                         if state == ClipEventResult::Handled {
                             key_press_handled = true;
                             return;
@@ -924,7 +995,9 @@ impl Player {
             if let Some(clip_event) = clip_event {
                 let levels: Vec<_> = context.stage.iter_depth_list().collect();
                 for (_depth, level) in levels {
-                    level.handle_clip_event(context, clip_event);
+                    if let Some(interactive) = level.as_interactive() {
+                        interactive.handle_clip_event(context, clip_event);
+                    }
                 }
             }
 
@@ -1132,7 +1205,9 @@ impl Player {
             } else {
                 for (object, event) in events {
                     if !object.removed() {
-                        object.handle_clip_event(context, event);
+                        if let Some(interactive) = object.as_interactive() {
+                            interactive.handle_clip_event(context, event);
+                        }
                     }
                 }
                 true
@@ -1358,7 +1433,7 @@ impl Player {
                         object,
                         context.swf.version(),
                         context,
-                        name,
+                        name.into(),
                         &args,
                     );
                 }
@@ -1375,8 +1450,8 @@ impl Player {
                         actions.clip,
                         context.swf.version(),
                         context,
-                        listener,
-                        method,
+                        listener.into(),
+                        method.into(),
                         &args,
                     );
                 }
@@ -1408,52 +1483,6 @@ impl Player {
     where
         F: for<'a, 'gc> FnOnce(&mut UpdateContext<'a, 'gc, '_>) -> R,
     {
-        // We have to do this piecewise borrowing of fields before the closure to avoid
-        // completely borrowing `self`.
-        let (
-            player_version,
-            swf,
-            renderer,
-            audio,
-            navigator,
-            ui,
-            rng,
-            mouse_position,
-            player,
-            system_properties,
-            instance_counter,
-            storage,
-            locale,
-            logging,
-            video,
-            needs_render,
-            max_execution_duration,
-            current_frame,
-            time_offset,
-            frame_rate,
-        ) = (
-            self.player_version,
-            &self.swf,
-            self.renderer.deref_mut(),
-            self.audio.deref_mut(),
-            self.navigator.deref_mut(),
-            self.ui.deref_mut(),
-            &mut self.rng,
-            &self.mouse_pos,
-            self.self_reference.clone(),
-            &mut self.system,
-            &mut self.instance_counter,
-            self.storage.deref_mut(),
-            self.locale.deref_mut(),
-            self.log.deref_mut(),
-            self.video.deref_mut(),
-            &mut self.needs_render,
-            self.max_execution_duration,
-            &mut self.current_frame,
-            &mut self.time_offset,
-            &mut self.frame_rate,
-        );
-
         self.gc_arena.mutate(|gc_context, gc_root| {
             let mut root_data = gc_root.0.write(gc_context);
             let mouse_hovered_object = root_data.mouse_hovered_object;
@@ -1476,44 +1505,44 @@ impl Player {
             ) = root_data.update_context_params();
 
             let mut update_context = UpdateContext {
-                player_version,
-                swf,
+                player_version: self.player_version,
+                swf: &self.swf,
                 library,
-                rng,
-                renderer,
-                audio,
-                navigator,
-                ui,
+                rng: &mut self.rng,
+                renderer: self.renderer.deref_mut(),
+                audio: self.audio.deref_mut(),
+                navigator: self.navigator.deref_mut(),
+                ui: self.ui.deref_mut(),
                 action_queue,
                 gc_context,
                 stage,
                 mouse_over_object: mouse_hovered_object,
                 mouse_down_object: mouse_pressed_object,
-                mouse_position,
+                mouse_position: &self.mouse_pos,
                 drag_object,
-                player,
+                player: self.self_reference.clone(),
                 load_manager,
-                system: system_properties,
-                instance_counter,
-                storage,
-                locale,
-                log: logging,
-                video,
+                system: &mut self.system,
+                instance_counter: &mut self.instance_counter,
+                storage: self.storage.deref_mut(),
+                locale: self.locale.deref_mut(),
+                log: self.log.deref_mut(),
+                video: self.video.deref_mut(),
                 shared_objects,
                 unbound_text_fields,
                 timers,
                 current_context_menu,
-                needs_render,
+                needs_render: &mut self.needs_render,
                 avm1,
                 avm2,
                 external_interface,
                 update_start: Instant::now(),
-                max_execution_duration,
+                max_execution_duration: self.max_execution_duration,
                 focus_tracker,
                 times_get_time_called: 0,
-                time_offset,
+                time_offset: &mut self.time_offset,
                 audio_manager,
-                frame_rate,
+                frame_rate: &mut self.frame_rate,
             };
 
             let old_frame_rate = *update_context.frame_rate;
@@ -1528,7 +1557,7 @@ impl Player {
                 update_context.audio.set_frame_rate(new_frame_rate);
             }
 
-            *current_frame = update_context
+            self.current_frame = update_context
                 .stage
                 .root_clip()
                 .as_movie_clip()

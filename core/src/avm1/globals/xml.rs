@@ -4,9 +4,10 @@ use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::object::xml_object::XmlObject;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
-use crate::avm1::{ArrayObject, AvmString, Object, TObject, Value};
+use crate::avm1::{ArrayObject, Object, TObject, Value};
 use crate::avm_warn;
 use crate::backend::navigator::RequestOptions;
+use crate::string::AvmString;
 use crate::xml;
 use crate::xml::{XmlDocument, XmlNode};
 use gc_arena::MutationContext;
@@ -759,18 +760,18 @@ pub fn xml_on_data<'gc>(
     let src = args.get(0).cloned().unwrap_or(Value::Undefined);
 
     if let Value::Undefined = src {
-        this.call_method("onLoad", &[false.into()], activation)?;
+        this.call_method("onLoad".into(), &[false.into()], activation)?;
     } else {
         let src = src.coerce_to_string(activation)?;
         this.call_method(
-            "parseXML",
+            "parseXML".into(),
             &[AvmString::new(activation.context.gc_context, src.to_string()).into()],
             activation,
         )?;
 
         this.set("loaded", true.into(), activation)?;
 
-        this.call_method("onLoad", &[true.into()], activation)?;
+        this.call_method("onLoad".into(), &[true.into()], activation)?;
     }
 
     Ok(Value::Undefined)
@@ -870,7 +871,7 @@ fn spawn_xml_fetch<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     this: Object<'gc>,
     loader_object: Object<'gc>,
-    url: &AvmString,
+    url: &str,
     send_object: Option<XmlNode<'gc>>,
 ) -> Result<Value<'gc>, Error<'gc>> {
     let request_options = if let Some(node) = send_object {

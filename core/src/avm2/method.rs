@@ -4,9 +4,9 @@ use crate::avm2::activation::Activation;
 use crate::avm2::names::Multiname;
 use crate::avm2::object::Object;
 use crate::avm2::script::TranslationUnit;
-use crate::avm2::string::AvmString;
 use crate::avm2::value::{abc_default_value, Value};
 use crate::avm2::Error;
+use crate::string::AvmString;
 use gc_arena::{Collect, CollectionContext, Gc, MutationContext};
 use std::fmt;
 use std::rc::Rc;
@@ -365,6 +365,14 @@ impl<'gc> Method<'gc> {
                 Err("Attempted to unwrap a native method as a user-defined one".into())
             }
             Method::Bytecode(bm) => Ok(bm),
+        }
+    }
+
+    /// Check if this method needs `arguments`.
+    pub fn needs_arguments_object(&self) -> bool {
+        match self {
+            Method::Native { .. } => false,
+            Method::Bytecode(bm) => bm.method().needs_arguments_object,
         }
     }
 }

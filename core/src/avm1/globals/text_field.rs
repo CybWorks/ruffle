@@ -1,12 +1,14 @@
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::globals::display_object;
+use crate::avm1::object::text_format_object::TextFormatObject;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
-use crate::avm1::{AvmString, Object, ScriptObject, TObject, Value};
+use crate::avm1::{Object, ScriptObject, TObject, Value};
 use crate::avm_error;
 use crate::display_object::{AutoSizeMode, EditText, TDisplayObject, TextSelection};
 use crate::font::round_down_to_pixel;
 use crate::html::TextFormat;
+use crate::string::AvmString;
 use gc_arena::MutationContext;
 
 macro_rules! tf_method {
@@ -127,8 +129,7 @@ fn get_new_text_format<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let tf = text_field.new_text_format();
-
-    Ok(tf.as_avm1_object(activation)?.into())
+    Ok(TextFormatObject::new(activation, tf).into())
 }
 
 fn set_new_text_format<'gc>(
@@ -136,11 +137,12 @@ fn set_new_text_format<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let tf = args.get(0).cloned().unwrap_or(Value::Undefined);
+    let tf = args.get(0).unwrap_or(&Value::Undefined);
 
     if let Value::Object(tf) = tf {
-        let tf_parsed = TextFormat::from_avm1_object(tf, activation)?;
-        text_field.set_new_text_format(tf_parsed, &mut activation.context);
+        if let Some(tf) = tf.as_text_format_object() {
+            text_field.set_new_text_format(tf.text_format().clone(), &mut activation.context);
+        }
     }
 
     Ok(Value::Undefined)
@@ -163,10 +165,8 @@ fn get_text_format<'gc>(
         _ => (0, text_field.text_length()),
     };
 
-    Ok(text_field
-        .text_format(from, to)
-        .as_avm1_object(activation)?
-        .into())
+    let tf = text_field.text_format(from, to);
+    Ok(TextFormatObject::new(activation, tf).into())
 }
 
 fn set_text_format<'gc>(
@@ -174,24 +174,24 @@ fn set_text_format<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let tf = args.last().cloned().unwrap_or(Value::Undefined);
+    let tf = args.last().unwrap_or(&Value::Undefined);
 
     if let Value::Object(tf) = tf {
-        let tf_parsed = TextFormat::from_avm1_object(tf, activation)?;
+        if let Some(tf) = tf.as_text_format_object() {
+            let (from, to) = match (args.get(0), args.get(1)) {
+                (Some(f), Some(t)) if args.len() > 2 => (
+                    f.coerce_to_f64(activation)? as usize,
+                    t.coerce_to_f64(activation)? as usize,
+                ),
+                (Some(f), _) if args.len() > 1 => {
+                    let v = f.coerce_to_f64(activation)? as usize;
+                    (v, v.saturating_add(1))
+                }
+                _ => (0, text_field.text_length()),
+            };
 
-        let (from, to) = match (args.get(0), args.get(1)) {
-            (Some(f), Some(t)) if args.len() > 2 => (
-                f.coerce_to_f64(activation)? as usize,
-                t.coerce_to_f64(activation)? as usize,
-            ),
-            (Some(f), _) if args.len() > 1 => {
-                let v = f.coerce_to_f64(activation)? as usize;
-                (v, v.saturating_add(1))
-            }
-            _ => (0, text_field.text_length()),
-        };
-
-        text_field.set_text_format(from, to, tf_parsed, &mut activation.context);
+            text_field.set_text_format(from, to, tf.text_format().clone(), &mut activation.context);
+        }
     }
 
     Ok(Value::Undefined)
@@ -278,7 +278,7 @@ pub fn set_text<'gc>(
     value: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     if let Err(err) = this.set_text(
-        value.coerce_to_string(activation)?.to_string(),
+        &value.coerce_to_string(activation)?,
         &mut activation.context,
     ) {
         avm_error!(activation, "Error when setting TextField.text: {}", err);
@@ -322,7 +322,7 @@ pub fn set_text_color<'gc>(
 ) -> Result<(), Error<'gc>> {
     let rgb = value.coerce_to_u32(activation)?;
     let tf = TextFormat {
-        color: Some(swf::Color::from_rgb(rgb, 0xFF)),
+        color: Some(swf::Color::from_rgb(rgb, 0)),
         ..TextFormat::default()
     };
     this.set_text_format(0, this.text_length(), tf.clone(), &mut activation.context);
@@ -334,11 +334,8 @@ pub fn html_text<'gc>(
     this: EditText<'gc>,
     activation: &mut Activation<'_, 'gc, '_>,
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Ok(text) = this.html_text(&mut activation.context) {
-        return Ok(AvmString::new(activation.context.gc_context, text).into());
-    }
-
-    Ok(Value::Undefined)
+    let html_text = this.html_text(&mut activation.context);
+    Ok(AvmString::new(activation.context.gc_context, html_text).into())
 }
 
 pub fn set_html_text<'gc>(
@@ -347,7 +344,7 @@ pub fn set_html_text<'gc>(
     value: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     let text = value.coerce_to_string(activation)?;
-    let _ = this.set_html_text(text.to_string(), &mut activation.context);
+    let _ = this.set_html_text(&text, &mut activation.context);
     // Changing the htmlText does NOT update variable bindings (does not call EditText::propagate_text_binding).
     Ok(())
 }

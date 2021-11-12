@@ -5,9 +5,9 @@ use crate::avm2::class::{Class, ClassAttributes};
 use crate::avm2::method::{Method, NativeMethodImpl};
 use crate::avm2::names::{Namespace, QName};
 use crate::avm2::object::{event_allocator, EventObject, Object, TObject};
-use crate::avm2::string::AvmString;
 use crate::avm2::value::Value;
 use crate::avm2::Error;
+use crate::string::AvmString;
 use gc_arena::{GcCell, MutationContext};
 
 /// Implements `flash.events.Event`'s instance constructor.
@@ -171,7 +171,8 @@ pub fn format_to_string<'gc>(
                 let param_name = QName::dynamic_name(match param_name {
                     Value::Undefined | Value::Null => "null".into(),
                     _ => param_name.coerce_to_string(activation)?,
-                });
+                })
+                .into();
 
                 let param_value = this
                     .get_property(this, &param_name, activation)?
@@ -179,7 +180,7 @@ pub fn format_to_string<'gc>(
                 write!(
                     stringified_params,
                     " {}={}",
-                    param_name.local_name(),
+                    param_name.local_name().unwrap(),
                     param_value
                 )
                 .unwrap();

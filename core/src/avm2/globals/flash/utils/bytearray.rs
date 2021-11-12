@@ -1,17 +1,92 @@
 use crate::avm2::activation::Activation;
-use crate::avm2::bytearray::{CompressionAlgorithm, Endian};
+use crate::avm2::array::ArrayStorage;
+use crate::avm2::bytearray::{ByteArrayStorage, CompressionAlgorithm, Endian, ObjectEncoding};
 use crate::avm2::class::{Class, ClassAttributes};
 use crate::avm2::method::{Method, NativeMethodImpl};
 use crate::avm2::names::{Namespace, QName};
-use crate::avm2::object::{bytearray_allocator, Object, TObject};
-use crate::avm2::string::AvmString;
+use crate::avm2::object::{bytearray_allocator, ArrayObject, ByteArrayObject, Object, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
 use crate::character::Character;
+use crate::string::AvmString;
 use encoding_rs::Encoding;
 use encoding_rs::UTF_8;
+use flash_lso::amf0::read::AMF0Decoder;
+use flash_lso::amf3::read::AMF3Decoder;
+use flash_lso::types::Value as AmfValue;
 use gc_arena::{GcCell, MutationContext};
 use std::str::FromStr;
+
+pub fn deserialize_value<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    value: &AmfValue,
+) -> Result<Value<'gc>, Error> {
+    Ok(match value {
+        AmfValue::Undefined => Value::Undefined,
+        AmfValue::Null => Value::Null,
+        AmfValue::Bool(b) => Value::Bool(*b),
+        AmfValue::Integer(i) => Value::Integer(*i),
+        AmfValue::Number(n) => Value::Number(*n),
+        AmfValue::String(s) => Value::String(AvmString::new(activation.context.gc_context, s)),
+        AmfValue::ByteArray(bytes) => {
+            let storage = ByteArrayStorage::from_vec(bytes.clone());
+            let bytearray = ByteArrayObject::from_storage(activation, storage)?;
+            bytearray.into()
+        }
+        AmfValue::StrictArray(values) => {
+            let mut arr: Vec<Option<Value<'gc>>> = Vec::with_capacity(values.len());
+            for value in values {
+                arr.push(Some(deserialize_value(activation, value)?));
+            }
+            let storage = ArrayStorage::from_storage(arr);
+            let array = ArrayObject::from_storage(activation, storage)?;
+            array.into()
+        }
+        AmfValue::ECMAArray(values, elements, _) => {
+            // First lets create an array out of `values` (dense portion), then we add the elements onto it.
+            let mut arr: Vec<Option<Value<'gc>>> = Vec::with_capacity(values.len());
+            for value in values {
+                arr.push(Some(deserialize_value(activation, value)?));
+            }
+            let storage = ArrayStorage::from_storage(arr);
+            let mut array = ArrayObject::from_storage(activation, storage)?;
+            // Now lets add each element as a property
+            for element in elements {
+                array.set_property(
+                    array,
+                    &QName::new(
+                        Namespace::public(),
+                        AvmString::new(activation.context.gc_context, element.name()),
+                    )
+                    .into(),
+                    deserialize_value(activation, element.value())?,
+                    activation,
+                )?;
+            }
+            array.into()
+        }
+        AmfValue::Object(properties, _class_definition) => {
+            let obj_class = activation.avm2().classes().object;
+            let mut obj = obj_class.construct(activation, &[])?;
+            for property in properties {
+                obj.set_property(
+                    obj,
+                    &QName::new(
+                        Namespace::public(),
+                        AvmString::new(activation.context.gc_context, property.name()),
+                    )
+                    .into(),
+                    deserialize_value(activation, property.value())?,
+                    activation,
+                )?;
+            }
+            obj.into()
+            // TODO: Handle class_defintion
+        }
+        // TODO: Dictionary, Vector, XML, Date, etc...
+        _ => Value::Undefined,
+    })
+}
 
 /// Implements `flash.utils.ByteArray`'s instance constructor.
 pub fn instance_init<'gc>(
@@ -23,8 +98,8 @@ pub fn instance_init<'gc>(
         activation.super_init(this, &[])?;
 
         let class_object = this
-            .as_class_object()
-            .ok_or("Attempted to construct non-instance ByteArray")?;
+            .instance_of()
+            .ok_or("Attempted to construct ByteArray on a bare object")?;
         if let Some((movie, id)) = activation
             .context
             .library
@@ -82,12 +157,11 @@ pub fn write_bytes<'gc>(
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error> {
-    if let Some(Value::Object(second_array)) = args.get(0) {
-        let combining_bytes = match second_array.as_bytearray() {
-            Some(b) => b.bytes().clone(),
-            None => return Err("ArgumentError: Parameter must be a bytearray".into()),
-        };
-
+    if let Some(this) = this {
+        let bytearray = args
+            .get(0)
+            .unwrap_or(&Value::Undefined)
+            .coerce_to_object(activation)?;
         let offset = args
             .get(1)
             .unwrap_or(&Value::Unsigned(0))
@@ -96,20 +170,35 @@ pub fn write_bytes<'gc>(
             .get(2)
             .unwrap_or(&Value::Unsigned(0))
             .coerce_to_u32(activation)? as usize;
+        if !Object::ptr_eq(this, bytearray) {
+            // The ByteArray we are reading from is different than the ByteArray we are writing to,
+            // so we are allowed to borrow both at the same time without worrying about a panic
 
-        // In the docs it says "If offset or length is out of range, they are clamped to the beginning and end of the bytes array."
-        // However, in the actual flash player, it seems to just raise an error.
-        if offset + length > combining_bytes.len() {
-            return Err("EOFError: Reached EOF".into());
-        }
-        if let Some(this) = this {
-            if let Some(mut bytearray) = this.as_bytearray_mut(activation.context.gc_context) {
-                bytearray.write_bytes(if length != 0 {
-                    &combining_bytes[offset..length + offset]
+            let ba_read = bytearray
+                .as_bytearray()
+                .ok_or("ArgumentError: Parameter must be a bytearray")?;
+            let to_write = ba_read.read_at(
+                // If length is 0, lets read the remaining bytes of ByteArray from the supplied offset
+                if length != 0 {
+                    length
                 } else {
-                    &combining_bytes[offset..]
-                })?;
+                    ba_read.len().saturating_sub(offset)
+                },
+                offset,
+            )?;
+
+            if let Some(mut bytearray) = this.as_bytearray_mut(activation.context.gc_context) {
+                bytearray.write_bytes(to_write)?;
             }
+        } else if let Some(mut bytearray) = this.as_bytearray_mut(activation.context.gc_context) {
+            // The ByteArray we are reading from is the same as the ByteArray we are writing to,
+            // so we only need to borrow once, and we can use `write_bytes_within` to write bytes from our own ByteArray
+            let amnt = if length != 0 {
+                length
+            } else {
+                bytearray.len().saturating_sub(offset)
+            };
+            bytearray.write_bytes_within(offset, amnt)?;
         }
     }
 
@@ -123,48 +212,46 @@ pub fn read_bytes<'gc>(
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error> {
     if let Some(this) = this {
-        let current_bytes = this
-            .as_bytearray_mut(activation.context.gc_context)
-            .unwrap()
-            .bytes()
-            .clone();
-        let position = this
-            .as_bytearray_mut(activation.context.gc_context)
-            .unwrap()
-            .position();
-        let mut merging_offset = 0;
-        if let Some(Value::Object(second_array)) = args.get(0) {
-            let offset = args
-                .get(1)
-                .unwrap_or(&Value::Unsigned(0))
-                .coerce_to_u32(activation)? as usize;
-            let length = args
-                .get(2)
-                .unwrap_or(&Value::Unsigned(0))
-                .coerce_to_u32(activation)? as usize;
+        let bytearray = args
+            .get(0)
+            .unwrap_or(&Value::Undefined)
+            .coerce_to_object(activation)?;
+        let offset = args
+            .get(1)
+            .unwrap_or(&Value::Unsigned(0))
+            .coerce_to_u32(activation)? as usize;
+        let length = args
+            .get(2)
+            .unwrap_or(&Value::Unsigned(0))
+            .coerce_to_u32(activation)? as usize;
 
-            if position + length > current_bytes.len() {
-                return Err("EOFError: Reached EOF".into());
+        if !Object::ptr_eq(this, bytearray) {
+            if let Some(bytearray_read) = this.as_bytearray() {
+                let to_write = bytearray_read.read_bytes(
+                    // If length is 0, lets read the remaining bytes of ByteArray
+                    if length != 0 {
+                        length
+                    } else {
+                        bytearray_read.bytes_available()
+                    },
+                )?;
+
+                let mut ba_write = bytearray
+                    .as_bytearray_mut(activation.context.gc_context)
+                    .ok_or("ArgumentError: Parameter must be a bytearray")?;
+
+                ba_write.write_at(to_write, offset)?;
             }
-            if let Some(mut merging_storage) =
-                second_array.as_bytearray_mut(activation.context.gc_context)
-            {
-                let to_write = if length != 0 {
-                    &current_bytes[position..length + position]
-                } else {
-                    &current_bytes[position..]
-                };
-                merging_offset = to_write.len();
-                merging_storage.write_at(to_write, offset)?;
+        } else if let Some(mut bytearray) = this.as_bytearray_mut(activation.context.gc_context) {
+            let amnt = if length != 0 {
+                length
             } else {
-                return Err("ArgumentError: Parameter must be a bytearray".into());
-            }
+                bytearray.bytes_available()
+            };
+            let pos = bytearray.position();
+            bytearray.write_at_within(pos, amnt, offset)?;
         }
-        this.as_bytearray_mut(activation.context.gc_context)
-            .unwrap()
-            .add_position(merging_offset);
     }
-
     Ok(Value::Undefined)
 }
 pub fn write_utf<'gc>(
@@ -738,6 +825,75 @@ pub fn inflate<'gc>(
     Ok(Value::Undefined)
 }
 
+pub fn read_object<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    this: Option<Object<'gc>>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error> {
+    if let Some(this) = this {
+        if let Some(bytearray) = this.as_bytearray() {
+            let bytes = bytearray.read_at(bytearray.bytes_available(), bytearray.position())?;
+            let (bytes_left, value) = match bytearray.object_encoding() {
+                ObjectEncoding::Amf0 => {
+                    let mut decoder = AMF0Decoder::default();
+                    let (extra, amf) = decoder
+                        .parse_single_element(bytes)
+                        .map_err(|_| "Error: Invalid object")?;
+                    (extra.len(), deserialize_value(activation, &amf)?)
+                }
+                ObjectEncoding::Amf3 => {
+                    let mut decoder = AMF3Decoder::default();
+                    let (extra, amf) = decoder
+                        .parse_single_element(bytes)
+                        .map_err(|_| "Error: Invalid object")?;
+                    (extra.len(), deserialize_value(activation, &amf)?)
+                }
+            };
+
+            bytearray.set_position(bytearray.len() - bytes_left);
+            return Ok(value);
+        }
+    }
+
+    Ok(Value::Undefined)
+}
+
+pub fn object_encoding<'gc>(
+    _activation: &mut Activation<'_, 'gc, '_>,
+    this: Option<Object<'gc>>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error> {
+    if let Some(this) = this {
+        if let Some(bytearray) = this.as_bytearray() {
+            return Ok((bytearray.object_encoding() as u8).into());
+        }
+    }
+
+    Ok(Value::Undefined)
+}
+
+pub fn set_object_encoding<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    this: Option<Object<'gc>>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error> {
+    if let Some(this) = this {
+        if let Some(mut bytearray) = this.as_bytearray_mut(activation.context.gc_context) {
+            let new_encoding = args
+                .get(0)
+                .unwrap_or(&Value::Undefined)
+                .coerce_to_u32(activation)?;
+            match new_encoding {
+                0 => bytearray.set_object_encoding(ObjectEncoding::Amf0),
+                3 => bytearray.set_object_encoding(ObjectEncoding::Amf3),
+                _ => return Err("Parameter type must be one of the accepted values.".into()),
+            }
+        }
+    }
+
+    Ok(Value::Undefined)
+}
+
 pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>> {
     let class = Class::new(
         QName::new(Namespace::package("flash.utils"), "ByteArray"),
@@ -783,6 +939,7 @@ pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>
         ("readMultiByte", read_multibyte),
         ("writeUTFBytes", write_utf_bytes),
         ("readUTFBytes", read_utf_bytes),
+        ("readObject", read_object),
     ];
     write.define_public_builtin_instance_methods(mc, PUBLIC_INSTANCE_METHODS);
 
@@ -795,8 +952,18 @@ pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>
         ("length", Some(length), Some(set_length)),
         ("position", Some(position), Some(set_position)),
         ("endian", Some(endian), Some(set_endian)),
+        (
+            "objectEncoding",
+            Some(object_encoding),
+            Some(set_object_encoding),
+        ),
     ];
     write.define_public_builtin_instance_properties(mc, PUBLIC_INSTANCE_PROPERTIES);
+
+    // TODO: This property should have a setter
+    const CONSTANTS: &[(&str, u32)] = &[("defaultObjectEncoding", 3)];
+
+    write.define_public_constant_uint_class_traits(CONSTANTS);
 
     class
 }

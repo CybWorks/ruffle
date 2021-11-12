@@ -1,4 +1,4 @@
-use clap::Clap;
+use clap::Parser;
 use image::RgbaImage;
 use indicatif::{ProgressBar, ProgressStyle};
 use ruffle_core::backend::audio::NullAudioBackend;
@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use walkdir::{DirEntry, WalkDir};
 
-#[derive(Clap, Debug, Copy, Clone)]
+#[derive(Parser, Debug, Copy, Clone)]
 struct SizeOpt {
     /// The amount to scale the page size with
     #[clap(long = "scale", default_value = "1.0")]
@@ -34,7 +34,7 @@ struct SizeOpt {
     height: Option<u32>,
 }
 
-#[derive(Clap, Debug)]
+#[derive(Parser, Debug)]
 #[clap(name = "Ruffle Exporter", author, version)]
 struct Opt {
     /// The file or directory of files to export frames from
@@ -384,13 +384,14 @@ fn trace_path(_opt: &Opt) -> Option<&Path> {
 fn main() -> Result<(), Box<dyn Error>> {
     let opt: Opt = Opt::parse();
     let instance = wgpu::Instance::new(opt.graphics.into());
-    let descriptors = WgpuRenderBackend::<TextureTarget>::build_descriptors(
-        opt.graphics.into(),
-        instance,
-        None,
-        opt.power.into(),
-        trace_path(&opt),
-    )?;
+    let descriptors =
+        futures::executor::block_on(WgpuRenderBackend::<TextureTarget>::build_descriptors(
+            opt.graphics.into(),
+            instance,
+            None,
+            opt.power.into(),
+            trace_path(&opt),
+        ))?;
 
     if opt.swf.is_file() {
         capture_single_swf(descriptors, &opt)?;

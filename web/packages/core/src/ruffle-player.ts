@@ -24,7 +24,9 @@ export const FLASH_ACTIVEX_CLASSID =
 const RUFFLE_ORIGIN = "https://ruffle.rs";
 const DIMENSION_REGEX = /^\s*(\d+(\.\d+)?(%)?)/;
 
-enum PanicError {
+let isAudioContextUnmuted = false;
+
+const enum PanicError {
     Unknown,
     CSPConflict,
     FileProtocol,
@@ -411,7 +413,11 @@ export class RufflePlayer extends HTMLElement {
             throw e;
         });
 
-        this.instance = new ruffleConstructor(this.container, this, config);
+        this.instance = await new ruffleConstructor(
+            this.container,
+            this,
+            config
+        );
         console.log("New Ruffle instance created.");
 
         // In Firefox, AudioContext.state is always "suspended" when the object has just been created.
@@ -427,25 +433,19 @@ export class RufflePlayer extends HTMLElement {
             this.container.style.visibility = "";
         }
 
-        const autoplay = Object.values(Object(AutoPlay)).includes(
-            config.autoplay
-        )
-            ? config.autoplay
-            : AutoPlay.Auto;
-        const unmuteVisibility = Object.values(Object(UnmuteOverlay)).includes(
-            config.unmuteOverlay
-        )
-            ? config.unmuteOverlay
-            : UnmuteOverlay.Visible;
+        this.unmuteAudioContext();
 
+        // Treat unspecified and invalid values as `AutoPlay.Auto`.
         if (
-            autoplay == AutoPlay.On ||
-            (autoplay == AutoPlay.Auto && this.audioState() === "running")
+            config.autoplay === AutoPlay.On ||
+            (config.autoplay !== AutoPlay.Off &&
+                this.audioState() === "running")
         ) {
             this.play();
 
             if (this.audioState() !== "running") {
-                if (unmuteVisibility === UnmuteOverlay.Visible) {
+                // Treat unspecified and invalid values as `UnmuteOverlay.Visible`.
+                if (config.unmuteOverlay !== UnmuteOverlay.Hidden) {
                     this.unmuteOverlay.style.display = "block";
                 }
 
@@ -537,6 +537,11 @@ export class RufflePlayer extends HTMLElement {
             return;
         }
 
+        if (isFallbackElement(this)) {
+            // Silently fail on attempt to play a Ruffle element inside a specific node.
+            return;
+        }
+
         try {
             const config: BaseLoadOptions = {
                 ...(window.RufflePlayer?.config ?? {}),
@@ -624,6 +629,22 @@ export class RufflePlayer extends HTMLElement {
     }
 
     /**
+     * Exported function that requests the browser to change the fullscreen state if
+     * it is allowed.
+     *
+     * @param isFull Whether to set to fullscreen or return to normal.
+     */
+    setFullscreen(isFull: boolean): void {
+        if (this.fullscreenEnabled) {
+            if (isFull) {
+                this.enterFullscreen();
+            } else {
+                this.exitFullscreen();
+            }
+        }
+    }
+
+    /**
      * Requests the browser to make this player fullscreen.
      *
      * This is not guaranteed to succeed, please check [[fullscreenEnabled]] first.
@@ -687,12 +708,12 @@ export class RufflePlayer extends HTMLElement {
             if (this.isFullscreen) {
                 items.push({
                     text: "Exit fullscreen",
-                    onClick: this.exitFullscreen.bind(this),
+                    onClick: () => this.instance?.set_fullscreen(false),
                 });
             } else {
                 items.push({
                     text: "Enter fullscreen",
-                    onClick: this.enterFullscreen.bind(this),
+                    onClick: () => this.instance?.set_fullscreen(true),
                 });
             }
         }
@@ -818,6 +839,61 @@ export class RufflePlayer extends HTMLElement {
                 this.unmuteOverlay.style.display = "none";
             }
         }
+    }
+
+    /**
+     * Plays a silent sound based on the AudioContext's sample rate.
+     *
+     * This is used to unmute audio on iOS and iPadOS when silent mode is enabled on the device (issue 1552).
+     */
+    private unmuteAudioContext(): void {
+        // No need to play the dummy sound again once audio is unmuted.
+        if (isAudioContextUnmuted) return;
+
+        // TODO: Use `navigator.userAgentData` to detect the platform when support improves?
+        if (navigator.maxTouchPoints < 1) {
+            isAudioContextUnmuted = true;
+            return;
+        }
+
+        this.container.addEventListener(
+            "click",
+            () => {
+                if (isAudioContextUnmuted) return;
+
+                const audioContext = this.instance?.audio_context();
+                if (!audioContext) return;
+
+                const audio = new Audio();
+                audio.src = (() => {
+                    // Returns a seven samples long 8 bit mono WAVE file.
+                    // This is required to prevent the AudioContext from desyncing and crashing.
+                    const arrayBuffer = new ArrayBuffer(10);
+                    const dataView = new DataView(arrayBuffer);
+                    const sampleRate = audioContext.sampleRate;
+                    dataView.setUint32(0, sampleRate, true);
+                    dataView.setUint32(4, sampleRate, true);
+                    dataView.setUint16(8, 1, true);
+                    const missingCharacters = window
+                        .btoa(
+                            String.fromCharCode(...new Uint8Array(arrayBuffer))
+                        )
+                        .slice(0, 13);
+                    return `data:audio/wav;base64,UklGRisAAABXQVZFZm10IBAAAAABAAEA${missingCharacters}AgAZGF0YQcAAACAgICAgICAAAA=`;
+                })();
+
+                audio.load();
+                audio
+                    .play()
+                    .then(() => {
+                        isAudioContextUnmuted = true;
+                    })
+                    .catch((err) => {
+                        console.warn(`Failed to play dummy sound: ${err}`);
+                    });
+            },
+            { once: true }
+        );
     }
 
     /**
@@ -993,7 +1069,7 @@ export class RufflePlayer extends HTMLElement {
         const issueTitle = `Error on ${pageUrl}`;
         let issueLink = `https://github.com/ruffle-rs/ruffle/issues/new?title=${encodeURIComponent(
             issueTitle
-        )}&body=`;
+        )}&labels=error-report&body=`;
         let issueBody = encodeURIComponent(errorText);
         if (
             errorArray.stackIndex > -1 &&
@@ -1251,7 +1327,7 @@ export class RufflePlayer extends HTMLElement {
 /**
  * Describes the loading state of an SWF movie.
  */
-export enum ReadyState {
+export const enum ReadyState {
     /**
      * No movie is loaded, or no information is yet available about the movie.
      */
@@ -1307,7 +1383,7 @@ export function isScriptAccessAllowed(
  * @returns True if the built-in context items should be shown.
  */
 export function isBuiltInContextMenuVisible(menu: string | null): boolean {
-    if (menu === "true" || menu === null) {
+    if (menu === null || menu.toLowerCase() === "true") {
         return true;
     }
     return false;
@@ -1334,6 +1410,27 @@ export function isSwfFilename(filename: string | null): boolean {
                 return true;
             }
         }
+    }
+    return false;
+}
+
+/**
+ * Determine if an element is a child of a node that was not supported
+ * in non-HTML5 compliant browsers. If so, the element was meant to be
+ * used as a fallback content.
+ *
+ * @param elem The element to test.
+ * @returns True if the element is inside an <audio> or <video> node.
+ */
+export function isFallbackElement(elem: HTMLElement): boolean {
+    let parent = elem.parentElement;
+    while (parent !== null) {
+        switch (parent.tagName) {
+            case "AUDIO":
+            case "VIDEO":
+                return true;
+        }
+        parent = parent.parentElement;
     }
     return false;
 }

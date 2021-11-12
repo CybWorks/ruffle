@@ -2,7 +2,7 @@
 name = "ruffle_web"
 version = "0.1.0"
 authors = ["Mike Welsh <mwelsh@gmail.com>"]
-edition = "2018"
+edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Web (WASM) bindings to the Ruffle flash player"
 readme = "README.md"
@@ -24,21 +24,23 @@ lzma = ["ruffle_core/lzma"]
 # web features
 canvas = ["ruffle_render_canvas"]
 webgl = ["ruffle_render_webgl"]
+wgpu = ["ruffle_render_wgpu"]
 
 [dependencies]
 byteorder = "1.4"
-console_error_panic_hook = { version = "0.1.1", optional = true }
+console_error_panic_hook = { version = "0.1.7", optional = true }
 console_log = { version = "0.2", optional = true }
 fnv = "1.0.7"
 generational-arena = "0.2.8"
-js-sys = "0.3.53"
+js-sys = "0.3.55"
 log = { version = "0.4", features = ["serde"] }
 ruffle_render_canvas = { path = "../render/canvas", optional = true }
 ruffle_web_common = { path = "common" }
 ruffle_render_webgl = { path = "../render/webgl", optional = true }
+ruffle_render_wgpu = { path = "../render/wgpu", optional = true }
 url = "2.2.2"
-wasm-bindgen = { version = "=0.2.76", features = ["serde-serialize"] }
-wasm-bindgen-futures = "0.4.26"
+wasm-bindgen = { version = "=0.2.78", features = ["serde-serialize"] }
+wasm-bindgen-futures = "0.4.28"
 chrono = { version = "0.4", features = ["wasmbind"] }
 getrandom = { version = "0.2", features = ["js"] }
 serde = { version = "1.0.130", features = ["derive"] }
@@ -48,14 +50,14 @@ base64 = "0.13.0"
 [dependencies.ruffle_core]
 path = "../core"
 default-features = false
-features = ["h263", "serde", "wasm-bindgen"]
+features = ["h263", "vp6", "serde", "wasm-bindgen"]
 
 [dependencies.web-sys]
 version = "0.3.50"
 features = [
     "AddEventListenerOptions", "AudioBuffer", "AudioBufferSourceNode", "AudioParam", "AudioProcessingEvent", "AudioContext", "AudioDestinationNode",
     "AudioNode", "CanvasRenderingContext2d", "ChannelMergerNode", "ChannelSplitterNode", "CssStyleDeclaration", "Document",
-    "Element", "Event", "EventTarget", "GainNode", "HtmlCanvasElement", "HtmlElement", "HtmlImageElement", "MouseEvent",
+    "Element", "Event", "EventTarget", "GainNode", "Gpu", "HtmlCanvasElement", "HtmlElement", "HtmlImageElement", "MouseEvent",
     "Navigator", "Node", "Performance", "PointerEvent", "ScriptProcessorNode", "UiEvent", "Window", "Location", "HtmlFormElement",
     "KeyboardEvent", "Path2d", "CanvasGradient", "CanvasPattern", "SvgMatrix", "SvgsvgElement", "Response", "Request", "RequestInit",
     "Blob", "BlobPropertyBag", "Storage", "WheelEvent", "ImageData"]

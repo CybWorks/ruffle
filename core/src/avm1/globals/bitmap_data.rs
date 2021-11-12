@@ -7,40 +7,10 @@ use crate::avm1::object::bitmap_data::BitmapDataObject;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Object, TObject, Value};
 use crate::bitmap::bitmap_data::{BitmapData, ChannelOptions, Color};
+use crate::bitmap::is_size_valid;
 use crate::character::Character;
 use crate::display_object::TDisplayObject;
 use gc_arena::{GcCell, MutationContext};
-
-fn is_size_valid(swf_version: u8, width: u32, height: u32) -> bool {
-    // From https://help.adobe.com/en_US/FlashPlatform/reference/actionscript/3/flash/display/BitmapData.html:
-    // "In AIR 1.5 and Flash Player 10, the maximum size for a BitmapData object is 8,191 pixels in
-    // width or height, and the total number of pixels cannot exceed 16,777,215 pixels. (So, if a
-    // BitmapData object is 8,191 pixels wide, it can only be 2,048 pixels high.) In Flash Player 9
-    // and earlier and AIR 1.1 and earlier, the limitation is 2,880 pixels in height and 2,880 in width.
-    // Starting with AIR 3 and Flash player 11, the size limits for a BitmapData object have been removed.
-    // The maximum size of a bitmap is now dependent on the operating system."
-    //
-    // In addition, width and height of 0 are invalid in all versions.
-    if width == 0 || height == 0 {
-        return false;
-    }
-    if swf_version <= 9 {
-        if width > 2880 || height > 2880 {
-            return false;
-        }
-    } else if swf_version <= 12 {
-        if width >= 0x2000 || height >= 0x2000 || width * height >= 0x1000000 {
-            return false;
-        }
-    } else {
-        // These limits are undocumented, but seem to be reliable.
-        // TODO: Do they vary across different machines?
-        if width > 0x6666666 || height > 0x6666666 || width as u64 * height as u64 >= 0x20000000 {
-            return false;
-        }
-    }
-    true
-}
 
 const PROTO_DECLS: &[Declaration] = declare_properties! {
     "height" => property(height);
@@ -1125,26 +1095,28 @@ pub fn load_bitmap<'gc>(
         .and_then(|l| l.character_by_export_name(name.as_str()));
 
     if let Some(Character::Bitmap(bitmap_object)) = character {
-        if let Some(bitmap) = renderer.get_bitmap_pixels(bitmap_object.bitmap_handle()) {
-            let new_bitmap_data = BitmapDataObject::empty_object(
-                activation.context.gc_context,
-                Some(activation.context.avm1.prototypes.bitmap_data),
-            );
-
-            let pixels: Vec<i32> = bitmap.data.into();
-            new_bitmap_data
-                .as_bitmap_data_object()
-                .unwrap()
-                .bitmap_data()
-                .write(activation.context.gc_context)
-                .set_pixels(
-                    bitmap.width,
-                    bitmap.height,
-                    true,
-                    pixels.into_iter().map(|p| p.into()).collect(),
+        if let Some(bitmap_handle) = bitmap_object.bitmap_handle() {
+            if let Some(bitmap) = renderer.get_bitmap_pixels(bitmap_handle) {
+                let new_bitmap_data = BitmapDataObject::empty_object(
+                    activation.context.gc_context,
+                    Some(activation.context.avm1.prototypes.bitmap_data),
                 );
 
-            return Ok(new_bitmap_data.into());
+                let pixels: Vec<i32> = bitmap.data.into();
+                new_bitmap_data
+                    .as_bitmap_data_object()
+                    .unwrap()
+                    .bitmap_data()
+                    .write(activation.context.gc_context)
+                    .set_pixels(
+                        bitmap.width,
+                        bitmap.height,
+                        true,
+                        pixels.into_iter().map(|p| p.into()).collect(),
+                    );
+
+                return Ok(new_bitmap_data.into());
+            }
         }
     }
 

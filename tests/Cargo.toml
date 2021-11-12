@@ -2,11 +2,12 @@
 name = "tests"
 version = "0.1.0"
 authors = ["Aaron Hill <aa1ronham@gmail.com>"]
-edition = "2018"
+edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+futures = "0.3.17"
 ruffle_core = { path = "../core" }
 ruffle_render_wgpu = { path = "../render/wgpu" }
 image = "0.23.14"
@@ -19,5 +20,5 @@ imgtests = []
 
 [dev-dependencies]
 approx = "0.5.0"
-pretty_assertions = "0.6.1"
+pretty_assertions = "1.0.0"
 env_logger = "0.9.0"

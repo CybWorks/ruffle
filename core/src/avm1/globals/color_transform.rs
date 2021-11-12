@@ -3,12 +3,12 @@
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
-use crate::avm1::{AvmString, Object, TObject, Value};
+use crate::avm1::{Object, TObject, Value};
+use crate::string::AvmString;
 use gc_arena::MutationContext;
 
 use crate::avm1::object::color_transform_object::ColorTransformObject;
 use crate::color_transform::ColorTransform;
-use std::convert::Into;
 use swf::Fixed8;
 
 const PROTO_DECLS: &[Declaration] = declare_properties! {

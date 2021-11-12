@@ -1,20 +1,16 @@
 //! Function object impl
 
 use crate::avm2::activation::Activation;
-use crate::avm2::class::Class;
 use crate::avm2::function::Executable;
 use crate::avm2::method::Method;
 use crate::avm2::names::{Namespace, QName};
 use crate::avm2::object::script_object::{ScriptObject, ScriptObjectData};
-use crate::avm2::object::{Object, ObjectPtr, TObject};
-use crate::avm2::scope::Scope;
-use crate::avm2::string::AvmString;
+use crate::avm2::object::{ClassObject, Object, ObjectPtr, TObject};
+use crate::avm2::scope::ScopeChain;
 use crate::avm2::value::Value;
 use crate::avm2::Error;
-use crate::{
-    impl_avm2_custom_object, impl_avm2_custom_object_instance, impl_avm2_custom_object_properties,
-};
 use gc_arena::{Collect, GcCell, MutationContext};
+use std::cell::{Ref, RefMut};
 
 /// An Object which can be called to execute its function code.
 #[derive(Collect, Debug, Clone, Copy)]
@@ -28,7 +24,7 @@ pub struct FunctionObjectData<'gc> {
     base: ScriptObjectData<'gc>,
 
     /// Executable code
-    exec: Option<Executable<'gc>>,
+    exec: Executable<'gc>,
 }
 
 impl<'gc> FunctionObject<'gc> {
@@ -39,9 +35,9 @@ impl<'gc> FunctionObject<'gc> {
     pub fn from_function(
         activation: &mut Activation<'_, 'gc, '_>,
         method: Method<'gc>,
-        scope: Option<GcCell<'gc, Scope<'gc>>>,
+        scope: ScopeChain<'gc>,
     ) -> Result<Object<'gc>, Error> {
-        let mut this = Self::from_method(activation, method, scope, None);
+        let mut this = Self::from_method(activation, method, scope, None, None);
         let es3_proto = ScriptObject::object(
             activation.context.gc_context,
             activation.avm2().prototypes().object,
@@ -52,7 +48,6 @@ impl<'gc> FunctionObject<'gc> {
             QName::new(Namespace::public(), "prototype"),
             0,
             es3_proto.into(),
-            false,
         );
 
         Ok(this)
@@ -65,48 +60,19 @@ impl<'gc> FunctionObject<'gc> {
     pub fn from_method(
         activation: &mut Activation<'_, 'gc, '_>,
         method: Method<'gc>,
-        scope: Option<GcCell<'gc, Scope<'gc>>>,
+        scope: ScopeChain<'gc>,
         receiver: Option<Object<'gc>>,
+        subclass_object: Option<ClassObject<'gc>>,
     ) -> Object<'gc> {
         let fn_proto = activation.avm2().prototypes().function;
-        let exec = Some(Executable::from_method(
-            method,
-            scope,
-            receiver,
-            activation.context.gc_context,
-        ));
+        let fn_class = activation.avm2().classes().function;
+        let exec = Executable::from_method(method, scope, receiver, subclass_object);
 
         FunctionObject(GcCell::allocate(
             activation.context.gc_context,
             FunctionObjectData {
-                base: ScriptObjectData::base_new(Some(fn_proto), None),
+                base: ScriptObjectData::base_new(Some(fn_proto), Some(fn_class)),
                 exec,
-            },
-        ))
-        .into()
-    }
-
-    /// Construct a function from an ABC method, the current closure scope, and
-    /// a function prototype.
-    ///
-    /// The given `reciever`, if supplied, will override any user-specified
-    /// `this` parameter.
-    ///
-    /// This function exists primarily for early globals. Unless you are in a
-    /// position where you cannot access `Function.prototype` yet, you should
-    /// use `from_method` instead.
-    pub fn from_method_and_proto(
-        mc: MutationContext<'gc, '_>,
-        method: Method<'gc>,
-        scope: Option<GcCell<'gc, Scope<'gc>>>,
-        fn_proto: Object<'gc>,
-        receiver: Option<Object<'gc>>,
-    ) -> Object<'gc> {
-        FunctionObject(GcCell::allocate(
-            mc,
-            FunctionObjectData {
-                base: ScriptObjectData::base_new(Some(fn_proto), None),
-                exec: Some(Executable::from_method(method, scope, receiver, mc)),
             },
         ))
         .into()
@@ -114,9 +80,17 @@ impl<'gc> FunctionObject<'gc> {
 }
 
 impl<'gc> TObject<'gc> for FunctionObject<'gc> {
-    impl_avm2_custom_object!(base);
-    impl_avm2_custom_object_properties!(base);
-    impl_avm2_custom_object_instance!(base);
+    fn base(&self) -> Ref<ScriptObjectData<'gc>> {
+        Ref::map(self.0.read(), |read| &read.base)
+    }
+
+    fn base_mut(&self, mc: MutationContext<'gc, '_>) -> RefMut<ScriptObjectData<'gc>> {
+        RefMut::map(self.0.write(mc), |write| &mut write.base)
+    }
+
+    fn as_ptr(&self) -> *const ObjectPtr {
+        self.0.as_ptr() as *const ObjectPtr
+    }
 
     fn to_string(&self, _mc: MutationContext<'gc, '_>) -> Result<Value<'gc>, Error> {
         Ok("function Function() {}".into())
@@ -130,8 +104,8 @@ impl<'gc> TObject<'gc> for FunctionObject<'gc> {
         Ok(Value::Object(Object::from(*self)))
     }
 
-    fn as_executable(&self) -> Option<Executable<'gc>> {
-        self.0.read().exec.clone()
+    fn as_executable(&self) -> Option<Ref<Executable<'gc>>> {
+        Some(Ref::map(self.0.read(), |r| &r.exec))
     }
 
     fn call(
@@ -139,19 +113,11 @@ impl<'gc> TObject<'gc> for FunctionObject<'gc> {
         receiver: Option<Object<'gc>>,
         arguments: &[Value<'gc>],
         activation: &mut Activation<'_, 'gc, '_>,
-        subclass_object: Option<Object<'gc>>,
     ) -> Result<Value<'gc>, Error> {
-        if let Some(exec) = &self.0.read().exec {
-            exec.exec(
-                receiver,
-                arguments,
-                activation,
-                subclass_object,
-                self.into(),
-            )
-        } else {
-            Err("Not a callable function!".into())
-        }
+        self.0
+            .read()
+            .exec
+            .exec(receiver, arguments, activation, self.into())
     }
 
     fn construct(
@@ -163,14 +129,14 @@ impl<'gc> TObject<'gc> for FunctionObject<'gc> {
         let prototype = self
             .get_property(
                 class,
-                &QName::new(Namespace::public(), "prototype"),
+                &QName::new(Namespace::public(), "prototype").into(),
                 activation,
             )?
             .coerce_to_object(activation)?;
 
         let instance = prototype.derive(activation)?;
 
-        self.call(Some(instance), arguments, activation, None)?;
+        self.call(Some(instance), arguments, activation)?;
 
         Ok(instance)
     }
@@ -178,10 +144,11 @@ impl<'gc> TObject<'gc> for FunctionObject<'gc> {
     fn derive(&self, activation: &mut Activation<'_, 'gc, '_>) -> Result<Object<'gc>, Error> {
         let this: Object<'gc> = Object::FunctionObject(*self);
         let base = ScriptObjectData::base_new(Some(this), None);
+        let exec = self.0.read().exec.clone();
 
         Ok(FunctionObject(GcCell::allocate(
             activation.context.gc_context,
-            FunctionObjectData { base, exec: None },
+            FunctionObjectData { base, exec },
         ))
         .into())
     }

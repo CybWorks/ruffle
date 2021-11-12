@@ -98,3 +98,54 @@ trace(y is ITest3);
 
 trace("//y is Test4");
 trace(y is Test4);
+
+trace("//Test3.prototype is Object");
+trace(Test3.prototype is Object);
+
+trace("//Test3.prototype is Test2");
+trace(Test3.prototype is Test2);
+
+trace("//Test3.prototype is ITest2");
+trace(Test3.prototype is ITest2);
+
+trace("//Test3.prototype is Test3");
+trace(Test3.prototype is Test3);
+
+trace("//Test3.prototype is ITest3");
+trace(Test3.prototype is ITest3);
+
+trace("//Test3.prototype is Test4");
+trace(Test3.prototype is Test4);
+
+trace("//Test4.prototype is Object");
+trace(Test4.prototype is Object);
+
+trace("//Test4.prototype is Test2");
+trace(Test4.prototype is Test2);
+
+trace("//Test4.prototype is ITest2");
+trace(Test4.prototype is ITest2);
+
+trace("//Test4.prototype is Test3");
+trace(Test4.prototype is Test3);
+
+trace("//Test4.prototype is ITest3");
+trace(Test4.prototype is ITest3);
+
+trace("//Test4.prototype is Test4");
+trace(Test4.prototype is Test4);
+
+trace("//Object.prototype is Object");
+trace(Object.prototype is Object);
+
+trace("//Function.prototype is Object");
+trace(Function.prototype is Object);
+
+trace("//Function.prototype is Function");
+trace(Function.prototype is Function);
+
+trace("//Class.prototype is Object");
+trace(Class.prototype is Object);
+
+trace("//Class.prototype is Class");
+trace(Class.prototype is Class);

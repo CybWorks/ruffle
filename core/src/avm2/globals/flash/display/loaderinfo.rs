@@ -79,11 +79,7 @@ pub fn application_domain<'gc>(
         if let Some(loader_stream) = this.as_loader_stream() {
             match &*loader_stream {
                 LoaderStream::Stage => {
-                    return Ok(DomainObject::from_domain(
-                        activation,
-                        activation.context.avm2.global_domain(),
-                    )?
-                    .into());
+                    return Ok(DomainObject::from_domain(activation, activation.domain())?.into());
                 }
                 LoaderStream::Swf(movie, _) => {
                     let domain = activation
@@ -388,7 +384,7 @@ pub fn parameters<'gc>(
                         let avm_v = AvmString::new(activation.context.gc_context, v);
                         params_obj.set_property(
                             params_obj,
-                            &QName::new(Namespace::public(), avm_k),
+                            &QName::new(Namespace::public(), avm_k).into(),
                             avm_v.into(),
                             activation,
                         )?;

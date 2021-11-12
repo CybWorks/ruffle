@@ -37,14 +37,9 @@ pub fn current_domain<'gc>(
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error> {
-    let globals = activation.scope().map(|s| s.read().globals());
-    let appdomain = globals.and_then(|g| g.as_application_domain());
+    let appdomain = activation.caller_domain();
 
-    if let Some(appdomain) = appdomain {
-        return Ok(DomainObject::from_domain(activation, appdomain)?.into());
-    }
-
-    Ok(Value::Undefined)
+    Ok(DomainObject::from_domain(activation, appdomain)?.into())
 }
 
 /// `parentDomain` property
@@ -80,7 +75,7 @@ pub fn get_definition<'gc>(
             .get_defining_script(&qname.into())?
             .ok_or_else(|| format!("No definition called {} exists", local_name))?;
         let globals = defined_script.globals(&mut activation.context)?;
-        let definition = globals.get_property(globals, &qname, activation)?;
+        let definition = globals.get_property(globals, &qname.into(), activation)?;
 
         return Ok(definition);
     }

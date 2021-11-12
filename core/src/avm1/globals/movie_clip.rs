@@ -5,7 +5,7 @@ use crate::avm1::error::Error;
 use crate::avm1::globals::display_object::{self, AVM_DEPTH_BIAS, AVM_MAX_DEPTH};
 use crate::avm1::globals::matrix::gradient_object_to_matrix;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
-use crate::avm1::{self, AvmString, Object, ScriptObject, TObject, Value};
+use crate::avm1::{self, Object, ScriptObject, TObject, Value};
 use crate::avm_error;
 use crate::avm_warn;
 use crate::backend::{navigator::NavigationMethod, render};
@@ -15,7 +15,7 @@ use crate::display_object::{
 use crate::ecma_conversions::f64_to_wrapping_i32;
 use crate::prelude::*;
 use crate::shape_utils::DrawCommand;
-use crate::tag_utils::SwfSlice;
+use crate::string::AvmString;
 use crate::vminterface::Instantiator;
 use gc_arena::MutationContext;
 use std::borrow::Cow;
@@ -210,7 +210,7 @@ fn attach_bitmap<'gc>(
                     let display_object = Bitmap::new_with_bitmap_data(
                         &mut activation.context,
                         0,
-                        bitmap_handle,
+                        Some(bitmap_handle),
                         bitmap_data.read().width() as u16,
                         bitmap_data.read().height() as u16,
                         Some(bitmap_data),
@@ -644,7 +644,7 @@ fn attach_movie<'gc>(
         .and_then(|l| l.instantiate_by_export_name(&export_name, activation.context.gc_context))
     {
         // Set name and attach to parent.
-        new_clip.set_name(activation.context.gc_context, &new_instance_name);
+        new_clip.set_name(activation.context.gc_context, new_instance_name);
         movie_clip.replace_at_depth(&mut activation.context, new_clip, depth);
         let init_object = if let Some(Value::Object(init_object)) = init_object {
             Some(init_object.to_owned())
@@ -692,10 +692,10 @@ fn create_empty_movie_clip<'gc>(
         .movie()
         .or_else(|| activation.base_clip().movie())
         .unwrap();
-    let new_clip = MovieClip::new(SwfSlice::empty(swf_movie), activation.context.gc_context);
+    let new_clip = MovieClip::new(swf_movie, activation.context.gc_context);
 
     // Set name and attach to parent.
-    new_clip.set_name(activation.context.gc_context, &new_instance_name);
+    new_clip.set_name(activation.context.gc_context, new_instance_name);
     movie_clip.replace_at_depth(&mut activation.context, new_clip.into(), depth);
     new_clip.post_instantiation(
         &mut activation.context,
@@ -745,7 +745,7 @@ fn create_text_field<'gc>(
         EditText::new(&mut activation.context, movie, x, y, width, height).into();
     text_field.set_name(
         activation.context.gc_context,
-        &instance_name.coerce_to_string(activation)?,
+        instance_name.coerce_to_string(activation)?,
     );
     movie_clip.replace_at_depth(
         &mut activation.context,
@@ -811,27 +811,43 @@ pub fn duplicate_movie_clip_with_bias<'gc>(
         return Ok(Value::Undefined);
     }
 
-    if let Ok(new_clip) = activation
-        .context
-        .library
-        .library_for_movie(movie_clip.movie().unwrap())
-        .ok_or_else(|| "Movie is missing!".into())
-        .and_then(|l| l.instantiate_by_id(movie_clip.id(), activation.context.gc_context))
-    {
+    let id = movie_clip.id();
+    let movie = parent
+        .movie()
+        .or_else(|| activation.base_clip().movie())
+        .unwrap_or_else(|| activation.context.swf.clone());
+    let new_clip = if movie_clip.id() != 0 {
+        // Clip from SWF; instantiate a new copy.
+        activation
+            .context
+            .library
+            .library_for_movie(movie)
+            .ok_or_else(|| "Movie is missing!".into())
+            .and_then(|l| l.instantiate_by_id(id, activation.context.gc_context))
+    } else {
+        // Dynamically created clip; create a new empty movie clip.
+        Ok(MovieClip::new(movie, activation.context.gc_context).into())
+    };
+
+    if let Ok(new_clip) = new_clip {
         // Set name and attach to parent.
-        new_clip.set_name(activation.context.gc_context, &new_instance_name);
+        new_clip.set_name(activation.context.gc_context, new_instance_name);
         parent.replace_at_depth(&mut activation.context, new_clip, depth);
 
         // Copy display properties from previous clip to new clip.
-        new_clip.set_matrix(activation.context.gc_context, &*movie_clip.matrix());
+        new_clip.set_matrix(activation.context.gc_context, &*movie_clip.base().matrix());
         new_clip.set_color_transform(
             activation.context.gc_context,
-            &*movie_clip.color_transform(),
+            &*movie_clip.base().color_transform(),
         );
         new_clip.as_movie_clip().unwrap().set_clip_event_handlers(
             activation.context.gc_context,
             movie_clip.clip_actions().to_vec(),
         );
+        *new_clip.as_drawing(activation.context.gc_context).unwrap() = movie_clip
+            .as_drawing(activation.context.gc_context)
+            .unwrap()
+            .clone();
         // TODO: Any other properties we should copy...?
         // Definitely not ScriptObject properties.
 

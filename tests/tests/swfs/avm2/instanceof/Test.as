@@ -98,3 +98,54 @@ trace(y instanceof ITest3);
 
 trace("//y instanceof Test4");
 trace(y instanceof Test4);
+
+trace("//Test3.prototype instanceof Object");
+trace(Test3.prototype instanceof Object);
+
+trace("//Test3.prototype instanceof Test2");
+trace(Test3.prototype instanceof Test2);
+
+trace("//Test3.prototype instanceof ITest2");
+trace(Test3.prototype instanceof ITest2);
+
+trace("//Test3.prototype instanceof Test3");
+trace(Test3.prototype instanceof Test3);
+
+trace("//Test3.prototype instanceof ITest3");
+trace(Test3.prototype instanceof ITest3);
+
+trace("//Test3.prototype instanceof Test4");
+trace(Test3.prototype instanceof Test4);
+
+trace("//Test4.prototype instanceof Object");
+trace(Test4.prototype instanceof Object);
+
+trace("//Test4.prototype instanceof Test2");
+trace(Test4.prototype instanceof Test2);
+
+trace("//Test4.prototype instanceof ITest2");
+trace(Test4.prototype instanceof ITest2);
+
+trace("//Test4.prototype instanceof Test3");
+trace(Test4.prototype instanceof Test3);
+
+trace("//Test4.prototype instanceof ITest3");
+trace(Test4.prototype instanceof ITest3);
+
+trace("//Test4.prototype instanceof Test4");
+trace(Test4.prototype instanceof Test4);
+
+trace("//Object.prototype instanceof Object");
+trace(Object.prototype instanceof Object);
+
+trace("//Function.prototype instanceof Object");
+trace(Function.prototype instanceof Object);
+
+trace("//Function.prototype instanceof Function");
+trace(Function.prototype instanceof Function);
+
+trace("//Class.prototype instanceof Object");
+trace(Class.prototype instanceof Object);
+
+trace("//Class.prototype instanceof Class");
+trace(Class.prototype instanceof Class);

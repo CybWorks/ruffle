@@ -1,11 +1,12 @@
 use crate::avm1::function::FunctionObject;
 use crate::avm1::property_map::PropertyMap as Avm1PropertyMap;
-use crate::avm2::{Domain as Avm2Domain, Object as Avm2Object};
+use crate::avm2::{ClassObject as Avm2ClassObject, Domain as Avm2Domain};
 use crate::backend::{audio::SoundHandle, render};
 use crate::character::Character;
 use crate::display_object::{Bitmap, Graphic, MorphShape, TDisplayObject, Text};
 use crate::font::{Font, FontDescriptor};
 use crate::prelude::*;
+use crate::string::AvmString;
 use crate::tag_utils::SwfMovie;
 use crate::vminterface::AvmType;
 use gc_arena::{Collect, Gc, GcCell, MutationContext};
@@ -19,7 +20,7 @@ use weak_table::{traits::WeakElement, PtrWeakKeyHashMap, WeakValueHashMap};
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct Avm1ConstructorRegistry<'gc> {
-    symbol_map: GcCell<'gc, Avm1PropertyMap<FunctionObject<'gc>>>,
+    symbol_map: GcCell<'gc, Avm1PropertyMap<'gc, FunctionObject<'gc>>>,
     is_case_sensitive: bool,
 }
 
@@ -40,7 +41,7 @@ impl<'gc> Avm1ConstructorRegistry<'gc> {
 
     pub fn set(
         &self,
-        symbol: &str,
+        symbol: AvmString<'gc>,
         constructor: Option<FunctionObject<'gc>>,
         gc_context: MutationContext<'gc, '_>,
     ) {
@@ -80,7 +81,7 @@ impl WeakElement for WeakMovieSymbol {
 pub struct Avm2ClassRegistry<'gc> {
     /// A list of AVM2 class objects and the character IDs they are expected to
     /// instantiate.
-    class_map: WeakValueHashMap<Avm2Object<'gc>, WeakMovieSymbol>,
+    class_map: WeakValueHashMap<Avm2ClassObject<'gc>, WeakMovieSymbol>,
 }
 
 unsafe impl Collect for Avm2ClassRegistry<'_> {
@@ -110,7 +111,7 @@ impl<'gc> Avm2ClassRegistry<'gc> {
     /// a library symbol.
     pub fn class_symbol(
         &self,
-        class_object: Avm2Object<'gc>,
+        class_object: Avm2ClassObject<'gc>,
     ) -> Option<(Arc<SwfMovie>, CharacterId)> {
         match self.class_map.get(&class_object) {
             Some(MovieSymbol(movie, symbol)) => Some((movie, symbol)),
@@ -121,7 +122,7 @@ impl<'gc> Avm2ClassRegistry<'gc> {
     /// Associate an AVM2 class object with a given library symbol.
     pub fn set_class_symbol(
         &mut self,
-        class_object: Avm2Object<'gc>,
+        class_object: Avm2ClassObject<'gc>,
         movie: Arc<SwfMovie>,
         symbol: CharacterId,
     ) {
@@ -135,7 +136,7 @@ impl<'gc> Avm2ClassRegistry<'gc> {
 #[collect(no_drop)]
 pub struct MovieLibrary<'gc> {
     characters: HashMap<CharacterId, Character<'gc>>,
-    export_characters: Avm1PropertyMap<Character<'gc>>,
+    export_characters: Avm1PropertyMap<'gc, Character<'gc>>,
     jpeg_tables: Option<Vec<u8>>,
     fonts: HashMap<FontDescriptor, Font<'gc>>,
     avm_type: AvmType,
@@ -177,7 +178,7 @@ impl<'gc> MovieLibrary<'gc> {
     pub fn register_export(
         &mut self,
         id: CharacterId,
-        export_name: &str,
+        export_name: AvmString<'gc>,
     ) -> Option<&Character<'gc>> {
         if let Some(character) = self.characters.get(&id) {
             self.export_characters
@@ -380,10 +381,12 @@ impl<'gc> MovieLibrary<'gc> {
 
 impl<'gc> render::BitmapSource for MovieLibrary<'gc> {
     fn bitmap(&self, id: u16) -> Option<render::BitmapInfo> {
-        self.get_bitmap(id).map(|bitmap| render::BitmapInfo {
-            handle: bitmap.bitmap_handle(),
-            width: bitmap.width(),
-            height: bitmap.height(),
+        self.get_bitmap(id).and_then(|bitmap| {
+            Some(render::BitmapInfo {
+                handle: bitmap.bitmap_handle()?,
+                width: bitmap.width(),
+                height: bitmap.height(),
+            })
         })
     }
 }

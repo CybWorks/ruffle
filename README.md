@@ -1,5 +1,5 @@
 <p align="center">
- <a href="https://ruffle.rs"><img src="https://ruffle.rs/assets/logo.png" alt="Ruffle"></a>
+ <a href="https://ruffle.rs"><img src="https://ruffle.rs/assets/logo.svg" alt="Ruffle"></a>
 </p>
 <p align="center">
  <a href="https://github.com/ruffle-rs/ruffle/actions">
@@ -105,6 +105,9 @@ Sincere thanks to the diamond level sponsors of Ruffle:
   </a>
   <a href="http://kupogames.com/">
     <img src="https://ruffle.rs/assets/sponsors/mattroszak.png" alt="Matt Roszak">
+  </a>
+  <a href="https://www.dolldivine.com/">
+    <img src="https://ruffle.rs/assets/sponsors/dolldivine.png" alt="Doll Divine">
   </a>
 </p>
 

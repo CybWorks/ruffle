@@ -3,12 +3,12 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::method::{Method, NativeMethodImpl};
 use crate::avm2::names::{Multiname, Namespace, QName};
-use crate::avm2::object::Object;
+use crate::avm2::object::{ClassObject, Object};
 use crate::avm2::script::TranslationUnit;
-use crate::avm2::string::AvmString;
 use crate::avm2::traits::{Trait, TraitKind};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
+use crate::string::AvmString;
 use bitflags::bitflags;
 use gc_arena::{Collect, GcCell, MutationContext};
 use std::fmt;
@@ -50,7 +50,7 @@ bitflags! {
 ///  * `proto` - The prototype attached to the class object.
 ///  * `activation` - The current AVM2 activation.
 pub type AllocatorFn = for<'gc> fn(
-    Object<'gc>,
+    ClassObject<'gc>,
     Object<'gc>,
     &mut Activation<'_, 'gc, '_>,
 ) -> Result<Object<'gc>, Error>;
@@ -144,6 +144,12 @@ pub struct Class<'gc> {
 
     /// Whether or not this `Class` has loaded its traits or not.
     traits_loaded: bool,
+
+    /// Whether or not this is a system-defined class.
+    ///
+    /// System defined classes are allowed to have illegal trait configurations
+    /// without throwing a VerifyError.
+    is_system: bool,
 }
 
 /// Find traits in a list of traits matching a name.
@@ -244,6 +250,7 @@ impl<'gc> Class<'gc> {
                     mc,
                 ),
                 traits_loaded: true,
+                is_system: true,
             },
         )
     }
@@ -365,6 +372,7 @@ impl<'gc> Class<'gc> {
                     activation.context.gc_context,
                 ),
                 traits_loaded: false,
+                is_system: false,
             },
         ))
     }
@@ -408,6 +416,65 @@ impl<'gc> Class<'gc> {
         for abc_trait in abc_class.traits.iter() {
             self.class_traits
                 .push(Trait::from_abc_trait(unit, abc_trait, activation)?);
+        }
+
+        Ok(())
+    }
+
+    /// Completely validate a class against it's resolved superclass.
+    ///
+    /// This should be called at class creation time once the superclass name
+    /// has been resolved. It will return Ok for a valid class, and a
+    /// VerifyError for any invalid class.
+    pub fn validate_class(&self, superclass: Option<ClassObject<'gc>>) -> Result<(), Error> {
+        // System classes do not throw verify errors.
+        if self.is_system {
+            return Ok(());
+        }
+
+        if let Some(superclass) = superclass {
+            for instance_trait in self.instance_traits.iter() {
+                let mut current_superclass = Some(superclass);
+                let mut did_override = false;
+
+                while let Some(superclass) = current_superclass {
+                    let superclass_def = superclass.inner_class_definition();
+                    let read = superclass_def.read();
+
+                    for supertrait in read.instance_traits.iter() {
+                        if supertrait.name() == instance_trait.name() {
+                            match (supertrait.kind(), instance_trait.kind()) {
+                                //Getter/setter pairs do NOT override one another
+                                (TraitKind::Getter { .. }, TraitKind::Setter { .. }) => continue,
+                                (TraitKind::Setter { .. }, TraitKind::Getter { .. }) => continue,
+                                (_, _) => did_override = true,
+                            }
+
+                            if supertrait.is_final() {
+                                return Err(format!("VerifyError: Trait {} in class {} overrides final trait {} in class {}", instance_trait.name().local_name(), self.name().local_name(), supertrait.name().local_name(), read.name().local_name()).into());
+                            }
+
+                            if !instance_trait.is_override() {
+                                return Err(format!("VerifyError: Trait {} in class {} has same name as trait {} in class {}, but does not override it", instance_trait.name().local_name(), self.name().local_name(), supertrait.name().local_name(), read.name().local_name()).into());
+                            }
+
+                            break;
+                        }
+                    }
+
+                    // The superclass is already validated so we don't need to
+                    // check further.
+                    if did_override {
+                        break;
+                    }
+
+                    current_superclass = superclass.superclass_object();
+                }
+
+                if instance_trait.is_override() && !did_override {
+                    return Err(format!("VerifyError: Trait {} in class {} marked as override, does not override any other trait", instance_trait.name().local_name(), self.name().local_name()).into());
+                }
+            }
         }
 
         Ok(())
@@ -465,6 +532,7 @@ impl<'gc> Class<'gc> {
                 class_initializer_called: false,
                 class_traits: Vec::new(),
                 traits_loaded: true,
+                is_system: false,
             },
         ))
     }
@@ -553,6 +621,19 @@ impl<'gc> Class<'gc> {
         }
     }
     #[inline(never)]
+    pub fn define_as3_builtin_class_methods(
+        &mut self,
+        mc: MutationContext<'gc, '_>,
+        items: &[(&'static str, NativeMethodImpl)],
+    ) {
+        for &(name, value) in items {
+            self.define_class_trait(Trait::from_method(
+                QName::new(Namespace::as3_namespace(), name),
+                Method::from_builtin(value, name, mc),
+            ));
+        }
+    }
+    #[inline(never)]
     pub fn define_as3_builtin_instance_methods(
         &mut self,
         mc: MutationContext<'gc, '_>,
@@ -561,6 +642,20 @@ impl<'gc> Class<'gc> {
         for &(name, value) in items {
             self.define_instance_trait(Trait::from_method(
                 QName::new(Namespace::as3_namespace(), name),
+                Method::from_builtin(value, name, mc),
+            ));
+        }
+    }
+    #[inline(never)]
+    pub fn define_ns_builtin_instance_methods(
+        &mut self,
+        mc: MutationContext<'gc, '_>,
+        ns: &'static str,
+        items: &[(&'static str, NativeMethodImpl)],
+    ) {
+        for &(name, value) in items {
+            self.define_instance_trait(Trait::from_method(
+                QName::new(Namespace::Namespace(ns.into()), name),
                 Method::from_builtin(value, name, mc),
             ));
         }
@@ -613,6 +708,19 @@ impl<'gc> Class<'gc> {
                 QName::new(Namespace::public(), name),
                 QName::new(Namespace::public(), "Number").into(),
                 value.map(|v| v.into()),
+            ));
+        }
+    }
+    #[inline(never)]
+    pub fn define_private_slot_instance_traits(
+        &mut self,
+        items: &[(&'static str, &'static str, &'static str, &'static str)],
+    ) {
+        for &(ns, name, type_ns, type_name) in items {
+            self.define_instance_trait(Trait::from_slot(
+                QName::new(Namespace::Private(ns.into()), name),
+                QName::new(Namespace::Package(type_ns.into()), type_name).into(),
+                None,
             ));
         }
     }
@@ -732,6 +840,18 @@ impl<'gc> Class<'gc> {
     pub fn has_instance_trait(&self, name: &QName<'gc>) -> bool {
         for trait_entry in self.instance_traits.iter() {
             if name == trait_entry.name() {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Determines if this class provides a given trait with a particular
+    /// dispatch ID on its instances.
+    pub fn has_instance_trait_by_disp_id(&self, id: u32) -> bool {
+        for trait_entry in self.instance_traits.iter() {
+            if Some(id) == trait_entry.disp_id() {
                 return true;
             }
         }

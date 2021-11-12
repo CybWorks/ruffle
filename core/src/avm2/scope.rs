@@ -1,176 +1,214 @@
 //! Represents AVM2 scope chain resolution.
 
 use crate::avm2::activation::Activation;
+use crate::avm2::domain::Domain;
 use crate::avm2::names::Multiname;
 use crate::avm2::object::{Object, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
-use gc_arena::{Collect, GcCell, MutationContext};
-use std::cell::Ref;
+use gc_arena::{Collect, Gc, MutationContext};
+use std::ops::Deref;
 
-/// Indicates what kind of scope a scope is.
-#[derive(Copy, Clone, Debug, PartialEq, Collect)]
-#[collect(no_drop)]
-pub enum ScopeClass {
-    /// Scope represents global or closure scope.
-    GlobalOrClosure,
-
-    /// Scope represents an object added to the scope chain with `with`.
-    /// It is not inherited when closures are defined. Furthermore, a `with`
-    /// scope gains the ability to be searched for dynamic properties.
-    With,
-}
-
-/// Represents a scope chain for an AVM2 activation.
-#[derive(Debug, Collect)]
+/// Represents a Scope that can be on either a ScopeChain or local ScopeStack.
+#[derive(Debug, Collect, Clone, Copy)]
 #[collect(no_drop)]
 pub struct Scope<'gc> {
-    parent: Option<GcCell<'gc, Scope<'gc>>>,
-    class: ScopeClass,
+    /// The underlying object of this Scope
     values: Object<'gc>,
+
+    /// Indicates whether or not this is a `with` scope.
+    ///
+    /// A `with` scope allows searching the dynamic properties of
+    /// this scope.
+    with: bool,
 }
 
 impl<'gc> Scope<'gc> {
-    /// Push a scope onto the stack, producing a new scope chain that's one
-    /// item longer.
-    pub fn push_scope(
-        scope_stack: Option<GcCell<'gc, Scope<'gc>>>,
-        object: Object<'gc>,
-        mc: MutationContext<'gc, '_>,
-    ) -> GcCell<'gc, Self> {
-        GcCell::allocate(
-            mc,
-            Self {
-                parent: scope_stack,
-                class: ScopeClass::GlobalOrClosure,
-                values: object,
-            },
-        )
-    }
-
-    /// Construct a with scope to be used as the scope during a with block.
-    ///
-    /// A with block adds an object to the top of the scope chain, so unqualified
-    /// references will try to resolve on that object first.
-    pub fn push_with(
-        scope_stack: Option<GcCell<'gc, Scope<'gc>>>,
-        with_object: Object<'gc>,
-        mc: MutationContext<'gc, '_>,
-    ) -> GcCell<'gc, Self> {
-        GcCell::allocate(
-            mc,
-            Scope {
-                parent: scope_stack,
-                class: ScopeClass::With,
-                values: with_object,
-            },
-        )
-    }
-
-    pub fn pop_scope(&self) -> Option<GcCell<'gc, Scope<'gc>>> {
-        self.parent
-    }
-
-    /// Returns a reference to the current local scope object.
-    pub fn locals(&self) -> &Object<'gc> {
-        &self.values
-    }
-
-    /// Returns a reference to the current global scope object.
-    ///
-    /// By convention, the global scope is at the bottom of the scope stack.
-    pub fn globals(&self) -> Object<'gc> {
-        if let Some(parent) = self.parent {
-            parent.read().globals()
-        } else {
-            self.values
+    /// Creates a new regular Scope
+    pub fn new(values: Object<'gc>) -> Self {
+        Self {
+            values,
+            with: false,
         }
     }
 
-    /// Returns a reference to the current local scope object for mutation.
-    pub fn locals_mut(&mut self) -> &mut Object<'gc> {
-        &mut self.values
+    /// Creates a new `with` Scope
+    pub fn new_with(values: Object<'gc>) -> Self {
+        Self { values, with: true }
     }
 
-    /// Returns a reference to the parent scope object.
-    pub fn parent(&self) -> Option<Ref<Scope<'gc>>> {
-        match self.parent {
-            Some(ref p) => Some(p.read()),
-            None => None,
+    pub fn with(&self) -> bool {
+        self.with
+    }
+
+    pub fn values(&self) -> Object<'gc> {
+        self.values
+    }
+}
+
+/// A ScopeChain "chains" scopes together.
+///
+/// A ScopeChain is used for "remembering" what a scope looked like. A ScopeChain also
+/// contains an associated Domain that should be the domain that was in use during it's
+/// initial creation.
+///
+/// A ScopeChain is either created by chaining new scopes on top of an already existing
+/// ScopeChain, or if we havn't created one yet (like during script initialization), you can
+/// create an empty ScopeChain with only a Domain. A ScopeChain should **always** have a Domain.
+///
+/// ScopeChain's are copy-on-write, meaning when we chain new scopes on top of a ScopeChain, we
+/// actually create a completely brand new ScopeChain. The Domain of the ScopeChain we are chaining
+/// on top of will be used for the new ScopeChain.
+#[derive(Debug, Collect, Clone, Copy)]
+#[collect(no_drop)]
+pub struct ScopeChain<'gc> {
+    scopes: Option<Gc<'gc, Vec<Scope<'gc>>>>,
+    domain: Domain<'gc>,
+}
+
+impl<'gc> ScopeChain<'gc> {
+    /// Creates a brand new ScopeChain with a domain. The domain should be the current domain in use.
+    pub fn new(domain: Domain<'gc>) -> Self {
+        Self {
+            scopes: None,
+            domain,
         }
     }
 
-    pub fn parent_cell(&self) -> Option<GcCell<'gc, Scope<'gc>>> {
-        self.parent
+    /// Creates a new ScopeChain by chaining new scopes on top of this ScopeChain
+    pub fn chain(&self, mc: MutationContext<'gc, '_>, new_scopes: &[Scope<'gc>]) -> Self {
+        if new_scopes.is_empty() {
+            // If we are not actually adding any new scopes, we don't need to do anything.
+            return *self;
+        }
+        // TODO: This current implementation is a bit expensive, but it is exactly what avmplus does, so it's good enough for now.
+        match self.scopes {
+            Some(scopes) => {
+                // The new ScopeChain is created by cloning the scopes of this ScopeChain,
+                // and pushing the new scopes on top of that.
+                let mut cloned = scopes.deref().clone();
+                cloned.extend_from_slice(new_scopes);
+                Self {
+                    scopes: Some(Gc::allocate(mc, cloned)),
+                    domain: self.domain,
+                }
+            }
+            None => {
+                // We are chaining on top of an empty ScopeChain, so we don't actually
+                // need to chain anything.
+                Self {
+                    scopes: Some(Gc::allocate(mc, new_scopes.to_vec())),
+                    domain: self.domain,
+                }
+            }
+        }
     }
 
-    /// Find an object that contains a given property in the scope stack.
-    ///
-    /// This function yields `None` if no such scope exists.
+    pub fn get(&self, index: usize) -> Option<Scope<'gc>> {
+        self.scopes.and_then(|scopes| scopes.get(index).cloned())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.scopes.map(|scopes| scopes.is_empty()).unwrap_or(true)
+    }
+
+    /// Returns the domain associated with this ScopeChain.
+    pub fn domain(&self) -> Domain<'gc> {
+        self.domain
+    }
+
     pub fn find(
         &self,
         name: &Multiname<'gc>,
         activation: &mut Activation<'_, 'gc, '_>,
     ) -> Result<Option<Object<'gc>>, Error> {
-        if let Some(qname) = self.locals().resolve_multiname(name)? {
-            if self.locals().has_property(&qname)? {
-                return Ok(Some(*self.locals()));
+        // First search our scopes
+        if let Some(scopes) = self.scopes {
+            for (depth, scope) in scopes.iter().enumerate().rev() {
+                let values = scope.values();
+                if let Some(qname) = values.resolve_multiname(name)? {
+                    // We search the dynamic properties if either conditions are met:
+                    // 1. Scope is a `with` scope
+                    // 2. We are at depth 0 (global scope)
+                    //
+                    // But no matter what, we always search traits first.
+                    if values.has_trait(&qname)?
+                        || ((scope.with() || depth == 0) && values.has_property(&qname)?)
+                    {
+                        return Ok(Some(values));
+                    }
+                }
             }
         }
-
-        if let Some(scope) = self.parent() {
-            return scope.find(name, activation);
+        // That didn't work... let's try searching the domain now.
+        if let Some((_qname, mut script)) = self.domain.get_defining_script(name)? {
+            return Ok(Some(script.globals(&mut activation.context)?));
         }
-
-        if let Some(domain) = self.locals().as_application_domain() {
-            let script = domain.get_defining_script(name)?;
-
-            if let Some((_qname, mut script)) = script {
-                return Ok(Some(script.globals(&mut activation.context)?));
-            }
-        }
-
         Ok(None)
     }
 
-    /// Resolve a particular value in the scope chain.
-    ///
-    /// This function yields `None` if no such scope exists to provide the
-    /// property's value.
     pub fn resolve(
         &self,
         name: &Multiname<'gc>,
         activation: &mut Activation<'_, 'gc, '_>,
     ) -> Result<Option<Value<'gc>>, Error> {
-        if let Some(qname) = self.locals().resolve_multiname(name)? {
-            if self.locals().has_property(&qname)? {
-                return Ok(Some(self.values.get_property(
-                    self.values,
-                    &qname,
-                    activation,
-                )?));
+        if let Some(object) = self.find(name, activation)? {
+            Ok(Some(object.get_property(object, name, activation)?))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+/// Represents a ScopeStack to be used in the AVM2 activation. A new ScopeStack should be created
+/// per activation. A ScopeStack allows mutations, such as pushing new scopes, or popping scopes off.
+/// A ScopeStack should only ever be accessed by the activation it was created in.
+#[derive(Debug, Collect, Clone)]
+#[collect(no_drop)]
+pub struct ScopeStack<'gc> {
+    scopes: Vec<Scope<'gc>>,
+}
+
+impl<'gc> ScopeStack<'gc> {
+    pub fn new() -> Self {
+        Self { scopes: Vec::new() }
+    }
+
+    pub fn push(&mut self, scope: Scope<'gc>) {
+        self.scopes.push(scope);
+    }
+
+    pub fn pop(&mut self) -> Option<Scope<'gc>> {
+        self.scopes.pop()
+    }
+
+    pub fn get(&self, index: usize) -> Option<Scope<'gc>> {
+        self.scopes.get(index).cloned()
+    }
+
+    pub fn scopes(&self) -> &[Scope<'gc>] {
+        &self.scopes
+    }
+
+    /// Searches for a scope in this ScopeStack by a multiname.
+    ///
+    /// The `global` parameter indicates whether we are on global$init (script initializer).
+    /// When the `global` parameter is true, the scope at depth 0 is considered the global scope, and is
+    /// searched for dynamic properties.
+    pub fn find(&self, name: &Multiname<'gc>, global: bool) -> Result<Option<Object<'gc>>, Error> {
+        for (depth, scope) in self.scopes.iter().enumerate().rev() {
+            let values = scope.values();
+            if let Some(qname) = values.resolve_multiname(name)? {
+                // We search the dynamic properties if either conditions are met:
+                // 1. Scope is a `with` scope
+                // 2. We are at depth 0 AND we are at global$init (script initializer).
+                if values.has_trait(&qname)?
+                    || ((scope.with() || (global && depth == 0)) && values.has_property(&qname)?)
+                {
+                    return Ok(Some(values));
+                }
             }
         }
-
-        if let Some(parent) = self.parent {
-            return parent.read().resolve(name, activation);
-        }
-
-        if let Some(domain) = self.locals().as_application_domain() {
-            let script = domain.get_defining_script(name)?;
-
-            if let Some((qname, mut script)) = script {
-                let script_scope = script.globals(&mut activation.context)?;
-
-                return Ok(Some(script_scope.get_property(
-                    script_scope,
-                    &qname,
-                    activation,
-                )?));
-            }
-        }
-
-        //TODO: Should undefined variables halt execution?
         Ok(None)
     }
 }

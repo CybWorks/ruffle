@@ -17,7 +17,7 @@ use crate::focus_tracker::FocusTracker;
 use crate::library::Library;
 use crate::loader::LoadManager;
 use crate::prelude::*;
-use crate::tag_utils::{SwfMovie, SwfSlice};
+use crate::tag_utils::SwfMovie;
 use crate::vminterface::Instantiator;
 use gc_arena::{rootless_arena, MutationContext};
 use instant::Instant;
@@ -37,8 +37,7 @@ where
         let mut avm1 = Avm1::new(gc_context, swf_version);
         let mut avm2 = Avm2::new(gc_context);
         let swf = Arc::new(SwfMovie::empty(swf_version));
-        let root: DisplayObject<'gc> =
-            MovieClip::new(SwfSlice::empty(swf.clone()), gc_context).into();
+        let root: DisplayObject<'gc> = MovieClip::new(swf.clone(), gc_context).into();
         root.set_depth(gc_context, 0);
         let stage = Stage::empty(gc_context, 550, 400);
         let mut frame_rate = 12.0;
@@ -87,7 +86,7 @@ where
         context.stage.replace_at_depth(&mut context, root, 0);
 
         root.post_instantiation(&mut context, root, None, Instantiator::Movie, false);
-        root.set_name(context.gc_context, "");
+        root.set_name(context.gc_context, "".into());
 
         fn run_test<'a, 'gc: 'a, F>(
             activation: &mut Activation<'_, 'gc, '_>,
@@ -126,11 +125,13 @@ macro_rules! test_method {
             $(
                 for version in &$versions {
                     with_avm(*version, |activation, _root| -> Result<(), Error> {
+                        let name: $crate::avm1::AvmString<'_> = $name.into();
                         let object = $object(activation);
 
                         $(
                             let args: Vec<Value> = vec![$($arg.into()),*];
-                            assert_eq!(crate::avm1::object::TObject::call_method(&object, $name, &args, activation)?, $out.into(), "{:?} => {:?} in swf {}", args, $out, version);
+                            let ret = crate::avm1::object::TObject::call_method(&object, name, &args, activation)?;
+                            assert_eq!(ret, $out.into(), "{:?} => {:?} in swf {}", args, $out, version);
                         )*
 
                         Ok(())

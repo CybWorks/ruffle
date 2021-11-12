@@ -5,20 +5,11 @@ use gc_arena::Collect;
 /// Represents the transform for a DisplayObject.
 /// This includes both the transformation matrix and the color transform.
 ///
-#[derive(Clone, Collect, Debug)]
+#[derive(Clone, Collect, Debug, Default)]
 #[collect(require_static)]
 pub struct Transform {
     pub matrix: Matrix,
     pub color_transform: ColorTransform,
-}
-
-impl Default for Transform {
-    fn default() -> Self {
-        Self {
-            matrix: Default::default(),
-            color_transform: Default::default(),
-        }
-    }
 }
 
 impl From<Position<Twips>> for Transform {
@@ -55,9 +46,7 @@ impl TransformStack {
     }
 
     pub fn pop(&mut self) {
-        if self.0.len() <= 1 {
-            panic!("Transform stack underflow");
-        }
+        assert!(self.0.len() > 1, "Transform stack underflow");
         self.0.pop();
     }
 

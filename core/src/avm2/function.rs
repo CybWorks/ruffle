@@ -2,11 +2,11 @@
 
 use crate::avm2::activation::Activation;
 use crate::avm2::method::{BytecodeMethod, Method, NativeMethod};
-use crate::avm2::object::Object;
-use crate::avm2::scope::Scope;
+use crate::avm2::object::{ClassObject, Object};
+use crate::avm2::scope::ScopeChain;
 use crate::avm2::value::Value;
 use crate::avm2::Error;
-use gc_arena::{Collect, CollectionContext, Gc, GcCell, MutationContext};
+use gc_arena::{Collect, Gc};
 use std::fmt;
 
 /// Represents code written in AVM2 bytecode that can be executed by some
@@ -17,30 +17,41 @@ pub struct BytecodeExecutable<'gc> {
     /// The method code to execute from a given ABC file.
     method: Gc<'gc, BytecodeMethod<'gc>>,
 
-    /// The scope stack to pull variables from.
-    scope: Option<GcCell<'gc, Scope<'gc>>>,
+    /// The scope this method was defined in.
+    scope: ScopeChain<'gc>,
 
     /// The receiver that this function is always called with.
     ///
     /// If `None`, then the receiver provided by the caller is used. A
     /// `Some` value indicates a bound executable.
     receiver: Option<Object<'gc>>,
+
+    /// The bound superclass for this method.
+    ///
+    /// The `superclass` is the class that defined this method. If `None`,
+    /// then there is no defining superclass and `super` operations should fall
+    /// back to the `receiver`.
+    bound_superclass: Option<ClassObject<'gc>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
 pub struct NativeExecutable<'gc> {
     /// The method associated with the executable.
     method: Gc<'gc, NativeMethod<'gc>>,
 
+    /// The scope this method was defined in.
+    scope: ScopeChain<'gc>,
+
     /// The bound reciever for this method.
     bound_receiver: Option<Object<'gc>>,
-}
 
-unsafe impl<'gc> Collect for NativeExecutable<'gc> {
-    fn trace(&self, cc: CollectionContext) {
-        self.method.trace(cc);
-        self.bound_receiver.trace(cc);
-    }
+    /// The bound superclass for this method.
+    ///
+    /// The `superclass` is the class that defined this method. If `None`,
+    /// then there is no defining superclass and `super` operations should fall
+    /// back to the `receiver`.
+    bound_superclass: Option<ClassObject<'gc>>,
 }
 
 /// Represents code that can be executed by some means.
@@ -48,36 +59,33 @@ unsafe impl<'gc> Collect for NativeExecutable<'gc> {
 #[collect(no_drop)]
 pub enum Executable<'gc> {
     /// Code defined in Ruffle's binary.
-    Native(Gc<'gc, NativeExecutable<'gc>>),
+    Native(NativeExecutable<'gc>),
 
     /// Code defined in a loaded ABC file.
-    Action(Gc<'gc, BytecodeExecutable<'gc>>),
+    Action(BytecodeExecutable<'gc>),
 }
 
 impl<'gc> Executable<'gc> {
     /// Convert a method into an executable.
     pub fn from_method(
         method: Method<'gc>,
-        scope: Option<GcCell<'gc, Scope<'gc>>>,
+        scope: ScopeChain<'gc>,
         receiver: Option<Object<'gc>>,
-        mc: MutationContext<'gc, '_>,
+        superclass: Option<ClassObject<'gc>>,
     ) -> Self {
         match method {
-            Method::Native(method) => Self::Native(Gc::allocate(
-                mc,
-                NativeExecutable {
-                    method,
-                    bound_receiver: receiver,
-                },
-            )),
-            Method::Bytecode(method) => Self::Action(Gc::allocate(
-                mc,
-                BytecodeExecutable {
-                    method,
-                    scope,
-                    receiver,
-                },
-            )),
+            Method::Native(method) => Self::Native(NativeExecutable {
+                method,
+                scope,
+                bound_receiver: receiver,
+                bound_superclass: superclass,
+            }),
+            Method::Bytecode(method) => Self::Action(BytecodeExecutable {
+                method,
+                scope,
+                receiver,
+                bound_superclass: superclass,
+            }),
         }
     }
 
@@ -97,19 +105,20 @@ impl<'gc> Executable<'gc> {
         unbound_receiver: Option<Object<'gc>>,
         mut arguments: &[Value<'gc>],
         activation: &mut Activation<'_, 'gc, '_>,
-        subclass_object: Option<Object<'gc>>,
         callee: Object<'gc>,
     ) -> Result<Value<'gc>, Error> {
         match self {
             Executable::Native(bm) => {
                 let method = bm.method.method;
                 let receiver = bm.bound_receiver.or(unbound_receiver);
-                let scope = activation.scope();
+                let caller_domain = activation.caller_domain();
+                let subclass_object = bm.bound_superclass;
                 let mut activation = Activation::from_builtin(
                     activation.context.reborrow(),
-                    scope,
                     receiver,
                     subclass_object,
+                    bm.scope,
+                    caller_domain,
                 )?;
 
                 if arguments.len() > bm.method.signature.len() && !bm.method.is_variadic {
@@ -139,6 +148,8 @@ impl<'gc> Executable<'gc> {
                 }
 
                 let receiver = bm.receiver.or(unbound_receiver);
+                let subclass_object = bm.bound_superclass;
+
                 let mut activation = Activation::from_method(
                     activation.context.reborrow(),
                     bm.method,

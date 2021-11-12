@@ -9,8 +9,10 @@ use crate::avm2::object::{Object, StageObject, TObject};
 use crate::avm2::traits::Trait;
 use crate::avm2::value::Value;
 use crate::avm2::Error;
-use crate::display_object::{SoundTransform, TDisplayObject};
+use crate::display_object::{MovieClip, SoundTransform, TDisplayObject};
+use crate::tag_utils::SwfMovie;
 use gc_arena::{GcCell, MutationContext};
+use std::sync::Arc;
 
 /// Implements `flash.display.Sprite`'s instance constructor.
 pub fn instance_init<'gc>(
@@ -20,6 +22,17 @@ pub fn instance_init<'gc>(
 ) -> Result<Value<'gc>, Error> {
     if let Some(this) = this {
         activation.super_init(this, &[])?;
+
+        if this.as_display_object().is_none() {
+            let class_object = this
+                .instance_of()
+                .ok_or("Attempted to construct Sprite on a bare object")?;
+            let movie = Arc::new(SwfMovie::empty(activation.context.swf.version()));
+            let new_do =
+                MovieClip::new_with_avm2(movie, this, class_object, activation.context.gc_context);
+
+            this.init_display_object(activation.context.gc_context, new_do.into());
+        }
     }
 
     Ok(Value::Undefined)
@@ -45,14 +58,14 @@ pub fn graphics<'gc>(
             // Lazily initialize the `Graphics` object in a hidden property.
             let graphics = match this.get_property(
                 this,
-                &QName::new(Namespace::private(NS_RUFFLE_INTERNAL), "graphics"),
+                &QName::new(Namespace::private(NS_RUFFLE_INTERNAL), "graphics").into(),
                 activation,
             )? {
                 Value::Undefined | Value::Null => {
                     let graphics = Value::from(StageObject::graphics(activation, dobj)?);
                     this.set_property(
                         this,
-                        &QName::new(Namespace::private(NS_RUFFLE_INTERNAL), "graphics"),
+                        &QName::new(Namespace::private(NS_RUFFLE_INTERNAL), "graphics").into(),
                         graphics.clone(),
                         activation,
                     )?;
@@ -74,7 +87,7 @@ pub fn sound_transform<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error> {
     if let Some(dobj) = this.and_then(|o| o.as_display_object()) {
-        let dobj_st = dobj.sound_transform().clone();
+        let dobj_st = dobj.base().sound_transform().clone();
 
         return Ok(dobj_st.into_avm2_object(activation)?.into());
     }

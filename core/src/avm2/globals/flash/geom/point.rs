@@ -1,9 +1,9 @@
 //! `flash.geom.Point` builtin/prototype
 
-use crate::avm1::AvmString;
 use crate::avm2::class::{Class, ClassAttributes};
 use crate::avm2::method::{Method, NativeMethodImpl};
 use crate::avm2::{Activation, Error, Namespace, Object, QName, TObject, Value};
+use crate::string::AvmString;
 use gc_arena::{GcCell, MutationContext};
 
 pub fn create_point<'gc>(
@@ -33,10 +33,18 @@ fn coords<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
 ) -> Result<(f64, f64), Error> {
     let x = this
-        .get_property(*this, &QName::new(Namespace::public(), "x"), activation)?
+        .get_property(
+            *this,
+            &QName::new(Namespace::public(), "x").into(),
+            activation,
+        )?
         .coerce_to_number(activation)?;
     let y = this
-        .get_property(*this, &QName::new(Namespace::public(), "y"), activation)?
+        .get_property(
+            *this,
+            &QName::new(Namespace::public(), "y").into(),
+            activation,
+        )?
         .coerce_to_number(activation)?;
     Ok((x, y))
 }
@@ -48,13 +56,13 @@ fn set_coords<'gc>(
 ) -> Result<(), Error> {
     this.set_property(
         *this,
-        &QName::new(Namespace::public(), "x"),
+        &QName::new(Namespace::public(), "x").into(),
         value.0.into(),
         activation,
     )?;
     this.set_property(
         *this,
-        &QName::new(Namespace::public(), "y"),
+        &QName::new(Namespace::public(), "y").into(),
         value.1.into(),
         activation,
     )?;
@@ -320,10 +328,18 @@ pub fn to_string<'gc>(
 ) -> Result<Value<'gc>, Error> {
     if let Some(this) = this {
         let x = this
-            .get_property(this, &QName::new(Namespace::public(), "x"), activation)?
+            .get_property(
+                this,
+                &QName::new(Namespace::public(), "x").into(),
+                activation,
+            )?
             .coerce_to_string(activation)?;
         let y = this
-            .get_property(this, &QName::new(Namespace::public(), "y"), activation)?
+            .get_property(
+                this,
+                &QName::new(Namespace::public(), "y").into(),
+                activation,
+            )?
             .coerce_to_string(activation)?;
         return Ok(
             AvmString::new(activation.context.gc_context, format!("(x={}, y={})", x, y)).into(),
@@ -352,6 +368,9 @@ pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>
         Option<NativeMethodImpl>,
     )] = &[("length", Some(length), None)];
     write.define_public_builtin_instance_properties(mc, PUBLIC_INSTANCE_PROPERTIES);
+
+    const PUBLIC_INSTANCE_NUMBER_SLOTS: &[(&str, Option<f64>)] = &[("x", None), ("y", None)];
+    write.define_public_slot_number_instance_traits(PUBLIC_INSTANCE_NUMBER_SLOTS);
 
     const PUBLIC_CLASS_METHODS: &[(&str, NativeMethodImpl)] = &[
         ("distance", distance),

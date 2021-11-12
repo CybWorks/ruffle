@@ -1,20 +1,17 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::bytearray::ByteArrayStorage;
-use crate::avm2::class::Class;
 use crate::avm2::names::{Namespace, QName};
 use crate::avm2::object::script_object::ScriptObjectData;
-use crate::avm2::object::{Object, ObjectPtr, TObject};
-use crate::avm2::scope::Scope;
-use crate::avm2::string::AvmString;
+use crate::avm2::object::{ClassObject, Object, ObjectPtr, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
-use crate::{impl_avm2_custom_object, impl_avm2_custom_object_instance};
+use crate::string::AvmString;
 use gc_arena::{Collect, GcCell, MutationContext};
 use std::cell::{Ref, RefMut};
 
 /// A class instance allocator that allocates ByteArray objects.
 pub fn bytearray_allocator<'gc>(
-    class: Object<'gc>,
+    class: ClassObject<'gc>,
     proto: Object<'gc>,
     activation: &mut Activation<'_, 'gc, '_>,
 ) -> Result<Object<'gc>, Error> {
@@ -43,9 +40,43 @@ pub struct ByteArrayObjectData<'gc> {
     storage: ByteArrayStorage,
 }
 
+impl<'gc> ByteArrayObject<'gc> {
+    pub fn from_storage(
+        activation: &mut Activation<'_, 'gc, '_>,
+        bytes: ByteArrayStorage,
+    ) -> Result<Object<'gc>, Error> {
+        let class = activation.avm2().classes().bytearray;
+        let proto = activation.avm2().prototypes().bytearray;
+        let base = ScriptObjectData::base_new(Some(proto), Some(class));
+
+        let mut instance: Object<'gc> = ByteArrayObject(GcCell::allocate(
+            activation.context.gc_context,
+            ByteArrayObjectData {
+                base,
+                storage: bytes,
+            },
+        ))
+        .into();
+        instance.install_instance_traits(activation, class)?;
+
+        class.call_native_init(Some(instance), &[], activation)?;
+
+        Ok(instance)
+    }
+}
+
 impl<'gc> TObject<'gc> for ByteArrayObject<'gc> {
-    impl_avm2_custom_object!(base);
-    impl_avm2_custom_object_instance!(base);
+    fn base(&self) -> Ref<ScriptObjectData<'gc>> {
+        Ref::map(self.0.read(), |read| &read.base)
+    }
+
+    fn base_mut(&self, mc: MutationContext<'gc, '_>) -> RefMut<ScriptObjectData<'gc>> {
+        RefMut::map(self.0.write(mc), |write| &mut write.base)
+    }
+
+    fn as_ptr(&self) -> *const ObjectPtr {
+        self.0.as_ptr() as *const ObjectPtr
+    }
 
     fn get_property_local(
         self,
@@ -132,27 +163,19 @@ impl<'gc> TObject<'gc> for ByteArrayObject<'gc> {
         Ok(())
     }
 
-    fn is_property_overwritable(
-        self,
+    fn delete_property_local(
+        &self,
         gc_context: MutationContext<'gc, '_>,
         name: &QName<'gc>,
-    ) -> bool {
-        self.0.write(gc_context).base.is_property_overwritable(name)
-    }
-
-    fn is_property_final(self, name: &QName<'gc>) -> bool {
-        self.0.read().base.is_property_final(name)
-    }
-
-    fn delete_property(&self, gc_context: MutationContext<'gc, '_>, name: &QName<'gc>) -> bool {
+    ) -> Result<bool, Error> {
         if name.namespace().is_public() {
             if let Ok(index) = name.local_name().parse::<usize>() {
                 self.0.write(gc_context).storage.delete(index);
-                return true;
+                return Ok(true);
             }
         }
 
-        self.0.write(gc_context).base.delete_property(name)
+        Ok(self.0.write(gc_context).base.delete_property(name))
     }
 
     fn has_own_property(self, name: &QName<'gc>) -> Result<bool, Error> {

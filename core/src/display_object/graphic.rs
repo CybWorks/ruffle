@@ -4,14 +4,13 @@ use crate::avm2::{
 };
 use crate::backend::render::ShapeHandle;
 use crate::context::{RenderContext, UpdateContext};
-use crate::display_object::{DisplayObjectBase, TDisplayObject};
+use crate::display_object::{DisplayObjectBase, DisplayObjectPtr, TDisplayObject};
 use crate::drawing::Drawing;
 use crate::prelude::*;
 use crate::tag_utils::SwfMovie;
-use crate::types::{Degrees, Percent};
 use crate::vminterface::{AvmType, Instantiator};
 use gc_arena::{Collect, GcCell, MutationContext};
-use std::cell::RefMut;
+use std::cell::{Ref, RefMut};
 use std::sync::Arc;
 
 #[derive(Clone, Debug, Collect, Copy)]
@@ -98,7 +97,21 @@ impl<'gc> Graphic<'gc> {
 }
 
 impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
-    impl_display_object!(base);
+    fn base(&self) -> Ref<DisplayObjectBase<'gc>> {
+        Ref::map(self.0.read(), |r| &r.base)
+    }
+
+    fn base_mut<'a>(&'a self, mc: MutationContext<'gc, '_>) -> RefMut<'a, DisplayObjectBase<'gc>> {
+        RefMut::map(self.0.write(mc), |w| &mut w.base)
+    }
+
+    fn instantiate(&self, gc_context: MutationContext<'gc, '_>) -> DisplayObject<'gc> {
+        Self(GcCell::allocate(gc_context, self.0.read().clone())).into()
+    }
+
+    fn as_ptr(&self) -> *const DisplayObjectPtr {
+        self.0.as_ptr() as *const DisplayObjectPtr
+    }
 
     fn id(&self) -> CharacterId {
         self.0.read().static_data.id
@@ -113,7 +126,7 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
     }
 
     fn construct_frame(&self, context: &mut UpdateContext<'_, 'gc, '_>) {
-        if self.avm_type() == AvmType::Avm2 && matches!(self.object2(), Avm2Value::Undefined) {
+        if context.avm_type() == AvmType::Avm2 && matches!(self.object2(), Avm2Value::Undefined) {
             let shape_constr = context.avm2.classes().shape;
             let mut activation = Avm2Activation::from_nothing(context.reborrow());
 
@@ -194,7 +207,7 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
         _instantiated_by: Instantiator,
         run_frame: bool,
     ) {
-        if self.avm_type() == AvmType::Avm1 {
+        if context.avm_type() == AvmType::Avm1 {
             context
                 .avm1
                 .add_to_exec_list(context.gc_context, (*self).into());

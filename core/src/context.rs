@@ -2,7 +2,9 @@
 
 use crate::avm1::globals::system::SystemProperties;
 use crate::avm1::{Avm1, Object as Avm1Object, Timers, Value as Avm1Value};
-use crate::avm2::{Avm2, Event as Avm2Event, Object as Avm2Object, Value as Avm2Value};
+use crate::avm2::{
+    Avm2, Event as Avm2Event, Object as Avm2Object, SoundChannelObject, Value as Avm2Value,
+};
 use crate::backend::{
     audio::{AudioBackend, AudioManager, SoundHandle, SoundInstanceHandle},
     locale::LocaleBackend,
@@ -23,6 +25,7 @@ use crate::player::Player;
 use crate::prelude::*;
 use crate::tag_utils::{SwfMovie, SwfSlice};
 use crate::transform::TransformStack;
+use crate::vminterface::AvmType;
 use core::fmt;
 use gc_arena::{Collect, MutationContext};
 use instant::Instant;
@@ -211,7 +214,7 @@ impl<'a, 'gc, 'gc_context> UpdateContext<'a, 'gc, 'gc_context> {
     pub fn attach_avm2_sound_channel(
         &mut self,
         instance: SoundInstanceHandle,
-        avm2_object: Avm2Object<'gc>,
+        avm2_object: SoundChannelObject<'gc>,
     ) {
         self.audio_manager
             .attach_avm2_sound_channel(instance, avm2_object);
@@ -314,6 +317,11 @@ impl<'a, 'gc, 'gc_context> UpdateContext<'a, 'gc, 'gc_context> {
             time_offset: self.time_offset,
             frame_rate: self.frame_rate,
         }
+    }
+
+    /// Return the VM that this object belongs to
+    pub fn avm_type(&self) -> AvmType {
+        self.swf.avm_type()
     }
 }
 

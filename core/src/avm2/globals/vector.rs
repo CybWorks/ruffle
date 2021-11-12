@@ -10,10 +10,10 @@ use crate::avm2::globals::NS_VECTOR;
 use crate::avm2::method::{Method, NativeMethodImpl};
 use crate::avm2::names::{Namespace, QName};
 use crate::avm2::object::{vector_allocator, FunctionObject, Object, TObject, VectorObject};
-use crate::avm2::string::AvmString;
 use crate::avm2::value::Value;
 use crate::avm2::vector::VectorStorage;
 use crate::avm2::Error;
+use crate::string::AvmString;
 use gc_arena::{GcCell, MutationContext};
 use std::cmp::{max, min, Ordering};
 
@@ -53,8 +53,8 @@ pub fn class_init<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error> {
     if let Some(this) = this {
-        let mut globals = this.get_scope().map(|s| s.read().globals()).unwrap();
-        let mut domain = globals.as_application_domain().unwrap();
+        let mut globals = activation.global_scope().unwrap();
+        let mut domain = activation.domain();
 
         //We have to grab Object's defining script instead of our own, because
         //at this point Vector hasn't actually been defined yet. It doesn't
@@ -67,8 +67,7 @@ pub fn class_init<'gc>(
         let int_vector_class = this.apply(activation, &[int_class.into()])?;
         let int_vector_name = QName::new(Namespace::internal(NS_VECTOR), "Vector$int");
         int_vector_class
-            .as_class()
-            .unwrap()
+            .inner_class_definition()
             .write(activation.context.gc_context)
             .set_name(int_vector_name.clone());
 
@@ -77,7 +76,6 @@ pub fn class_init<'gc>(
             int_vector_name.clone(),
             0,
             int_vector_class.into(),
-            false,
         );
         domain.export_definition(int_vector_name, script, activation.context.gc_context)?;
 
@@ -85,8 +83,7 @@ pub fn class_init<'gc>(
         let uint_vector_class = this.apply(activation, &[uint_class.into()])?;
         let uint_vector_name = QName::new(Namespace::internal(NS_VECTOR), "Vector$uint");
         uint_vector_class
-            .as_class()
-            .unwrap()
+            .inner_class_definition()
             .write(activation.context.gc_context)
             .set_name(uint_vector_name.clone());
 
@@ -95,7 +92,6 @@ pub fn class_init<'gc>(
             uint_vector_name.clone(),
             0,
             uint_vector_class.into(),
-            false,
         );
         domain.export_definition(uint_vector_name, script, activation.context.gc_context)?;
 
@@ -103,8 +99,7 @@ pub fn class_init<'gc>(
         let number_vector_class = this.apply(activation, &[number_class.into()])?;
         let number_vector_name = QName::new(Namespace::internal(NS_VECTOR), "Vector$double");
         number_vector_class
-            .as_class()
-            .unwrap()
+            .inner_class_definition()
             .write(activation.context.gc_context)
             .set_name(number_vector_name.clone());
 
@@ -113,15 +108,13 @@ pub fn class_init<'gc>(
             number_vector_name.clone(),
             0,
             number_vector_class.into(),
-            false,
         );
         domain.export_definition(number_vector_name, script, activation.context.gc_context)?;
 
         let object_vector_class = this.apply(activation, &[Value::Null])?;
         let object_vector_name = QName::new(Namespace::internal(NS_VECTOR), "Vector$object");
         object_vector_class
-            .as_class()
-            .unwrap()
+            .inner_class_definition()
             .write(activation.context.gc_context)
             .set_name(object_vector_name.clone());
 
@@ -130,7 +123,6 @@ pub fn class_init<'gc>(
             object_vector_name.clone(),
             0,
             object_vector_class.into(),
-            false,
         );
         domain.export_definition(object_vector_name, script, activation.context.gc_context)?;
     }
@@ -146,9 +138,9 @@ pub fn specialized_class_init<'gc>(
 ) -> Result<Value<'gc>, Error> {
     if let Some(this) = this {
         let mut proto = this
-            .get_property(this, &QName::dynamic_name("prototype"), activation)?
+            .get_property(this, &QName::dynamic_name("prototype").into(), activation)?
             .coerce_to_object(activation)?;
-        let scope = this.get_scope();
+        let scope = activation.create_scopechain();
 
         const PUBLIC_PROTOTYPE_METHODS: &[(&str, NativeMethodImpl)] = &[
             ("concat", concat),
@@ -174,7 +166,7 @@ pub fn specialized_class_init<'gc>(
         for (pubname, func) in PUBLIC_PROTOTYPE_METHODS {
             proto.set_property(
                 this,
-                &QName::dynamic_name(*pubname),
+                &QName::dynamic_name(*pubname).into(),
                 FunctionObject::from_function(
                     activation,
                     Method::from_builtin(*func, pubname, activation.context.gc_context),
@@ -275,24 +267,20 @@ pub fn concat<'gc>(
         };
 
         let my_class = this
-            .as_class_object()
+            .instance_of()
             .ok_or("TypeError: Tried to concat into a bare object")?;
         let val_class = new_vector_storage.value_type();
 
-        for arg in args.iter().map(|a| a.clone()) {
+        for arg in args.iter().cloned() {
             let arg_obj = arg.coerce_to_object(activation)?;
             let arg_class = arg_obj
-                .as_class()
+                .instance_of_class_definition()
                 .ok_or("TypeError: Tried to concat from a bare object")?;
             if !arg.is_of_type(activation, my_class)? {
                 return Err(format!(
                     "TypeError: Cannot coerce argument of type {:?} to argument of type {:?}",
                     arg_class.read().name(),
-                    my_class
-                        .as_class()
-                        .ok_or("TypeError: Tried to concat into a bare object")?
-                        .read()
-                        .name()
+                    my_class.inner_class_definition().read().name()
                 )
                 .into());
             }
@@ -308,16 +296,12 @@ pub fn concat<'gc>(
                 if let Ok(val_obj) = val.coerce_to_object(activation) {
                     if !val.is_of_type(activation, val_class)? {
                         let other_val_class = val_obj
-                            .as_class()
+                            .instance_of_class_definition()
                             .ok_or("TypeError: Tried to concat a bare object into a Vector")?;
                         return Err(format!(
                             "TypeError: Cannot coerce Vector value of type {:?} to type {:?}",
                             other_val_class.read().name(),
-                            val_class
-                                .as_class()
-                                .ok_or("TypeError: Tried to concat into a bare object")?
-                                .read()
-                                .name()
+                            val_class.inner_class_definition().read().name()
                         )
                         .into());
                     }
@@ -402,9 +386,11 @@ pub fn to_locale_string<'gc>(
 ) -> Result<Value<'gc>, Error> {
     join_inner(activation, this, &[",".into()], |v, act| {
         if let Ok(o) = v.coerce_to_object(act) {
-            let ls = o.get_property(o, &QName::new(Namespace::public(), "toLocaleString"), act)?;
-
-            ls.coerce_to_object(act)?.call(Some(o), &[], act, None)
+            o.call_property(
+                &QName::new(Namespace::public(), "toLocaleString").into(),
+                &[],
+                act,
+            )
         } else {
             Ok(v)
         }
@@ -435,12 +421,7 @@ pub fn every<'gc>(
             let (i, item) = r?;
 
             let result = callback
-                .call(
-                    receiver,
-                    &[item, i.into(), this.into()],
-                    activation,
-                    receiver.and_then(|r| r.proto()),
-                )?
+                .call(receiver, &[item, i.into(), this.into()], activation)?
                 .coerce_to_boolean();
 
             if !result {
@@ -478,12 +459,7 @@ pub fn some<'gc>(
             let (i, item) = r?;
 
             let result = callback
-                .call(
-                    receiver,
-                    &[item, i.into(), this.into()],
-                    activation,
-                    receiver.and_then(|r| r.proto()),
-                )?
+                .call(receiver, &[item, i.into(), this.into()], activation)?
                 .coerce_to_boolean();
 
             if result {
@@ -517,8 +493,9 @@ pub fn filter<'gc>(
             .ok();
 
         let value_type = this
-            .as_class_object()
-            .and_then(|c| c.as_class_params())
+            .instance_of()
+            .unwrap()
+            .as_class_params()
             .ok_or("Cannot filter unparameterized vector")?
             .unwrap_or(activation.avm2().classes().object);
         let mut new_storage = VectorStorage::new(0, false, value_type, activation);
@@ -528,12 +505,7 @@ pub fn filter<'gc>(
             let (i, item) = r?;
 
             let result = callback
-                .call(
-                    receiver,
-                    &[item.clone(), i.into(), this.into()],
-                    activation,
-                    receiver.and_then(|r| r.proto()),
-                )?
+                .call(receiver, &[item.clone(), i.into(), this.into()], activation)?
                 .coerce_to_boolean();
 
             if result {
@@ -570,12 +542,7 @@ pub fn for_each<'gc>(
         while let Some(r) = iter.next(activation) {
             let (i, item) = r?;
 
-            callback.call(
-                receiver,
-                &[item, i.into(), this.into()],
-                activation,
-                receiver.and_then(|r| r.proto()),
-            )?;
+            callback.call(receiver, &[item, i.into(), this.into()], activation)?;
         }
     }
 
@@ -598,7 +565,11 @@ pub fn index_of<'gc>(
 
         let from_index = if from_index < 0 {
             let length = this
-                .get_property(this, &QName::new(Namespace::public(), "length"), activation)?
+                .get_property(
+                    this,
+                    &QName::new(Namespace::public(), "length").into(),
+                    activation,
+                )?
                 .coerce_to_i32(activation)?;
             max(length + from_index, 0) as u32
         } else {
@@ -635,7 +606,11 @@ pub fn last_index_of<'gc>(
 
         let from_index = if from_index < 0 {
             let length = this
-                .get_property(this, &QName::new(Namespace::public(), "length"), activation)?
+                .get_property(
+                    this,
+                    &QName::new(Namespace::public(), "length").into(),
+                    activation,
+                )?
                 .coerce_to_i32(activation)?;
             max(length + from_index, 0) as u32
         } else {
@@ -676,8 +651,9 @@ pub fn map<'gc>(
             .ok();
 
         let value_type = this
-            .as_class_object()
-            .and_then(|c| c.as_class_params())
+            .instance_of()
+            .unwrap()
+            .as_class_params()
             .ok_or("Cannot filter unparameterized vector")?
             .unwrap_or(activation.avm2().classes().object);
         let mut new_storage = VectorStorage::new(0, false, value_type, activation);
@@ -686,12 +662,8 @@ pub fn map<'gc>(
         while let Some(r) = iter.next(activation) {
             let (i, item) = r?;
 
-            let new_item = callback.call(
-                receiver,
-                &[item.clone(), i.into(), this.into()],
-                activation,
-                receiver.and_then(|r| r.proto()),
-            )?;
+            let new_item =
+                callback.call(receiver, &[item.clone(), i.into(), this.into()], activation)?;
             let coerced_item = new_item.coerce_to_type(activation, value_type)?;
 
             new_storage.push(coerced_item)?;
@@ -897,8 +869,8 @@ pub fn sort<'gc>(
             let (compare_fnc, options) = if fn_or_options
                 .coerce_to_object(activation)
                 .ok()
-                .and_then(|o| o.as_executable())
-                .is_some()
+                .map(|o| o.as_executable().is_some())
+                .unwrap_or(false)
             {
                 (
                     Some(fn_or_options.coerce_to_object(activation)?),
@@ -914,7 +886,7 @@ pub fn sort<'gc>(
             let compare = move |activation: &mut Activation<'_, 'gc, '_>, a, b| {
                 if let Some(compare_fnc) = compare_fnc {
                     let order = compare_fnc
-                        .call(Some(this), &[a, b], activation, None)?
+                        .call(Some(this), &[a, b], activation)?
                         .coerce_to_number(activation)?;
 
                     if order > 0.0 {

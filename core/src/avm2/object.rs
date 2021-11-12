@@ -3,20 +3,22 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::array::ArrayStorage;
 use crate::avm2::bytearray::ByteArrayStorage;
-use crate::avm2::class::{AllocatorFn, Class};
+use crate::avm2::class::Class;
 use crate::avm2::domain::Domain;
 use crate::avm2::events::{DispatchList, Event};
 use crate::avm2::function::Executable;
 use crate::avm2::names::{Multiname, Namespace, QName};
 use crate::avm2::regexp::RegExp;
-use crate::avm2::scope::Scope;
-use crate::avm2::string::AvmString;
+use crate::avm2::scope::ScopeChain;
 use crate::avm2::traits::{Trait, TraitKind};
 use crate::avm2::value::{Hint, Value};
 use crate::avm2::vector::VectorStorage;
 use crate::avm2::Error;
 use crate::backend::audio::{SoundHandle, SoundInstanceHandle};
+use crate::bitmap::bitmap_data::BitmapData;
 use crate::display_object::DisplayObject;
+use crate::html::TextFormat;
+use crate::string::AvmString;
 use gc_arena::{Collect, GcCell, MutationContext};
 use ruffle_macros::enum_trait_object;
 use std::cell::{Ref, RefMut};
@@ -24,9 +26,11 @@ use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 
 mod array_object;
+mod bitmapdata_object;
 mod bytearray_object;
 mod class_object;
-mod custom_object;
+mod date_object;
+mod dictionary_object;
 mod dispatch_object;
 mod domain_object;
 mod event_object;
@@ -34,17 +38,23 @@ mod function_object;
 mod loaderinfo_object;
 mod namespace_object;
 mod primitive_object;
+mod proxy_object;
+mod qname_object;
 mod regexp_object;
 mod script_object;
 mod sound_object;
 mod soundchannel_object;
 mod stage_object;
+mod textformat_object;
 mod vector_object;
 mod xml_object;
 
 pub use crate::avm2::object::array_object::{array_allocator, ArrayObject};
+pub use crate::avm2::object::bitmapdata_object::{bitmapdata_allocator, BitmapDataObject};
 pub use crate::avm2::object::bytearray_object::{bytearray_allocator, ByteArrayObject};
 pub use crate::avm2::object::class_object::ClassObject;
+pub use crate::avm2::object::date_object::{date_allocator, DateObject};
+pub use crate::avm2::object::dictionary_object::{dictionary_allocator, DictionaryObject};
 pub use crate::avm2::object::dispatch_object::DispatchObject;
 pub use crate::avm2::object::domain_object::{appdomain_allocator, DomainObject};
 pub use crate::avm2::object::event_object::{event_allocator, EventObject};
@@ -54,11 +64,14 @@ pub use crate::avm2::object::loaderinfo_object::{
 };
 pub use crate::avm2::object::namespace_object::{namespace_allocator, NamespaceObject};
 pub use crate::avm2::object::primitive_object::{primitive_allocator, PrimitiveObject};
+pub use crate::avm2::object::proxy_object::{proxy_allocator, ProxyObject};
+pub use crate::avm2::object::qname_object::{qname_allocator, QNameObject};
 pub use crate::avm2::object::regexp_object::{regexp_allocator, RegExpObject};
-pub use crate::avm2::object::script_object::ScriptObject;
+pub use crate::avm2::object::script_object::{ScriptObject, ScriptObjectData};
 pub use crate::avm2::object::sound_object::{sound_allocator, SoundObject};
 pub use crate::avm2::object::soundchannel_object::{soundchannel_allocator, SoundChannelObject};
 pub use crate::avm2::object::stage_object::{stage_allocator, StageObject};
+pub use crate::avm2::object::textformat_object::{textformat_allocator, TextFormatObject};
 pub use crate::avm2::object::vector_object::{vector_allocator, VectorObject};
 pub use crate::avm2::object::xml_object::{xml_allocator, XmlObject};
 
@@ -86,119 +99,400 @@ pub use crate::avm2::object::xml_object::{xml_allocator, XmlObject};
         VectorObject(VectorObject<'gc>),
         SoundObject(SoundObject<'gc>),
         SoundChannelObject(SoundChannelObject<'gc>),
+        BitmapDataObject(BitmapDataObject<'gc>),
+        DateObject(DateObject<'gc>),
+        DictionaryObject(DictionaryObject<'gc>),
+        QNameObject(QNameObject<'gc>),
+        TextFormatObject(TextFormatObject<'gc>),
+        ProxyObject(ProxyObject<'gc>),
     }
 )]
 pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy {
-    /// Retrieve a property by its QName, without taking prototype lookups
-    /// into account.
+    /// Get the base of this object.
+    /// Any trait method implementations that were not overrided will forward the call to this instead.
+    fn base(&self) -> Ref<ScriptObjectData<'gc>>;
+    fn base_mut(&self, mc: MutationContext<'gc, '_>) -> RefMut<ScriptObjectData<'gc>>;
+
+    /// Retrieve a property by QName, after multiname resolution, prototype
+    /// lookups, and all other considerations have been taken.
+    ///
+    /// This required method is only intended to be called by other TObject
+    /// methods.
     fn get_property_local(
         self,
         receiver: Object<'gc>,
         name: &QName<'gc>,
         activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Result<Value<'gc>, Error>;
+    ) -> Result<Value<'gc>, Error> {
+        let base = self.base();
+        let rv = base.get_property_local(receiver, name, activation)?;
 
-    /// Retrieve a property by its QName.
-    fn get_property(
+        drop(base);
+
+        rv.resolve(activation)
+    }
+
+    /// Retrieve a property that does not exist.
+    ///
+    /// By default, this returns an error for sealed classes, and `undefined`
+    /// for dynamic ones. Objects that have particular alternative behavior for
+    /// undefined values may substitute their own implementation here without
+    /// disturbing the rest of `getproperty`'s implementation.
+    fn get_property_undef(
         self,
+        _receiver: Object<'gc>,
+        multiname: &Multiname<'gc>,
+        _activation: &mut Activation<'_, 'gc, '_>,
+    ) -> Result<Value<'gc>, Error> {
+        // Special case: Unresolvable properties on dynamic classes are treated
+        // as dynamic properties that have not yet been set, and yield
+        // `undefined`
+        if !self
+            .instance_of_class_definition()
+            .map(|c| c.read().is_sealed())
+            .unwrap_or(false)
+        {
+            return Ok(Value::Undefined);
+        }
+
+        return Err(format!("Cannot get undefined property {:?}", multiname.local_name()).into());
+    }
+
+    /// Retrieve a property by Multiname lookup.
+    ///
+    /// This corresponds directly to the AVM2 operation `getproperty`, with the
+    /// exception that it does not special-case object lookups on dictionary
+    /// structured objects.
+    #[allow(unused_mut)] //Not unused.
+    fn get_property(
+        mut self,
         receiver: Object<'gc>,
-        name: &QName<'gc>,
+        multiname: &Multiname<'gc>,
         activation: &mut Activation<'_, 'gc, '_>,
     ) -> Result<Value<'gc>, Error> {
-        let has_no_getter = self.has_own_virtual_setter(name) && !self.has_own_virtual_getter(name);
+        let name = self.resolve_multiname(multiname)?;
 
-        if self.has_own_property(name)? && !has_no_getter {
-            return self.get_property_local(receiver, name, activation);
+        if name.is_none() {
+            return self.get_property_undef(receiver, multiname, activation);
+        }
+
+        // At this point, the name must be a valid QName.
+        let name = name.unwrap();
+        if !self.base().has_own_instantiated_property(&name) {
+            // Initialize lazy-bound methods at this point in time.
+            if let Some(class) = self.instance_of() {
+                if let Some((bound_method, disp_id)) =
+                    class.bound_instance_method(activation, receiver, &name)?
+                {
+                    self.install_method(
+                        activation.context.gc_context,
+                        name.clone(),
+                        disp_id,
+                        bound_method,
+                    );
+
+                    return Ok(bound_method.into());
+                }
+            }
+
+            // Class methods are also lazy-bound.
+            if let Some(class) = self.as_class_object() {
+                if let Some((bound_method, disp_id)) =
+                    class.bound_class_method(activation, &name)?
+                {
+                    self.install_method(
+                        activation.context.gc_context,
+                        name.clone(),
+                        disp_id,
+                        bound_method,
+                    );
+
+                    return Ok(bound_method.into());
+                }
+            }
+        }
+
+        let has_no_getter =
+            self.has_own_virtual_setter(&name) && !self.has_own_virtual_getter(&name);
+
+        if self.has_own_property(&name)? && !has_no_getter {
+            return self.get_property_local(receiver, &name, activation);
         }
 
         if let Some(proto) = self.proto() {
-            return proto.get_property(receiver, name, activation);
+            return proto.get_property(receiver, multiname, activation);
         }
 
         Ok(Value::Undefined)
     }
 
-    /// Retrieve the class object that a particular QName trait is defined in.
+    /// Set a property by QName, after multiname resolution and all other
+    /// considerations have been taken.
     ///
-    /// Must be called on a class object; will error out if called on
-    /// anything else.
-    ///
-    /// This function returns `None` for non-trait properties, such as actually
-    /// defined prototype methods for ES3-style classes.
-    fn find_class_for_trait(self, name: &QName<'gc>) -> Result<Option<Object<'gc>>, Error> {
-        let class = self
-            .as_class()
-            .ok_or("Cannot get base traits on non-class object")?;
-
-        if class.read().has_instance_trait(name) {
-            return Ok(Some(self.into()));
-        }
-
-        if let Some(base) = self.superclass_object() {
-            return base.find_class_for_trait(name);
-        }
-
-        Ok(None)
-    }
-
-    /// Set a property on this specific object.
+    /// This required method is only intended to be called by other TObject
+    /// methods.
     fn set_property_local(
         self,
         receiver: Object<'gc>,
         name: &QName<'gc>,
         value: Value<'gc>,
         activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Result<(), Error>;
+    ) -> Result<(), Error> {
+        let mut base = self.base_mut(activation.context.gc_context);
 
-    /// Set a property by its QName.
+        let rv = base.set_property_local(receiver, name, value, activation)?;
+
+        drop(base);
+
+        rv.resolve(activation)?;
+
+        Ok(())
+    }
+
+    /// Qualify the name of a property that does not exist, in the context of
+    /// setting a property.
+    ///
+    /// By default, this returns an error for sealed classes, and a name in the
+    /// public namespace for dynamic ones. Objects that have particular
+    /// alternative behavior for undefined values may substitute their own
+    /// implementation here without disturbing the rest of `setproperty`'s
+    /// implementation.
+    ///
+    /// This function typically returns a `QName` or an error. Returning `None`
+    /// indicates that the object handled the `setproperty` without needing to
+    /// store anything.
+    fn set_property_undef(
+        &mut self,
+        _receiver: Object<'gc>,
+        multiname: &Multiname<'gc>,
+        _value: Value<'gc>,
+        _activation: &mut Activation<'_, 'gc, '_>,
+    ) -> Result<Option<QName<'gc>>, Error> {
+        // Special case: Unresolvable properties on dynamic classes are treated
+        // as initializing a new dynamic property on namespace Public("").
+        if !self
+            .instance_of_class_definition()
+            .map(|c| c.read().is_sealed())
+            .unwrap_or(false)
+        {
+            let local_name: Result<AvmString<'gc>, Error> = multiname
+                .local_name()
+                .ok_or_else(|| "Cannot set undefined property using any name".into());
+            Ok(Some(QName::dynamic_name(local_name?)))
+        } else {
+            Err(format!("Cannot set undefined property {:?}", multiname.local_name()).into())
+        }
+    }
+
+    /// Set a property by Multiname lookup.
+    ///
+    /// This corresponds directly with the AVM2 operation `setproperty`, with
+    /// the exception that it does not special-case object lookups on
+    /// dictionary structured objects.
     fn set_property(
         &mut self,
         receiver: Object<'gc>,
-        name: &QName<'gc>,
+        multiname: &Multiname<'gc>,
         value: Value<'gc>,
         activation: &mut Activation<'_, 'gc, '_>,
     ) -> Result<(), Error> {
-        self.set_property_local(receiver, name, value, activation)
+        let mut name = self.resolve_multiname(multiname)?;
+
+        if name.is_none() {
+            name = self.set_property_undef(receiver, multiname, value.clone(), activation)?;
+        }
+
+        if name.is_none() {
+            return Ok(());
+        }
+
+        // At this point, name resolution should have completed.
+        let name = name.unwrap();
+
+        // Reject attempts to overwrite lazy-bound methods before they have
+        // been bound.
+        if let Some(class) = self.instance_of() {
+            if class.instance_method(&name)?.is_some() {
+                return Err(format!(
+                    "Cannot overwrite read-only property {:?}",
+                    name.local_name()
+                )
+                .into());
+            }
+        }
+
+        if let Some(class) = self.as_class_object() {
+            if class.class_method(&name)?.is_some() {
+                return Err(format!(
+                    "Cannot overwrite read-only property {:?}",
+                    name.local_name()
+                )
+                .into());
+            }
+        }
+
+        self.set_property_local(receiver, &name, value, activation)
     }
 
-    /// Init a property on this specific object.
+    /// Initialize a property by QName, after multiname resolution and all
+    /// other considerations have been taken.
+    ///
+    /// This required method is only intended to be called by other TObject
+    /// methods.
     fn init_property_local(
         self,
         receiver: Object<'gc>,
         name: &QName<'gc>,
         value: Value<'gc>,
         activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Result<(), Error>;
+    ) -> Result<(), Error> {
+        let mut base = self.base_mut(activation.context.gc_context);
+        let rv = base.init_property_local(receiver, name, value, activation)?;
 
-    /// Init a property by its QName.
+        drop(base);
+
+        rv.resolve(activation)?;
+
+        Ok(())
+    }
+
+    /// Initialize a property by Multiname lookup.
+    ///
+    /// This corresponds directly with the AVM2 operation `initproperty`.
     fn init_property(
         &mut self,
         receiver: Object<'gc>,
-        name: &QName<'gc>,
+        multiname: &Multiname<'gc>,
         value: Value<'gc>,
         activation: &mut Activation<'_, 'gc, '_>,
     ) -> Result<(), Error> {
-        if self.has_own_virtual_setter(name) {
-            return self.init_property_local(receiver, name, value, activation);
+        let mut name = self.resolve_multiname(multiname)?;
+
+        if name.is_none() {
+            name = self.set_property_undef(receiver, multiname, value.clone(), activation)?;
         }
 
-        let mut proto = self.proto();
-        while let Some(mut my_proto) = proto {
-            //NOTE: This only works because we validate ahead-of-time that
-            //we're calling a virtual setter. If you call `set_property` on
-            //a non-virtual you will actually alter the prototype.
-            if my_proto.has_own_virtual_setter(name) {
-                return my_proto.init_property(receiver, name, value, activation);
+        if name.is_none() {
+            return Ok(());
+        }
+
+        // At this point, name resolution should have completed.
+        let name = name.unwrap();
+
+        // Reject attempts to overwrite lazy-bound methods before they have
+        // been bound.
+        if let Some(class) = self.instance_of() {
+            if class.instance_method(&name)?.is_some() {
+                return Err(format!(
+                    "Cannot overwrite read-only property {:?}",
+                    name.local_name()
+                )
+                .into());
             }
-
-            proto = my_proto.proto();
         }
 
-        receiver.init_property_local(receiver, name, value, activation)
+        if let Some(class) = self.as_class_object() {
+            if class.class_method(&name)?.is_some() {
+                return Err(format!(
+                    "Cannot overwrite read-only property {:?}",
+                    name.local_name()
+                )
+                .into());
+            }
+        }
+
+        self.init_property_local(receiver, &name, value, activation)
+    }
+
+    /// Call a named property that does not exist.
+    ///
+    /// By default, this returns an error. Objects that have particular
+    /// alternative behavior for calling undefined properties may substitute
+    /// their own implementation here without disturbing the rest of
+    /// `callproperty`'s implementation.
+    fn call_property_undef(
+        self,
+        multiname: &Multiname<'gc>,
+        _arguments: &[Value<'gc>],
+        _activation: &mut Activation<'_, 'gc, '_>,
+    ) -> Result<Value<'gc>, Error> {
+        Err(format!(
+            "Attempted to call undefined property {:?}",
+            multiname.local_name()
+        )
+        .into())
+    }
+
+    /// Call a named property on the object.
+    ///
+    /// This corresponds directly to the `callproperty` operation in AVM2.
+    fn call_property(
+        self,
+        multiname: &Multiname<'gc>,
+        arguments: &[Value<'gc>],
+        activation: &mut Activation<'_, 'gc, '_>,
+    ) -> Result<Value<'gc>, Error> {
+        let name = self.resolve_multiname(multiname)?;
+        if name.is_none() {
+            return self.call_property_undef(multiname, arguments, activation);
+        }
+
+        let name = name.unwrap();
+
+        if let Some(class) = self.instance_of() {
+            if let Some((superclass, method_trait)) = class.instance_method(&name)? {
+                let method = method_trait.as_method().unwrap();
+                if !method.needs_arguments_object() {
+                    let scope = class.instance_scope();
+
+                    return Executable::from_method(method, scope, None, Some(superclass)).exec(
+                        Some(self.into()),
+                        arguments,
+                        activation,
+                        superclass.into(), //Deliberately invalid.
+                    );
+                }
+            }
+        }
+
+        if let Some(class) = self.as_class_object() {
+            if let Some(method_trait) = class.class_method(&name)? {
+                let method = method_trait.as_method().unwrap();
+                if !method.needs_arguments_object() {
+                    let scope = class.class_scope();
+
+                    return Executable::from_method(method, scope, None, Some(class)).exec(
+                        Some(self.into()),
+                        arguments,
+                        activation,
+                        class.into(), //Deliberately invalid.
+                    );
+                }
+            }
+        }
+
+        let function = self
+            .get_property(self.into(), multiname, activation)?
+            .coerce_to_object(activation);
+        if function.is_err() {
+            return Err(format!(
+                "Attempted to call undefined property {:?}",
+                multiname.local_name()
+            )
+            .into());
+        }
+
+        function
+            .unwrap()
+            .call(Some(self.into()), arguments, activation)
     }
 
     /// Retrieve a slot by its index.
-    fn get_slot(self, id: u32) -> Result<Value<'gc>, Error>;
+    fn get_slot(self, id: u32) -> Result<Value<'gc>, Error> {
+        let base = self.base();
+
+        base.get_slot(id)
+    }
 
     /// Set a slot by its index.
     fn set_slot(
@@ -206,7 +500,11 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         id: u32,
         value: Value<'gc>,
         mc: MutationContext<'gc, '_>,
-    ) -> Result<(), Error>;
+    ) -> Result<(), Error> {
+        let mut base = self.base_mut(mc);
+
+        base.set_slot(id, value, mc)
+    }
 
     /// Initialize a slot by its index.
     fn init_slot(
@@ -214,18 +512,56 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         id: u32,
         value: Value<'gc>,
         mc: MutationContext<'gc, '_>,
-    ) -> Result<(), Error>;
+    ) -> Result<(), Error> {
+        let mut base = self.base_mut(mc);
 
-    /// Retrieve a method by its index.
-    fn get_method(self, id: u32) -> Option<Object<'gc>>;
+        base.init_slot(id, value, mc)
+    }
 
-    /// Retrieves the scope chain of the object at time of its creation.
+    /// Call a method by its index.
     ///
-    /// The scope chain is used to determine the starting scope stack when an
-    /// object is called, as well as any class methods on the object.
-    /// Non-method functions and prototype functions (ES3 methods) do not use
-    /// this scope chain.
-    fn get_scope(self) -> Option<GcCell<'gc, Scope<'gc>>>;
+    /// This directly corresponds with the AVM2 operation `callmethod`.
+    #[allow(unused_mut)] //Not unused.
+    fn call_method(
+        mut self,
+        id: u32,
+        arguments: &[Value<'gc>],
+        activation: &mut Activation<'_, 'gc, '_>,
+    ) -> Result<Value<'gc>, Error> {
+        if self.base().get_method(id).is_none() {
+            if let Some(class) = self.instance_of() {
+                if let Some((bound_method, name)) =
+                    class.bound_instance_method_by_id(activation, self.into(), id)?
+                {
+                    self.install_method(
+                        activation.context.gc_context,
+                        name.clone(),
+                        id,
+                        bound_method,
+                    );
+                }
+            }
+
+            if let Some(class) = self.as_class_object() {
+                if let Some((bound_method, name)) =
+                    class.bound_class_method_by_id(activation, id)?
+                {
+                    self.install_method(
+                        activation.context.gc_context,
+                        name.clone(),
+                        id,
+                        bound_method,
+                    );
+                }
+            }
+        }
+
+        if let Some(method_object) = self.base().get_method(id) {
+            return method_object.call(Some(self.into()), arguments, activation);
+        }
+
+        Err(format!("Cannot call unknown method id {}", id).into())
+    }
 
     /// Resolve a multiname into a single QName, if any of the namespaces
     /// match.
@@ -263,15 +599,37 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     /// Trait names will be resolve on class objects and object instances, but
     /// not prototypes. If you want to search a prototype's provided traits you
     /// must walk the prototype chain using `resolve_any_trait`.
-    fn resolve_any(self, local_name: AvmString<'gc>) -> Result<Option<Namespace<'gc>>, Error>;
+    fn resolve_any(self, local_name: AvmString<'gc>) -> Result<Option<Namespace<'gc>>, Error> {
+        let base = self.base();
+
+        base.resolve_any(local_name)
+    }
 
     /// Given a local name of a trait, find the namespace it resides in, if any.
     ///
     /// This function only works for names which are trait properties, not
     /// dynamic or prototype properties. Furthermore, instance prototypes *will*
     /// resolve trait names here, contrary to their behavior in `resolve_any.`
-    fn resolve_any_trait(self, local_name: AvmString<'gc>)
-        -> Result<Option<Namespace<'gc>>, Error>;
+    fn resolve_any_trait(
+        self,
+        local_name: AvmString<'gc>,
+    ) -> Result<Option<Namespace<'gc>>, Error> {
+        let base = self.base();
+
+        base.resolve_any_trait(local_name)
+    }
+
+    /// Implements the `in` opcode and AS3 operator.
+    ///
+    /// By default, this just calls `has_property`, but may be overridden by
+    /// other object types to change the behavior of the `in` operator only.
+    fn has_property_via_in(
+        self,
+        _activation: &mut Activation<'_, 'gc, '_>,
+        name: &QName<'gc>,
+    ) -> Result<bool, Error> {
+        self.has_property(name)
+    }
 
     /// Indicates whether or not a property exists on an object.
     fn has_property(self, name: &QName<'gc>) -> Result<bool, Error> {
@@ -286,63 +644,205 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
 
     /// Indicates whether or not a property or trait exists on an object and is
     /// not part of the prototype chain.
-    fn has_own_property(self, name: &QName<'gc>) -> Result<bool, Error>;
+    fn has_own_property(self, name: &QName<'gc>) -> Result<bool, Error> {
+        let base = self.base();
+
+        base.has_own_property(name)
+    }
 
     /// Returns true if an object has one or more traits of a given name.
-    fn has_trait(self, name: &QName<'gc>) -> Result<bool, Error>;
+    fn has_trait(self, name: &QName<'gc>) -> Result<bool, Error> {
+        let base = self.base();
+
+        base.has_trait(name)
+    }
 
     /// Check if a particular object contains a virtual getter by the given
     /// name.
-    fn has_own_virtual_getter(self, name: &QName<'gc>) -> bool;
+    fn has_own_virtual_getter(self, name: &QName<'gc>) -> bool {
+        let base = self.base();
+
+        base.has_own_virtual_getter(name)
+    }
 
     /// Check if a particular object contains a virtual setter by the given
     /// name.
-    fn has_own_virtual_setter(self, name: &QName<'gc>) -> bool;
+    fn has_own_virtual_setter(self, name: &QName<'gc>) -> bool {
+        let base = self.base();
+
+        base.has_own_virtual_setter(name)
+    }
 
     /// Indicates whether or not a property is overwritable.
     fn is_property_overwritable(
         self,
-        gc_context: MutationContext<'gc, '_>,
-        _name: &QName<'gc>,
-    ) -> bool;
+        _gc_context: MutationContext<'gc, '_>,
+        name: &QName<'gc>,
+    ) -> bool {
+        let base = self.base();
 
-    /// Indicates whether or not a property is final.
-    fn is_property_final(self, _name: &QName<'gc>) -> bool;
+        base.is_property_overwritable(name)
+    }
+
+    /// Delete a property by QName, after multiname resolution and all other
+    /// considerations have been taken.
+    ///
+    /// This required method is only intended to be called by other TObject
+    /// methods.
+    fn delete_property_local(
+        &self,
+        gc_context: MutationContext<'gc, '_>,
+        name: &QName<'gc>,
+    ) -> Result<bool, Error> {
+        let mut base = self.base_mut(gc_context);
+
+        Ok(base.delete_property(name))
+    }
+
+    /// Delete a property that does not exist.
+    ///
+    /// By default, undefined property deletion succeeds for dynamic classes,
+    /// and fails for sealed ones. Objects that have particular alternative
+    /// behavior for undefined values may substitute their own implementation
+    /// here without disturbing the rest of `deleteproperty`'s implementation.
+    fn delete_property_undef(
+        &self,
+        _activation: &mut Activation<'_, 'gc, '_>,
+        _multiname: &Multiname<'gc>,
+    ) -> Result<bool, Error> {
+        // Unknown properties on a dynamic class delete successfully.
+        return Ok(!self
+            .instance_of_class_definition()
+            .map(|c| c.read().is_sealed())
+            .unwrap_or(false));
+    }
 
     /// Delete a named property from the object.
     ///
     /// Returns false if the property cannot be deleted.
-    fn delete_property(&self, gc_context: MutationContext<'gc, '_>, name: &QName<'gc>) -> bool;
+    fn delete_property(
+        &self,
+        activation: &mut Activation<'_, 'gc, '_>,
+        multiname: &Multiname<'gc>,
+    ) -> Result<bool, Error> {
+        let name = self.resolve_multiname(multiname)?;
+
+        if name.is_none() {
+            return self.delete_property_undef(activation, multiname);
+        }
+
+        //At this point, the name should be known.
+        let name = name.unwrap();
+
+        // Reject attempts to delete lazy-bound methods before they have
+        // been bound.
+        if !self.base().has_own_instantiated_property(&name) {
+            if let Some(class) = self.instance_of() {
+                if class
+                    .instance_method(&name)
+                    .map(|t| t.is_some())
+                    .unwrap_or(false)
+                {
+                    return Ok(false);
+                }
+            }
+
+            if let Some(class) = self.as_class_object() {
+                if class
+                    .class_method(&name)
+                    .map(|t| t.is_some())
+                    .unwrap_or(false)
+                {
+                    return Ok(false);
+                }
+            }
+        }
+
+        self.delete_property_local(activation.context.gc_context, &name)
+    }
 
     /// Retrieve the `__proto__` of a given object.
     ///
     /// The proto is another object used to resolve methods across a class of
     /// multiple objects. It should also be accessible as `__proto__` from
     /// `get`.
-    fn proto(&self) -> Option<Object<'gc>>;
+    fn proto(&self) -> Option<Object<'gc>> {
+        let base = self.base();
+
+        base.proto()
+    }
 
     /// Change the `__proto__` on this object.
     ///
     /// This method primarily exists so that the global scope that player
     /// globals loads into can be created before its superclasses are. It
     /// should be used sparingly, if at all.
-    fn set_proto(self, mc: MutationContext<'gc, '_>, proto: Object<'gc>);
+    fn set_proto(self, mc: MutationContext<'gc, '_>, proto: Object<'gc>) {
+        let mut base = self.base_mut(mc);
+
+        base.set_proto(proto)
+    }
+
+    /// Get the next enumerant index in enumerant space.
+    ///
+    /// Every object maintains a list of enumerants - key/value pairs indexed
+    /// by arbitrary integers. This function allows clients to iterate through
+    /// those indexing integers. Indexing starts with zero, and then the caller
+    /// repeatedly hands prior results back into this function until it returns
+    /// None.
+    ///
+    /// Repeated calls to this function with prior return values must
+    /// eventually return `None`. Furthermore, returning `0`, while valid, is
+    /// treated by AVM2 code as signalling `None`.
+    fn get_next_enumerant(
+        self,
+        last_index: u32,
+        _activation: &mut Activation<'_, 'gc, '_>,
+    ) -> Result<Option<u32>, Error> {
+        let base = self.base();
+
+        Ok(base.get_next_enumerant(last_index))
+    }
 
     /// Retrieve a given enumerable name by index.
     ///
-    /// Enumerants are listed by index, starting from zero. A value of `None`
-    /// indicates that no enumerant with that index, or any greater index,
-    /// exists. (In other words, it means stop.)
+    /// Enumerants are listed by index, starting from zero and iterated via
+    /// `get_next_enumerant`. Only enumerants returned by that function are
+    /// valid here. A value of `None` indicates that no enumerant with that
+    /// index exists.
+    fn get_enumerant_name(
+        self,
+        index: u32,
+        _activation: &mut Activation<'_, 'gc, '_>,
+    ) -> Result<Value<'gc>, Error> {
+        let base = self.base();
+
+        Ok(base.get_enumerant_name(index).unwrap_or(Value::Undefined))
+    }
+
+    /// Retrieve a given enumerable value by index.
     ///
-    /// Objects are responsible for maintaining a consistently ordered and
-    /// indexed list of enumerable names which can be queried by this
-    /// mechanism.
-    fn get_enumerant_name(&self, index: u32) -> Option<QName<'gc>>;
+    /// This default implementation of value retrieval assumes that the names
+    /// of enumerants are also valid local names in the public namespace.
+    fn get_enumerant_value(
+        self,
+        index: u32,
+        activation: &mut Activation<'_, 'gc, '_>,
+    ) -> Result<Value<'gc>, Error> {
+        let name = self
+            .get_enumerant_name(index, activation)?
+            .coerce_to_string(activation)?;
+        self.get_property(self.into(), &QName::dynamic_name(name).into(), activation)
+    }
 
     /// Determine if a property is currently enumerable.
     ///
     /// Properties that do not exist are also not enumerable.
-    fn property_is_enumerable(&self, name: &QName<'gc>) -> bool;
+    fn property_is_enumerable(&self, name: &QName<'gc>) -> bool {
+        let base = self.base();
+
+        base.property_is_enumerable(name)
+    }
 
     /// Mark a dynamic property on this object as enumerable.
     fn set_local_property_is_enumerable(
@@ -350,7 +850,11 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         mc: MutationContext<'gc, '_>,
         name: &QName<'gc>,
         is_enumerable: bool,
-    ) -> Result<(), Error>;
+    ) -> Result<(), Error> {
+        let mut base = self.base_mut(mc);
+
+        base.set_local_property_is_enumerable(name, is_enumerable)
+    }
 
     /// Install a method (or any other non-slot value) on an object.
     fn install_method(
@@ -359,8 +863,11 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         name: QName<'gc>,
         disp_id: u32,
         function: Object<'gc>,
-        is_final: bool,
-    );
+    ) {
+        let mut base = self.base_mut(mc);
+
+        base.install_method(name, disp_id, function)
+    }
 
     /// Install a getter method on an object property.
     fn install_getter(
@@ -369,8 +876,11 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         name: QName<'gc>,
         disp_id: u32,
         function: Object<'gc>,
-        is_final: bool,
-    ) -> Result<(), Error>;
+    ) -> Result<(), Error> {
+        let mut base = self.base_mut(mc);
+
+        base.install_getter(name, disp_id, function)
+    }
 
     /// Install a setter method on an object property.
     fn install_setter(
@@ -379,8 +889,11 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         name: QName<'gc>,
         disp_id: u32,
         function: Object<'gc>,
-        is_final: bool,
-    ) -> Result<(), Error>;
+    ) -> Result<(), Error> {
+        let mut base = self.base_mut(mc);
+
+        base.install_setter(name, disp_id, function)
+    }
 
     /// Install a dynamic or built-in value property on an object.
     fn install_dynamic_property(
@@ -388,7 +901,11 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         mc: MutationContext<'gc, '_>,
         name: QName<'gc>,
         value: Value<'gc>,
-    ) -> Result<(), Error>;
+    ) -> Result<(), Error> {
+        let mut base = self.base_mut(mc);
+
+        base.install_dynamic_property(name, value)
+    }
 
     /// Install a slot on an object property.
     fn install_slot(
@@ -397,8 +914,11 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         name: QName<'gc>,
         id: u32,
         value: Value<'gc>,
-        is_final: bool,
-    );
+    ) {
+        let mut base = self.base_mut(mc);
+
+        base.install_slot(name, id, value)
+    }
 
     /// Install a const on an object property.
     fn install_const(
@@ -407,8 +927,11 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         name: QName<'gc>,
         id: u32,
         value: Value<'gc>,
-        is_final: bool,
-    );
+    ) {
+        let mut base = self.base_mut(mc);
+
+        base.install_const(name, id, value)
+    }
 
     /// Install all instance traits provided by a class.
     ///
@@ -421,15 +944,19 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     fn install_instance_traits(
         &mut self,
         activation: &mut Activation<'_, 'gc, '_>,
-        from_class_object: Object<'gc>,
+        from_class_object: ClassObject<'gc>,
     ) -> Result<(), Error> {
         if let Some(superclass_object) = from_class_object.superclass_object() {
             self.install_instance_traits(activation, superclass_object)?;
         }
 
-        if let Some(class) = from_class_object.as_class() {
-            self.install_traits(activation, class.read().instance_traits())?;
-        }
+        let class = from_class_object.inner_class_definition();
+        self.install_traits(
+            activation,
+            class.read().instance_traits(),
+            from_class_object.instance_scope(),
+            Some(from_class_object),
+        )?;
 
         Ok(())
     }
@@ -445,9 +972,11 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         &mut self,
         activation: &mut Activation<'_, 'gc, '_>,
         traits: &[Trait<'gc>],
+        scope: ScopeChain<'gc>,
+        defining_class: Option<ClassObject<'gc>>,
     ) -> Result<(), Error> {
         for trait_entry in traits {
-            self.install_trait(activation, trait_entry)?;
+            self.install_trait(activation, trait_entry, scope, defining_class)?;
         }
 
         Ok(())
@@ -460,54 +989,29 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     /// called once per name and/or slot ID, as reinstalling a trait may unset
     /// already set properties.
     ///
-    /// Class and function traits are *not* instantiated at installation time.
-    /// Instead, installing such traits is treated as installing a const with
-    /// `undefined` as its value.
+    /// Class, function, and method traits are *not* instantiated at
+    /// installation time. Instead, installing such traits merely installs a
+    /// placeholder (such as an `undefined` const slot) until the trait is
+    /// properly initialized.
     ///
     /// All traits that are instantiated at install time will be instantiated
     /// with this object's current scope stack and this object as a bound
     /// receiver.
     ///
     /// The value of the trait at the time of installation will be returned
-    /// here, or `undefined` for classes and functions.
+    /// here, or `undefined` for classes, functions, and methods.
+    ///
+    /// No verification happens in `install_trait`. Instead, you must make sure
+    /// to only install traits from validated classes.
     fn install_trait(
         &mut self,
         activation: &mut Activation<'_, 'gc, '_>,
         trait_entry: &Trait<'gc>,
+        scope: ScopeChain<'gc>,
+        defining_class: Option<ClassObject<'gc>>,
     ) -> Result<Value<'gc>, Error> {
         let receiver = (*self).into();
-        let scope = self.get_scope();
         let trait_name = trait_entry.name().clone();
-
-        if trait_entry.is_override() && !self.has_own_property(&trait_name)? {
-            return Err(format!(
-                "Attempted to override property {:?}, which is not already defined",
-                trait_name
-            )
-            .into());
-        }
-
-        //AS3 considers the setter and getter half of a final property to be
-        //separate from one another and *not* overriding each other, which can
-        //cause false verify errors if we don't exempt this particular case.
-        //
-        //TODO: We should actually check to see *what* this trait is overriding.
-        //TODO: We should also tighten the override check above using the same
-        //rationale.
-        let is_final = trait_entry.is_final();
-        let is_second_half_of_property = (self.has_own_virtual_getter(&trait_name)
-            && !self.has_own_virtual_setter(&trait_name))
-            || (!self.has_own_virtual_getter(&trait_name)
-                && self.has_own_virtual_setter(&trait_name));
-        let is_overriding_final =
-            self.has_own_property(&trait_name)? && self.is_property_final(&trait_name);
-        if is_overriding_final && !is_second_half_of_property {
-            return Err(format!(
-                "Attempted to override property {:?}, which is final",
-                trait_name
-            )
-            .into());
-        }
 
         avm_debug!(
             activation.avm2(),
@@ -522,43 +1026,31 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
                 default_value,
                 ..
             } => {
-                let value = default_value.clone().unwrap_or(Value::Undefined);
                 self.install_slot(
                     activation.context.gc_context,
                     trait_name,
                     *slot_id,
-                    value.clone(),
-                    is_final,
+                    default_value.clone(),
                 );
 
-                Ok(value)
+                Ok(default_value.clone())
             }
-            TraitKind::Method {
-                disp_id, method, ..
-            } => {
-                let function =
-                    FunctionObject::from_method(activation, method.clone(), scope, Some(receiver));
-                self.install_method(
-                    activation.context.gc_context,
-                    trait_name,
-                    *disp_id,
-                    function,
-                    is_final,
-                );
-
-                Ok(function.into())
-            }
+            TraitKind::Method { .. } => Ok(Value::Undefined),
             TraitKind::Getter {
                 disp_id, method, ..
             } => {
-                let function =
-                    FunctionObject::from_method(activation, method.clone(), scope, Some(receiver));
+                let function = FunctionObject::from_method(
+                    activation,
+                    method.clone(),
+                    scope,
+                    Some(receiver),
+                    defining_class,
+                );
                 self.install_getter(
                     activation.context.gc_context,
                     trait_name,
                     *disp_id,
                     function,
-                    is_final,
                 )?;
 
                 Ok(function.into())
@@ -566,14 +1058,18 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
             TraitKind::Setter {
                 disp_id, method, ..
             } => {
-                let function =
-                    FunctionObject::from_method(activation, method.clone(), scope, Some(receiver));
+                let function = FunctionObject::from_method(
+                    activation,
+                    method.clone(),
+                    scope,
+                    Some(receiver),
+                    defining_class,
+                );
                 self.install_setter(
                     activation.context.gc_context,
                     trait_name,
                     *disp_id,
                     function,
-                    is_final,
                 )?;
 
                 Ok(function.into())
@@ -584,7 +1080,6 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
                     trait_name,
                     *slot_id,
                     Value::Undefined,
-                    is_final,
                 );
 
                 Ok(Value::Undefined)
@@ -595,7 +1090,6 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
                     trait_name,
                     *slot_id,
                     Value::Undefined,
-                    is_final,
                 );
 
                 Ok(Value::Undefined)
@@ -605,16 +1099,14 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
                 default_value,
                 ..
             } => {
-                let value = default_value.clone().unwrap_or(Value::Undefined);
                 self.install_const(
                     activation.context.gc_context,
                     trait_name,
                     *slot_id,
-                    value.clone(),
-                    is_final,
+                    default_value.clone(),
                 );
 
-                Ok(value)
+                Ok(default_value.clone())
             }
         }
     }
@@ -625,223 +1117,8 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         _reciever: Option<Object<'gc>>,
         _arguments: &[Value<'gc>],
         _activation: &mut Activation<'_, 'gc, '_>,
-        _subclass_object: Option<Object<'gc>>,
     ) -> Result<Value<'gc>, Error> {
         Err("Object is not callable".into())
-    }
-
-    /// Call the instance initializer.
-    fn call_init(
-        self,
-        _reciever: Option<Object<'gc>>,
-        _arguments: &[Value<'gc>],
-        _activation: &mut Activation<'_, 'gc, '_>,
-        _subclass_object: Option<Object<'gc>>,
-    ) -> Result<Value<'gc>, Error> {
-        Err("Object is not a Class".into())
-    }
-
-    /// Call the instance's native initializer.
-    ///
-    /// The native initializer is called when native code needs to construct an
-    /// object, or when supercalling into a parent constructor (as there are
-    /// classes that cannot be constructed but can be supercalled).
-    fn call_native_init(
-        self,
-        _reciever: Option<Object<'gc>>,
-        _arguments: &[Value<'gc>],
-        _activation: &mut Activation<'_, 'gc, '_>,
-        _subclass_object: Option<Object<'gc>>,
-    ) -> Result<Value<'gc>, Error> {
-        Err("Object is not a Class".into())
-    }
-
-    /// Supercall a method defined in this class.
-    ///
-    /// This is intended to be called on the class object that is the
-    /// superclass of the one that defined the currently called property. If no
-    /// such superclass exists, you should use the class object for the
-    /// reciever's actual type (i.e. the lowest in the chain). This ensures
-    /// that repeated supercalls to the same method will call parent and
-    /// grandparent methods, and so on.
-    ///
-    /// If no method exists with the given name, this falls back to calling a
-    /// property of the `reciever`. This fallback only triggers if the property
-    /// is associated with a trait. Dynamic properties will still error out.
-    ///
-    /// This function will search through the class object tree starting from
-    /// this class up to `Object` for a method trait with the given name. If it
-    /// is found, it will be called with the reciever and arguments you
-    /// provided, as if it were defined on the target instance object.
-    ///
-    /// The class that defined the method being called will also be provided to
-    /// the `Activation` that the method runs on so that further supercalls
-    /// will work as expected.
-    fn supercall_method(
-        self,
-        name: &QName<'gc>,
-        reciever: Option<Object<'gc>>,
-        arguments: &[Value<'gc>],
-        activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Result<Value<'gc>, Error> {
-        let superclass_object = self.find_class_for_trait(name)?.ok_or_else(|| {
-            format!(
-                "Attempted to supercall method {:?}, which does not exist",
-                name
-            )
-        })?;
-        let mut class_traits = Vec::new();
-        superclass_object
-            .as_class()
-            .unwrap()
-            .read()
-            .lookup_instance_traits(name, &mut class_traits)?;
-        let base_trait = class_traits
-            .iter()
-            .find(|t| matches!(t.kind(), TraitKind::Method { .. }));
-        let scope = superclass_object.get_scope();
-
-        if let Some(TraitKind::Method { method, .. }) = base_trait.map(|b| b.kind()) {
-            let callee = FunctionObject::from_method(activation, method.clone(), scope, reciever);
-
-            callee.call(reciever, arguments, activation, Some(superclass_object))
-        } else {
-            if let Some(reciever) = reciever {
-                if let Ok(callee) = reciever
-                    .get_property(reciever, name, activation)
-                    .and_then(|v| v.coerce_to_object(activation))
-                {
-                    return callee.call(Some(reciever), arguments, activation, None);
-                }
-            }
-
-            Err(format!(
-                "Attempted to supercall method {:?}, which does not exist",
-                name
-            )
-            .into())
-        }
-    }
-
-    /// Supercall a getter defined in this class.
-    ///
-    /// This is intended to be called on the class object that is the
-    /// superclass of the one that defined the currently called property. If no
-    /// such superclass exists, you should use the class object for the
-    /// reciever's actual type (i.e. the lowest in the chain). This ensures
-    /// that repeated supercalls to the same getter will call parent and
-    /// grandparent getters, and so on.
-    ///
-    /// If no getter exists with the given name, this falls back to getting a
-    /// property of the `reciever`. This fallback only triggers if the property
-    /// is associated with a trait. Dynamic properties will still error out.
-    ///
-    /// This function will search through the class object tree starting from
-    /// this class up to `Object` for a getter trait with the given name. If it
-    /// is found, it will be called with the reciever you provided, as if it
-    /// were defined on the target instance object.
-    ///
-    /// The class that defined the getter being called will also be provided to
-    /// the `Activation` that the getter runs on so that further supercalls
-    /// will work as expected.
-    fn supercall_getter(
-        self,
-        name: &QName<'gc>,
-        reciever: Option<Object<'gc>>,
-        activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Result<Value<'gc>, Error> {
-        let superclass_object = self.find_class_for_trait(name)?.ok_or_else(|| {
-            format!(
-                "Attempted to supercall getter {:?}, which does not exist",
-                name
-            )
-        })?;
-        let mut class_traits = Vec::new();
-        superclass_object
-            .as_class()
-            .unwrap()
-            .read()
-            .lookup_instance_traits(name, &mut class_traits)?;
-        let base_trait = class_traits
-            .iter()
-            .find(|t| matches!(t.kind(), TraitKind::Getter { .. }));
-        let scope = superclass_object.get_scope();
-
-        if let Some(TraitKind::Getter { method, .. }) = base_trait.map(|b| b.kind()) {
-            let callee = FunctionObject::from_method(activation, method.clone(), scope, reciever);
-
-            callee.call(reciever, &[], activation, Some(superclass_object))
-        } else if let Some(reciever) = reciever {
-            reciever.get_property(reciever, name, activation)
-        } else {
-            Err(format!(
-                "Attempted to supercall getter {:?}, which does not exist",
-                name
-            )
-            .into())
-        }
-    }
-
-    /// Supercall a setter defined in this class.
-    ///
-    /// This is intended to be called on the class object that is the
-    /// superclass of the one that defined the currently called property. If no
-    /// such superclass exists, you should use the class object for the
-    /// reciever's actual type (i.e. the lowest in the chain). This ensures
-    /// that repeated supercalls to the same setter will call parent and
-    /// grandparent setter, and so on.
-    ///
-    /// If no setter exists with the given name, this falls back to setting a
-    /// property of the `reciever`. This fallback only triggers if the property
-    /// is associated with a trait. Dynamic properties will still error out.
-    ///
-    /// This function will search through the class object tree starting from
-    /// this class up to `Object` for a setter trait with the given name. If it
-    /// is found, it will be called with the reciever and value you provided,
-    /// as if it were defined on the target instance object.
-    ///
-    /// The class that defined the setter being called will also be provided to
-    /// the `Activation` that the setter runs on so that further supercalls
-    /// will work as expected.
-    fn supercall_setter(
-        self,
-        name: &QName<'gc>,
-        value: Value<'gc>,
-        reciever: Option<Object<'gc>>,
-        activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Result<(), Error> {
-        let superclass_object = self.find_class_for_trait(name)?.ok_or_else(|| {
-            format!(
-                "Attempted to supercall setter {:?}, which does not exist",
-                name
-            )
-        })?;
-        let mut class_traits = Vec::new();
-        superclass_object
-            .as_class()
-            .unwrap()
-            .read()
-            .lookup_instance_traits(name, &mut class_traits)?;
-        let base_trait = class_traits
-            .iter()
-            .find(|t| matches!(t.kind(), TraitKind::Setter { .. }));
-        let scope = superclass_object.get_scope();
-
-        if let Some(TraitKind::Setter { method, .. }) = base_trait.map(|b| b.kind()) {
-            let callee = FunctionObject::from_method(activation, method.clone(), scope, reciever);
-
-            callee.call(reciever, &[value], activation, Some(superclass_object))?;
-
-            Ok(())
-        } else if let Some(mut reciever) = reciever {
-            reciever.set_property(reciever, name, value, activation)
-        } else {
-            Err(format!(
-                "Attempted to supercall setter {:?}, which does not exist",
-                name
-            )
-            .into())
-        }
     }
 
     /// Construct a Class or Function and return an instance of it.
@@ -866,6 +1143,22 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         _args: &[Value<'gc>],
     ) -> Result<Object<'gc>, Error> {
         Err("Object is not constructable".into())
+    }
+
+    /// Construct a property of this object by Multiname lookup.
+    ///
+    /// This corresponds directly to the AVM2 operation `constructprop`.
+    fn construct_prop(
+        self,
+        multiname: &Multiname<'gc>,
+        args: &[Value<'gc>],
+        activation: &mut Activation<'_, 'gc, '_>,
+    ) -> Result<Object<'gc>, Error> {
+        let ctor = self
+            .get_property(self.into(), multiname, activation)?
+            .coerce_to_object(activation)?;
+
+        ctor.construct(activation, args)
     }
 
     /// Construct a host object prototype of some kind and return it.
@@ -893,7 +1186,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         &self,
         _activation: &mut Activation<'_, 'gc, '_>,
         _params: &[Value<'gc>],
-    ) -> Result<Object<'gc>, Error> {
+    ) -> Result<ClassObject<'gc>, Error> {
         Err("Not a parameterized type".into())
     }
 
@@ -917,7 +1210,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     /// coercions.
     fn to_string(&self, mc: MutationContext<'gc, '_>) -> Result<Value<'gc>, Error> {
         let class_name = self
-            .as_class()
+            .instance_of_class_definition()
             .map(|c| c.read().name().local_name())
             .unwrap_or_else(|| "Object".into());
 
@@ -934,7 +1227,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     /// of the class that created this object).
     fn to_locale_string(&self, mc: MutationContext<'gc, '_>) -> Result<Value<'gc>, Error> {
         let class_name = self
-            .as_class()
+            .instance_of_class_definition()
             .map(|c| c.read().name().local_name())
             .unwrap_or_else(|| "Object".into());
 
@@ -948,14 +1241,6 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     /// primitive value. Typically, this would be a number of some kind.
     fn value_of(&self, mc: MutationContext<'gc, '_>) -> Result<Value<'gc>, Error>;
 
-    /// Enumerate all interfaces implemented by this class object.
-    ///
-    /// Non-classes do not implement interfaces.
-    fn interfaces(&self) -> Vec<Object<'gc>>;
-
-    /// Set the interface list for this class object.
-    fn set_interfaces(&self, gc_context: MutationContext<'gc, '_>, iface_list: Vec<Object<'gc>>);
-
     /// Determine if this object is an instance of a given type.
     ///
     /// This uses the ES3 definition of instance, which walks the prototype
@@ -965,14 +1250,13 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     /// The given object should be the class object for the given type we are
     /// checking against this object. Its prototype will be extracted and
     /// searched in the prototype chain of this object.
-    #[allow(unused_mut)] //it's not unused
     fn is_instance_of(
         &self,
         activation: &mut Activation<'_, 'gc, '_>,
-        mut class: Object<'gc>,
+        class: Object<'gc>,
     ) -> Result<bool, Error> {
         let type_proto = class
-            .get_property(class, &QName::dynamic_name("prototype"), activation)?
+            .get_property(class, &QName::dynamic_name("prototype").into(), activation)?
             .coerce_to_object(activation)?;
 
         self.has_prototype_in_chain(type_proto)
@@ -1005,13 +1289,12 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     ///
     /// The given object should be the class object for the given type we are
     /// checking against this object.
-    #[allow(unused_mut)] //it's not unused
     fn is_of_type(
         &self,
-        mut test_class: Object<'gc>,
+        test_class: ClassObject<'gc>,
         activation: &mut Activation<'_, 'gc, '_>,
     ) -> Result<bool, Error> {
-        let mut my_class = self.as_class_object();
+        let my_class = self.instance_of();
 
         // ES3 objects are not class instances but are still treated as
         // instances of Object, which is an ES4 class.
@@ -1024,95 +1307,44 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         }
     }
 
-    /// Determine if this class has a given type in its superclass chain.
-    ///
-    /// The given object `test_class` should be either a superclass or
-    /// interface we are checking against this class.
-    ///
-    /// To test if a class *instance* is of a given type, see is_of_type.
-    fn has_class_in_chain(
-        &self,
-        test_class: Object<'gc>,
-        activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Result<bool, Error> {
-        let my_class: Object<'gc> = (*self).into();
-        let mut my_class = Some(my_class);
-
-        while let Some(class) = my_class {
-            if Object::ptr_eq(class, test_class) {
-                return Ok(true);
-            }
-
-            for interface in class.interfaces() {
-                if Object::ptr_eq(interface, test_class) {
-                    return Ok(true);
-                }
-            }
-
-            if let (Some(my_param), Some(test_param)) =
-                (class.as_class_params(), test_class.as_class_params())
-            {
-                let mut are_all_params_coercible = true;
-
-                are_all_params_coercible &= match (my_param, test_param) {
-                    (Some(my_param), Some(test_param)) => {
-                        my_param.has_class_in_chain(test_param, activation)?
-                    }
-                    (None, Some(_)) => false,
-                    _ => true,
-                };
-
-                if are_all_params_coercible {
-                    return Ok(true);
-                }
-            }
-
-            my_class = class.superclass_object()
-        }
-
-        Ok(false)
-    }
-
     /// Get a raw pointer value for this object.
     fn as_ptr(&self) -> *const ObjectPtr;
 
-    /// Get this object's `Class`, if it has one.
-    fn as_class(&self) -> Option<GcCell<'gc, Class<'gc>>>;
+    /// Get this object's class, if it has one.
+    fn instance_of(&self) -> Option<ClassObject<'gc>> {
+        let base = self.base();
 
-    /// Get this object's class object, if it has one.
-    fn as_class_object(&self) -> Option<Object<'gc>>;
-
-    /// Get the parameters of this class object, if present.
-    ///
-    /// Only specialized generic classes will yield their parameters.
-    fn as_class_params(&self) -> Option<Option<Object<'gc>>> {
-        None
+        base.instance_of()
     }
 
-    /// Associate the object with a particular class object.
-    ///
-    /// This turns the object into an instance of that class. It should only be
-    /// used in situations where the object cannot be made an instance of the
-    /// class at allocation time, such as during early runtime setup.
-    fn set_class_object(self, mc: MutationContext<'gc, '_>, class_object: Object<'gc>);
-
-    /// Get the superclass object of this object.
-    fn superclass_object(self) -> Option<Object<'gc>> {
-        None
+    /// Get this object's class's `Class`, if it has one.
+    fn instance_of_class_definition(&self) -> Option<GcCell<'gc, Class<'gc>>> {
+        self.instance_of().map(|cls| cls.inner_class_definition())
     }
 
-    /// Get this class's instance allocator.
-    fn instance_allocator(self) -> Option<AllocatorFn> {
+    fn set_instance_of(&self, mc: MutationContext<'gc, '_>, instance_of: ClassObject<'gc>) {
+        let mut base = self.base_mut(mc);
+
+        base.set_instance_of(instance_of);
+    }
+
+    /// Try to corece this object into a `ClassObject`.
+    fn as_class_object(&self) -> Option<ClassObject<'gc>> {
         None
     }
 
     /// Get this object's `Executable`, if it has one.
-    fn as_executable(&self) -> Option<Executable<'gc>> {
+    fn as_executable(&self) -> Option<Ref<Executable<'gc>>> {
         None
     }
 
     /// Unwrap this object's `Namespace`, if the object is a boxed namespace.
     fn as_namespace(&self) -> Option<Ref<Namespace<'gc>>> {
+        None
+    }
+
+    /// Unwrap this object as a `QNameObject`
+    fn as_qname_object(self) -> Option<QNameObject<'gc>> {
         None
     }
 
@@ -1231,7 +1463,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     fn set_sound(self, _mc: MutationContext<'gc, '_>, _sound: SoundHandle) {}
 
     /// Unwrap this object's sound instance handle.
-    fn as_sound_instance(self) -> Option<SoundInstanceHandle> {
+    fn as_sound_channel(self) -> Option<SoundChannelObject<'gc>> {
         None
     }
 
@@ -1239,12 +1471,50 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     ///
     /// This does nothing if the object is not a sound channel.
     fn set_sound_instance(self, _mc: MutationContext<'gc, '_>, _sound: SoundInstanceHandle) {}
+
+    /// Unwrap this object's bitmap data
+    fn as_bitmap_data(&self) -> Option<GcCell<'gc, BitmapData<'gc>>> {
+        None
+    }
+
+    /// Initialize the bitmap data in this object, if it's capable of
+    /// supporting said data.
+    ///
+    /// This should only be called to initialize the association between an AVM
+    /// object and it's associated bitmap data. This association should not be
+    /// reinitialized later.
+    fn init_bitmap_data(
+        &self,
+        _mc: MutationContext<'gc, '_>,
+        _new_bitmap: GcCell<'gc, BitmapData<'gc>>,
+    ) {
+    }
+
+    /// Get this objects `DateObject`, if it has one.
+    fn as_date_object(&self) -> Option<DateObject<'gc>> {
+        None
+    }
+
+    /// Get this object as a `DictionaryObject`, if it is one.
+    fn as_dictionary_object(self) -> Option<DictionaryObject<'gc>> {
+        None
+    }
+
+    /// Unwrap this object as a text format.
+    fn as_text_format(&self) -> Option<Ref<TextFormat>> {
+        None
+    }
+
+    /// Unwrap this object as a mutable text format.
+    fn as_text_format_mut(&self, _mc: MutationContext<'gc, '_>) -> Option<RefMut<TextFormat>> {
+        None
+    }
 }
 
 pub enum ObjectPtr {}
 
 impl<'gc> Object<'gc> {
-    pub fn ptr_eq(a: Object<'gc>, b: Object<'gc>) -> bool {
+    pub fn ptr_eq<T: TObject<'gc>>(a: T, b: T) -> bool {
         a.as_ptr() == b.as_ptr()
     }
 }

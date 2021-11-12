@@ -1,20 +1,12 @@
 //! Classes that store formatting options
 
-use crate::avm1::activation::Activation as Avm1Activation;
-use crate::avm1::{
-    ArrayObject as Avm1ArrayObject, AvmString, Object as Avm1Object,
-    ScriptObject as Avm1ScriptObject, TObject as Avm1TObject, Value as Avm1Value,
-};
-use crate::avm2::{
-    Activation as Avm2Activation, ArrayObject as Avm2ArrayObject, Error as Avm2Error,
-    Namespace as Avm2Namespace, Object as Avm2Object, QName as Avm2QName, TObject as Avm2TObject,
-    Value as Avm2Value,
-};
 use crate::context::UpdateContext;
 use crate::html::iterators::TextSpanIter;
 use crate::tag_utils::SwfMovie;
-use crate::xml::{Step, XmlDocument, XmlName, XmlNode};
+use crate::xml::{XmlDocument, XmlName, XmlNode};
 use gc_arena::{Collect, MutationContext};
+use quick_xml::events::Event;
+use quick_xml::Reader;
 use std::borrow::Cow;
 use std::cmp::{min, Ordering};
 use std::sync::Arc;
@@ -134,156 +126,6 @@ pub struct TextFormat {
     pub target: Option<String>,
 }
 
-fn getstr_from_avm1_object<'gc>(
-    object: Avm1Object<'gc>,
-    name: &str,
-    activation: &mut Avm1Activation<'_, 'gc, '_>,
-) -> Result<Option<String>, crate::avm1::error::Error<'gc>> {
-    Ok(match object.get(name, activation)? {
-        Avm1Value::Undefined => None,
-        Avm1Value::Null => None,
-        v => Some(v.coerce_to_string(activation)?.to_string()),
-    })
-}
-
-fn getfloat_from_avm1_object<'gc>(
-    object: Avm1Object<'gc>,
-    name: &str,
-    activation: &mut Avm1Activation<'_, 'gc, '_>,
-) -> Result<Option<f64>, crate::avm1::error::Error<'gc>> {
-    Ok(match object.get(name, activation)? {
-        Avm1Value::Undefined => None,
-        Avm1Value::Null => None,
-        v => Some(v.coerce_to_f64(activation)?),
-    })
-}
-
-fn getbool_from_avm1_object<'gc>(
-    object: Avm1Object<'gc>,
-    name: &str,
-    activation: &mut Avm1Activation<'_, 'gc, '_>,
-) -> Result<Option<bool>, crate::avm1::error::Error<'gc>> {
-    Ok(match object.get(name, activation)? {
-        Avm1Value::Undefined => None,
-        Avm1Value::Null => None,
-        v => Some(v.as_bool(activation.swf_version())),
-    })
-}
-
-fn getfloatarray_from_avm1_object<'gc>(
-    object: Avm1Object<'gc>,
-    name: &str,
-    activation: &mut Avm1Activation<'_, 'gc, '_>,
-) -> Result<Option<Vec<f64>>, crate::avm1::error::Error<'gc>> {
-    Ok(match object.get(name, activation)? {
-        Avm1Value::Undefined => None,
-        Avm1Value::Null => None,
-        v => {
-            let v = v.coerce_to_object(activation);
-            let length = v.length(activation)?;
-            let output: Result<Vec<_>, crate::avm1::error::Error<'gc>> = (0..length)
-                .map(|i| v.get_element(activation, i).coerce_to_f64(activation))
-                .collect();
-            Some(output?)
-        }
-    })
-}
-
-fn getstr_from_avm2_object<'gc>(
-    object: Avm2Object<'gc>,
-    pubname: &'static str,
-    activation: &mut Avm2Activation<'_, 'gc, '_>,
-) -> Result<Option<String>, Avm2Error> {
-    Ok(
-        match object.get_property(
-            object,
-            &Avm2QName::new(Avm2Namespace::public(), pubname),
-            activation,
-        )? {
-            Avm2Value::Undefined => None,
-            Avm2Value::Null => None,
-            v => Some(v.coerce_to_string(activation)?.to_string()),
-        },
-    )
-}
-
-fn getfloat_from_avm2_object<'gc>(
-    object: Avm2Object<'gc>,
-    pubname: &'static str,
-    activation: &mut Avm2Activation<'_, 'gc, '_>,
-) -> Result<Option<f64>, Avm2Error> {
-    Ok(
-        match object.get_property(
-            object,
-            &Avm2QName::new(Avm2Namespace::public(), pubname),
-            activation,
-        )? {
-            Avm2Value::Undefined => None,
-            Avm2Value::Null => None,
-            v => Some(v.coerce_to_number(activation)?),
-        },
-    )
-}
-
-fn getbool_from_avm2_object<'gc>(
-    object: Avm2Object<'gc>,
-    pubname: &'static str,
-    activation: &mut Avm2Activation<'_, 'gc, '_>,
-) -> Result<Option<bool>, Avm2Error> {
-    Ok(
-        match object.get_property(
-            object,
-            &Avm2QName::new(Avm2Namespace::public(), pubname),
-            activation,
-        )? {
-            Avm2Value::Undefined => None,
-            Avm2Value::Null => None,
-            v => Some(v.coerce_to_boolean()),
-        },
-    )
-}
-
-fn getfloatarray_from_avm2_object<'gc>(
-    object: Avm2Object<'gc>,
-    pubname: &'static str,
-    activation: &mut Avm2Activation<'_, 'gc, '_>,
-) -> Result<Option<Vec<f64>>, Avm2Error> {
-    Ok(
-        match object.get_property(
-            object,
-            &Avm2QName::new(Avm2Namespace::public(), pubname),
-            activation,
-        )? {
-            Avm2Value::Undefined => None,
-            Avm2Value::Null => None,
-            v => {
-                let v = v.coerce_to_object(activation)?;
-                let length = v.as_array_storage().map(|v| v.length());
-
-                let mut output = Vec::new();
-                if let Some(length) = length {
-                    output.reserve(length);
-                    for i in 0..length {
-                        output.push(
-                            v.get_property(
-                                v,
-                                &Avm2QName::new(
-                                    Avm2Namespace::public(),
-                                    AvmString::new(activation.context.gc_context, format!("{}", i)),
-                                ),
-                                activation,
-                            )?
-                            .coerce_to_number(activation)?,
-                        );
-                    }
-                }
-
-                Some(output)
-            }
-        },
-    )
-}
-
 impl TextFormat {
     /// Construct a `TextFormat` from an `EditText`'s SWF tag.
     ///
@@ -314,7 +156,9 @@ impl TextFormat {
         Self {
             font: Some(font_class),
             size: et.height.map(|h| h.to_pixels()),
-            color: et.color,
+            color: et
+                .color
+                .map(|color| swf::Color::from_rgb(color.to_rgb(), 0)),
             align,
             bold: Some(font.map(|font| font.descriptor().bold()).unwrap_or(false)),
             italic: Some(font.map(|font| font.descriptor().italic()).unwrap_or(false)),
@@ -333,532 +177,6 @@ impl TextFormat {
             url: Some("".to_string()),
             target: Some("".to_string()),
         }
-    }
-
-    /// Construct a `TextFormat` from a correctly-shaped AVM1 object.
-    pub fn from_avm1_object<'gc>(
-        object1: Avm1Object<'gc>,
-        activation: &mut Avm1Activation<'_, 'gc, '_>,
-    ) -> Result<Self, crate::avm1::error::Error<'gc>> {
-        Ok(Self {
-            font: getstr_from_avm1_object(object1, "font", activation)?,
-            size: getfloat_from_avm1_object(object1, "size", activation)?,
-            color: getfloat_from_avm1_object(object1, "color", activation)?
-                .map(|v| swf::Color::from_rgb(v as u32, 0xFF)),
-            align: getstr_from_avm1_object(object1, "align", activation)?.and_then(|v| {
-                match v.to_lowercase().as_str() {
-                    "left" => Some(swf::TextAlign::Left),
-                    "center" => Some(swf::TextAlign::Center),
-                    "right" => Some(swf::TextAlign::Right),
-                    "justify" => Some(swf::TextAlign::Justify),
-                    _ => None,
-                }
-            }),
-            bold: getbool_from_avm1_object(object1, "bold", activation)?,
-            italic: getbool_from_avm1_object(object1, "italic", activation)?,
-            underline: getbool_from_avm1_object(object1, "underline", activation)?,
-            left_margin: getfloat_from_avm1_object(object1, "leftMargin", activation)?,
-            right_margin: getfloat_from_avm1_object(object1, "rightMargin", activation)?,
-            indent: getfloat_from_avm1_object(object1, "indent", activation)?,
-            block_indent: getfloat_from_avm1_object(object1, "blockIndent", activation)?,
-            kerning: getbool_from_avm1_object(object1, "kerning", activation)?,
-            leading: getfloat_from_avm1_object(object1, "leading", activation)?,
-            letter_spacing: getfloat_from_avm1_object(object1, "letterSpacing", activation)?,
-            tab_stops: getfloatarray_from_avm1_object(object1, "tabStops", activation)?,
-            bullet: getbool_from_avm1_object(object1, "bullet", activation)?,
-            url: getstr_from_avm1_object(object1, "url", activation)?,
-            target: getstr_from_avm1_object(object1, "target", activation)?,
-        })
-    }
-
-    /// Construct a `TextFormat` from an AVM2 `TextFormat`.
-    pub fn from_avm2_object<'gc>(
-        object2: Avm2Object<'gc>,
-        activation: &mut Avm2Activation<'_, 'gc, '_>,
-    ) -> Result<Self, Avm2Error> {
-        Ok(Self {
-            font: getstr_from_avm2_object(object2, "font", activation)?,
-            size: getfloat_from_avm2_object(object2, "size", activation)?,
-            color: getfloat_from_avm2_object(object2, "color", activation)?
-                .map(|v| swf::Color::from_rgb(v as u32, 0xFF)),
-            align: getstr_from_avm2_object(object2, "align", activation)?.and_then(|v| {
-                //TODO: AS3 adds two extra values here
-                match v.to_lowercase().as_str() {
-                    "left" => Some(swf::TextAlign::Left),
-                    "center" => Some(swf::TextAlign::Center),
-                    "right" => Some(swf::TextAlign::Right),
-                    "justify" => Some(swf::TextAlign::Justify),
-                    _ => None,
-                }
-            }),
-            bold: getbool_from_avm2_object(object2, "bold", activation)?,
-            italic: getbool_from_avm2_object(object2, "italic", activation)?,
-            underline: getbool_from_avm2_object(object2, "underline", activation)?,
-            left_margin: getfloat_from_avm2_object(object2, "leftMargin", activation)?,
-            right_margin: getfloat_from_avm2_object(object2, "rightMargin", activation)?,
-            indent: getfloat_from_avm2_object(object2, "indent", activation)?,
-            block_indent: getfloat_from_avm2_object(object2, "blockIndent", activation)?,
-            kerning: getbool_from_avm2_object(object2, "kerning", activation)?,
-            leading: getfloat_from_avm2_object(object2, "leading", activation)?,
-            letter_spacing: getfloat_from_avm2_object(object2, "letterSpacing", activation)?,
-            tab_stops: getfloatarray_from_avm2_object(object2, "tabStops", activation)?,
-            bullet: getbool_from_avm2_object(object2, "bullet", activation)?,
-            url: getstr_from_avm2_object(object2, "url", activation)?,
-            target: getstr_from_avm2_object(object2, "target", activation)?,
-        })
-    }
-
-    /// Extract text format parameters from presentational markup.
-    ///
-    /// This assumes the "legacy" HTML path that only supports a handful of
-    /// elements. The "stylesheet" HTML path will also require CSS style
-    /// calculation for each node, followed by style conversion.
-    ///
-    /// This function accepts a `TextFormat`, which should be a text format
-    /// loaded with all of the *currently existing* styles at this point in the
-    /// lowering process. Any property not implied by markup will be retained
-    /// in this format.
-    pub fn from_presentational_markup(node: XmlNode<'_>, mut tf: TextFormat) -> Self {
-        match node.tag_name() {
-            Some(name) if name.eq_ignore_ascii_case(&XmlName::from_str("p")) => {
-                match node
-                    .attribute_value_ignore_ascii_case(&XmlName::from_str("align"))
-                    .as_deref()
-                {
-                    Some("left") => tf.align = Some(swf::TextAlign::Left),
-                    Some("center") => tf.align = Some(swf::TextAlign::Center),
-                    Some("right") => tf.align = Some(swf::TextAlign::Right),
-                    _ => {}
-                }
-            }
-            Some(name) if name.eq_ignore_ascii_case(&XmlName::from_str("a")) => {
-                if let Some(href) =
-                    node.attribute_value_ignore_ascii_case(&XmlName::from_str("href"))
-                {
-                    tf.url = Some(href);
-                }
-
-                if let Some(target) =
-                    node.attribute_value_ignore_ascii_case(&XmlName::from_str("target"))
-                {
-                    tf.target = Some(target);
-                }
-            }
-            Some(name) if name.eq_ignore_ascii_case(&XmlName::from_str("font")) => {
-                if let Some(face) =
-                    node.attribute_value_ignore_ascii_case(&XmlName::from_str("face"))
-                {
-                    tf.font = Some(face);
-                }
-
-                if let Some(size) =
-                    node.attribute_value_ignore_ascii_case(&XmlName::from_str("size"))
-                {
-                    tf.size = size.parse().ok();
-                }
-
-                if let Some(color) =
-                    node.attribute_value_ignore_ascii_case(&XmlName::from_str("color"))
-                {
-                    if color.starts_with('#') {
-                        let rval = color.get(1..3).and_then(|v| u8::from_str_radix(v, 16).ok());
-                        let gval = color.get(3..5).and_then(|v| u8::from_str_radix(v, 16).ok());
-                        let bval = color.get(5..7).and_then(|v| u8::from_str_radix(v, 16).ok());
-
-                        if let (Some(r), Some(g), Some(b)) = (rval, gval, bval) {
-                            tf.color = Some(swf::Color { r, g, b, a: 255 });
-                        }
-                    }
-                }
-
-                if let Some(letter_spacing) =
-                    node.attribute_value_ignore_ascii_case(&XmlName::from_str("letterSpacing"))
-                {
-                    tf.letter_spacing = letter_spacing.parse().ok();
-                }
-
-                tf.kerning = match node
-                    .attribute_value_ignore_ascii_case(&XmlName::from_str("kerning"))
-                    .as_deref()
-                {
-                    Some("1") => Some(true),
-                    Some("0") => Some(false),
-                    _ => tf.kerning,
-                }
-            }
-            Some(name) if name.eq_ignore_ascii_case(&XmlName::from_str("b")) => {
-                tf.bold = Some(true);
-            }
-            Some(name) if name.eq_ignore_ascii_case(&XmlName::from_str("i")) => {
-                tf.italic = Some(true);
-            }
-            Some(name) if name.eq_ignore_ascii_case(&XmlName::from_str("u")) => {
-                tf.underline = Some(true);
-            }
-            Some(name) if name.eq_ignore_ascii_case(&XmlName::from_str("li")) => {
-                tf.bullet = Some(true);
-            }
-            Some(name) if name.eq_ignore_ascii_case(&XmlName::from_str("textformat")) => {
-                //TODO: Spec says these are all in twips. That doesn't seem to
-                //match Flash 8.
-                if let Some(left_margin) =
-                    node.attribute_value_ignore_ascii_case(&XmlName::from_str("leftmargin"))
-                {
-                    tf.left_margin = left_margin.parse().ok();
-                }
-
-                if let Some(right_margin) =
-                    node.attribute_value_ignore_ascii_case(&XmlName::from_str("rightmargin"))
-                {
-                    tf.right_margin = right_margin.parse().ok();
-                }
-
-                if let Some(indent) =
-                    node.attribute_value_ignore_ascii_case(&XmlName::from_str("indent"))
-                {
-                    tf.indent = indent.parse().ok();
-                }
-
-                if let Some(blockindent) =
-                    node.attribute_value_ignore_ascii_case(&XmlName::from_str("blockindent"))
-                {
-                    tf.block_indent = blockindent.parse().ok();
-                }
-
-                if let Some(leading) =
-                    node.attribute_value_ignore_ascii_case(&XmlName::from_str("leading"))
-                {
-                    tf.leading = leading.parse().ok();
-                }
-
-                if let Some(tabstops) =
-                    node.attribute_value_ignore_ascii_case(&XmlName::from_str("tabstops"))
-                {
-                    tf.tab_stops = Some(
-                        tabstops
-                            .split(',')
-                            .filter_map(|v| v.trim().parse().ok())
-                            .collect(),
-                    );
-                }
-            }
-            _ => {}
-        }
-
-        tf
-    }
-
-    /// Construct a `TextFormat` AVM1 object from this text format object.
-    pub fn as_avm1_object<'gc>(
-        &self,
-        activation: &mut Avm1Activation<'_, 'gc, '_>,
-    ) -> Result<Avm1Object<'gc>, crate::avm1::error::Error<'gc>> {
-        let object = Avm1ScriptObject::object(
-            activation.context.gc_context,
-            Some(activation.context.avm1.prototypes().text_format),
-        );
-
-        object.set(
-            "font",
-            self.font
-                .clone()
-                .map(|v| AvmString::new(activation.context.gc_context, v).into())
-                .unwrap_or(Avm1Value::Null),
-            activation,
-        )?;
-        object.set(
-            "size",
-            self.size.map(|v| v.into()).unwrap_or(Avm1Value::Null),
-            activation,
-        )?;
-        object.set(
-            "color",
-            self.color
-                .clone()
-                .map(|v| v.to_rgb().into())
-                .unwrap_or(Avm1Value::Null),
-            activation,
-        )?;
-        object.set(
-            "align",
-            self.align
-                .map(|v| {
-                    AvmString::new(
-                        activation.context.gc_context,
-                        match v {
-                            swf::TextAlign::Left => "left",
-                            swf::TextAlign::Center => "center",
-                            swf::TextAlign::Right => "right",
-                            swf::TextAlign::Justify => "justify",
-                        }
-                        .to_string(),
-                    )
-                    .into()
-                })
-                .unwrap_or(Avm1Value::Null),
-            activation,
-        )?;
-        object.set(
-            "bold",
-            self.bold.map(|v| v.into()).unwrap_or(Avm1Value::Null),
-            activation,
-        )?;
-        object.set(
-            "italic",
-            self.italic.map(|v| v.into()).unwrap_or(Avm1Value::Null),
-            activation,
-        )?;
-        object.set(
-            "underline",
-            self.underline.map(|v| v.into()).unwrap_or(Avm1Value::Null),
-            activation,
-        )?;
-        object.set(
-            "leftMargin",
-            self.left_margin
-                .map(|v| v.into())
-                .unwrap_or(Avm1Value::Null),
-            activation,
-        )?;
-        object.set(
-            "rightMargin",
-            self.right_margin
-                .map(|v| v.into())
-                .unwrap_or(Avm1Value::Null),
-            activation,
-        )?;
-        object.set(
-            "indent",
-            self.indent.map(|v| v.into()).unwrap_or(Avm1Value::Null),
-            activation,
-        )?;
-        object.set(
-            "blockIndent",
-            self.block_indent
-                .map(|v| v.into())
-                .unwrap_or(Avm1Value::Null),
-            activation,
-        )?;
-        object.set(
-            "kerning",
-            self.kerning.map(|v| v.into()).unwrap_or(Avm1Value::Null),
-            activation,
-        )?;
-        object.set(
-            "leading",
-            self.leading.map(|v| v.into()).unwrap_or(Avm1Value::Null),
-            activation,
-        )?;
-        object.set(
-            "letterSpacing",
-            self.letter_spacing
-                .map(|v| v.into())
-                .unwrap_or(Avm1Value::Null),
-            activation,
-        )?;
-        object.set(
-            "bullet",
-            self.bullet.map(|v| v.into()).unwrap_or(Avm1Value::Null),
-            activation,
-        )?;
-        object.set(
-            "url",
-            self.url
-                .clone()
-                .map(|v| AvmString::new(activation.context.gc_context, v).into())
-                .unwrap_or(Avm1Value::Null),
-            activation,
-        )?;
-        object.set(
-            "target",
-            self.target
-                .clone()
-                .map(|v| AvmString::new(activation.context.gc_context, v).into())
-                .unwrap_or(Avm1Value::Null),
-            activation,
-        )?;
-
-        let tab_stops = self
-            .tab_stops
-            .as_ref()
-            .map_or(Avm1Value::Null, |tab_stops| {
-                Avm1ArrayObject::new(
-                    activation.context.gc_context,
-                    activation.context.avm1.prototypes().array,
-                    tab_stops.iter().map(|&x| x.into()),
-                )
-                .into()
-            });
-        object.set("tabStops", tab_stops, activation)?;
-        Ok(object.into())
-    }
-
-    /// Construct a `TextFormat` AVM2 object from this text format object.
-    pub fn as_avm2_object<'gc>(
-        &self,
-        activation: &mut Avm2Activation<'_, 'gc, '_>,
-    ) -> Result<Avm2Object<'gc>, Avm2Error> {
-        let constr = activation.context.avm2.classes().textformat;
-        let mut object = constr.construct(activation, &[])?;
-
-        object.set_property(
-            object,
-            &Avm2QName::new(Avm2Namespace::public(), "font"),
-            self.font
-                .clone()
-                .map(|v| AvmString::new(activation.context.gc_context, v).into())
-                .unwrap_or(Avm2Value::Null),
-            activation,
-        )?;
-        object.set_property(
-            object,
-            &Avm2QName::new(Avm2Namespace::public(), "size"),
-            self.size.map(|v| v.into()).unwrap_or(Avm2Value::Null),
-            activation,
-        )?;
-        object.set_property(
-            object,
-            &Avm2QName::new(Avm2Namespace::public(), "color"),
-            self.color
-                .clone()
-                .map(|v| v.to_rgb().into())
-                .unwrap_or(Avm2Value::Null),
-            activation,
-        )?;
-        object.set_property(
-            object,
-            &Avm2QName::new(Avm2Namespace::public(), "align"),
-            self.align
-                .map(|v| {
-                    AvmString::new(
-                        activation.context.gc_context,
-                        match v {
-                            swf::TextAlign::Left => "left",
-                            swf::TextAlign::Center => "center",
-                            swf::TextAlign::Right => "right",
-                            swf::TextAlign::Justify => "justify",
-                        }
-                        .to_string(),
-                    )
-                    .into()
-                })
-                .unwrap_or(Avm2Value::Null),
-            activation,
-        )?;
-        object.set_property(
-            object,
-            &Avm2QName::new(Avm2Namespace::public(), "bold"),
-            self.bold.map(|v| v.into()).unwrap_or(Avm2Value::Null),
-            activation,
-        )?;
-        object.set_property(
-            object,
-            &Avm2QName::new(Avm2Namespace::public(), "italic"),
-            self.italic.map(|v| v.into()).unwrap_or(Avm2Value::Null),
-            activation,
-        )?;
-        object.set_property(
-            object,
-            &Avm2QName::new(Avm2Namespace::public(), "underline"),
-            self.underline.map(|v| v.into()).unwrap_or(Avm2Value::Null),
-            activation,
-        )?;
-        object.set_property(
-            object,
-            &Avm2QName::new(Avm2Namespace::public(), "leftMargin"),
-            self.left_margin
-                .map(|v| v.into())
-                .unwrap_or(Avm2Value::Null),
-            activation,
-        )?;
-        object.set_property(
-            object,
-            &Avm2QName::new(Avm2Namespace::public(), "rightMargin"),
-            self.right_margin
-                .map(|v| v.into())
-                .unwrap_or(Avm2Value::Null),
-            activation,
-        )?;
-        object.set_property(
-            object,
-            &Avm2QName::new(Avm2Namespace::public(), "indent"),
-            self.indent.map(|v| v.into()).unwrap_or(Avm2Value::Null),
-            activation,
-        )?;
-        object.set_property(
-            object,
-            &Avm2QName::new(Avm2Namespace::public(), "blockIndent"),
-            self.block_indent
-                .map(|v| v.into())
-                .unwrap_or(Avm2Value::Null),
-            activation,
-        )?;
-        object.set_property(
-            object,
-            &Avm2QName::new(Avm2Namespace::public(), "kerning"),
-            self.kerning.map(|v| v.into()).unwrap_or(Avm2Value::Null),
-            activation,
-        )?;
-        object.set_property(
-            object,
-            &Avm2QName::new(Avm2Namespace::public(), "leading"),
-            self.leading.map(|v| v.into()).unwrap_or(Avm2Value::Null),
-            activation,
-        )?;
-        object.set_property(
-            object,
-            &Avm2QName::new(Avm2Namespace::public(), "letterSpacing"),
-            self.letter_spacing
-                .map(|v| v.into())
-                .unwrap_or(Avm2Value::Null),
-            activation,
-        )?;
-        object.set_property(
-            object,
-            &Avm2QName::new(Avm2Namespace::public(), "bullet"),
-            self.bullet.map(|v| v.into()).unwrap_or(Avm2Value::Null),
-            activation,
-        )?;
-        object.set_property(
-            object,
-            &Avm2QName::new(Avm2Namespace::public(), "url"),
-            self.url
-                .clone()
-                .map(|v| AvmString::new(activation.context.gc_context, v).into())
-                .unwrap_or(Avm2Value::Null),
-            activation,
-        )?;
-        object.set_property(
-            object,
-            &Avm2QName::new(Avm2Namespace::public(), "target"),
-            self.target
-                .clone()
-                .map(|v| AvmString::new(activation.context.gc_context, v).into())
-                .unwrap_or(Avm2Value::Null),
-            activation,
-        )?;
-
-        if let Some(ts) = &self.tab_stops {
-            let tab_stop_storage = ts.iter().copied().collect();
-
-            let tab_stops = Avm2ArrayObject::from_storage(activation, tab_stop_storage)?;
-
-            object.set_property(
-                object,
-                &Avm2QName::new(Avm2Namespace::public(), "tabStops"),
-                tab_stops.into(),
-                activation,
-            )?;
-        } else {
-            object.set_property(
-                object,
-                &Avm2QName::new(Avm2Namespace::public(), "tabStops"),
-                Avm2Value::Null,
-                activation,
-            )?;
-        }
-
-        Ok(object)
     }
 
     /// Given two text formats, construct a new `TextFormat` where only
@@ -998,7 +316,7 @@ pub struct TextSpan {
     ///
     /// This value must not cause the resulting set of text spans to exceed the
     /// length of the underlying source string.
-    span_length: usize,
+    pub span_length: usize,
 
     pub font: String,
     pub size: f64,
@@ -1191,11 +509,6 @@ impl TextSpan {
             target: Some(self.target.clone()),
         }
     }
-
-    /// Return the length of the span.
-    pub fn span_length(&self) -> usize {
-        self.span_length
-    }
 }
 
 /// Struct which contains text formatted by `TextSpan`s.
@@ -1216,22 +529,214 @@ impl Default for FormatSpans {
 
 impl FormatSpans {
     pub fn new() -> Self {
-        FormatSpans {
+        Self {
             text: "".to_string(),
             displayed_text: "".to_string(),
-            spans: vec![TextSpan::default()],
-            default_format: TextFormat::default(),
+            spans: vec![Default::default()],
+            default_format: Default::default(),
         }
     }
 
     /// Construct a format span from its raw parts.
     #[allow(dead_code)]
     pub fn from_str_and_spans(text: &str, spans: &[TextSpan]) -> Self {
-        FormatSpans {
+        Self {
             text: text.to_string(),
             displayed_text: "".to_string(),
             spans: spans.to_vec(),
             default_format: Default::default(),
+        }
+    }
+
+    pub fn from_text(text: &str, format: TextFormat) -> Self {
+        Self {
+            text: text.to_string(),
+            displayed_text: "".to_string(),
+            spans: vec![TextSpan::with_length_and_format(text.len(), format.clone())],
+            default_format: format,
+        }
+    }
+
+    /// Lower an HTML tree into text-span representation.
+    ///
+    /// This is the "legacy" implementation of this process: it only looks for
+    /// a handful of presentational attributes in the HTML tree to generate
+    /// styling. There's also a `lower_from_css` that respects both
+    /// presentational markup and CSS stylesheets.
+    pub fn from_html(html: &str, default_format: TextFormat) -> Self {
+        let mut format_stack = vec![default_format.clone()];
+        let mut text = String::new();
+        let mut spans: Vec<TextSpan> = Vec::new();
+
+        let mut reader = Reader::from_str(html);
+        reader.trim_text(true);
+        let mut buf = Vec::new();
+        loop {
+            match reader.read_event(&mut buf) {
+                Ok(Event::Start(ref e)) => {
+                    let attribute = move |name| {
+                        e.attributes().with_checks(false).find_map(|attribute| {
+                            let attribute = attribute.unwrap();
+                            attribute
+                                .key
+                                .eq_ignore_ascii_case(name)
+                                .then(|| attribute.value)
+                        })
+                    };
+                    let mut format = format_stack.last().unwrap().clone();
+                    match &e.name().to_ascii_lowercase()[..] {
+                        b"br" | b"sbr" => {
+                            text.push('\n');
+                            if let Some(span) = spans.last_mut() {
+                                span.span_length += 1;
+                            }
+
+                            // Skip push to `format_stack`.
+                            continue;
+                        }
+                        b"p" => match attribute(b"align").as_deref() {
+                            Some(b"left") => format.align = Some(swf::TextAlign::Left),
+                            Some(b"center") => format.align = Some(swf::TextAlign::Center),
+                            Some(b"right") => format.align = Some(swf::TextAlign::Right),
+                            _ => {}
+                        },
+                        b"a" => {
+                            if let Some(href) = attribute(b"href") {
+                                format.url = Some(String::from_utf8_lossy(&href).to_string());
+                            }
+
+                            if let Some(target) = attribute(b"target") {
+                                format.target = Some(String::from_utf8_lossy(&target).to_string());
+                            }
+                        }
+                        b"font" => {
+                            if let Some(face) = attribute(b"face") {
+                                format.font = Some(String::from_utf8_lossy(&face).to_string());
+                            }
+
+                            if let Some(size) = attribute(b"size") {
+                                format.size = String::from_utf8_lossy(&size).parse().ok();
+                            }
+
+                            if let Some(color) = attribute(b"color") {
+                                if color.starts_with(b"#") {
+                                    let rval = color.get(1..3).and_then(|v| {
+                                        u8::from_str_radix(&String::from_utf8_lossy(v), 16).ok()
+                                    });
+                                    let gval = color.get(3..5).and_then(|v| {
+                                        u8::from_str_radix(&String::from_utf8_lossy(v), 16).ok()
+                                    });
+                                    let bval = color.get(5..7).and_then(|v| {
+                                        u8::from_str_radix(&String::from_utf8_lossy(v), 16).ok()
+                                    });
+
+                                    if let (Some(r), Some(g), Some(b)) = (rval, gval, bval) {
+                                        format.color = Some(swf::Color { r, g, b, a: 0 });
+                                    }
+                                }
+                            }
+
+                            if let Some(letter_spacing) = attribute(b"letterSpacing") {
+                                format.letter_spacing =
+                                    String::from_utf8_lossy(&letter_spacing).parse().ok();
+                            }
+
+                            match attribute(b"kerning").as_deref() {
+                                Some(b"1") => format.kerning = Some(true),
+                                Some(b"0") => format.kerning = Some(false),
+                                _ => {}
+                            }
+                        }
+                        b"b" => {
+                            format.bold = Some(true);
+                        }
+                        b"i" => {
+                            format.italic = Some(true);
+                        }
+                        b"u" => {
+                            format.underline = Some(true);
+                        }
+                        b"li" => {
+                            format.bullet = Some(true);
+                        }
+                        b"texformatormat" => {
+                            //TODO: Spec says these are all in twips. That doesn't seem to
+                            //match Flash 8.
+                            if let Some(left_margin) = attribute(b"leftmargin") {
+                                format.left_margin =
+                                    String::from_utf8_lossy(&left_margin).parse().ok();
+                            }
+
+                            if let Some(right_margin) = attribute(b"rightmargin") {
+                                format.right_margin =
+                                    String::from_utf8_lossy(&right_margin).parse().ok();
+                            }
+
+                            if let Some(indent) = attribute(b"indent") {
+                                format.indent = String::from_utf8_lossy(&indent).parse().ok();
+                            }
+
+                            if let Some(block_indent) = attribute(b"blockindent") {
+                                format.block_indent =
+                                    String::from_utf8_lossy(&block_indent).parse().ok();
+                            }
+
+                            if let Some(leading) = attribute(b"leading") {
+                                format.leading = String::from_utf8_lossy(&leading).parse().ok();
+                            }
+
+                            if let Some(tab_stops) = attribute(b"tabstops") {
+                                format.tab_stops = Some(
+                                    String::from_utf8_lossy(&tab_stops)
+                                        .split(',')
+                                        .filter_map(|v| v.trim().parse().ok())
+                                        .collect(),
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                    format_stack.push(format);
+                }
+                Ok(Event::Text(e)) => {
+                    let e = String::from_utf8_lossy(&e);
+                    let e = process_html_entity(&e);
+                    let format = format_stack.last().unwrap().clone();
+                    text.push_str(&e);
+                    spans.push(TextSpan::with_length_and_format(e.len(), format));
+                }
+                Ok(Event::End(e)) => {
+                    match &e.name().to_ascii_lowercase()[..] {
+                        b"br" | b"sbr" => {
+                            // Skip pop from `format_stack`.
+                            continue;
+                        }
+                        b"p" | b"li" => {
+                            text.push('\n');
+                            if let Some(span) = spans.last_mut() {
+                                span.span_length += 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                    format_stack.pop();
+                }
+                Ok(Event::Eof) => break,
+                Err(e) => {
+                    log::warn!("Error while parsing HTML: {}", e);
+                    break;
+                }
+                _ => {}
+            }
+
+            buf.clear();
+        }
+
+        Self {
+            text,
+            displayed_text: "".to_string(),
+            spans,
+            default_format,
         }
     }
 
@@ -1566,92 +1071,6 @@ impl FormatSpans {
     /// 4. The formatting applied to the text span.
     pub fn iter_spans(&self) -> impl Iterator<Item = (usize, usize, &str, &TextSpan)> {
         TextSpanIter::for_format_spans(self)
-    }
-
-    /// Lower an HTML tree into text-span representation.
-    ///
-    /// This is the "legacy" implementation of this process: it only looks for
-    /// a handful of presentational attributes in the HTML tree to generate
-    /// styling. There's also a `lower_from_css` that respects both
-    /// presentational markup and CSS stylesheets.
-    pub fn lower_from_html(&mut self, tree: XmlDocument<'_>) {
-        let mut format_stack = vec![self.default_format.clone()];
-        let mut last_successful_format = None;
-
-        self.text = "".to_string();
-        self.spans = vec![];
-
-        for step in tree.as_node().walk() {
-            match step {
-                Step::In(node)
-                    if node
-                        .tag_name()
-                        .unwrap()
-                        .node_name()
-                        .eq_ignore_ascii_case("sbr")
-                        || node
-                            .tag_name()
-                            .unwrap()
-                            .node_name()
-                            .eq_ignore_ascii_case("br") =>
-                {
-                    self.replace_text(
-                        self.text().len(),
-                        self.text().len(),
-                        "\n",
-                        format_stack.last(),
-                    );
-                }
-                Step::Out(node)
-                    if node
-                        .tag_name()
-                        .unwrap()
-                        .node_name()
-                        .eq_ignore_ascii_case("sbr")
-                        || node
-                            .tag_name()
-                            .unwrap()
-                            .node_name()
-                            .eq_ignore_ascii_case("br") => {}
-                Step::In(node) => format_stack.push(TextFormat::from_presentational_markup(
-                    node,
-                    format_stack.last().cloned().unwrap_or_default(),
-                )),
-                Step::Around(node) if node.is_text() => {
-                    self.replace_text(
-                        self.text.len(),
-                        self.text.len(),
-                        &process_html_entity(&node.node_value().unwrap()),
-                        format_stack.last(),
-                    );
-                    last_successful_format = format_stack.last().cloned();
-                }
-                Step::Out(node)
-                    if node
-                        .tag_name()
-                        .unwrap()
-                        .node_name()
-                        .eq_ignore_ascii_case("p")
-                        || node
-                            .tag_name()
-                            .unwrap()
-                            .node_name()
-                            .eq_ignore_ascii_case("li") =>
-                {
-                    self.replace_text(
-                        self.text.len(),
-                        self.text.len(),
-                        "\n",
-                        last_successful_format.as_ref(),
-                    );
-                    format_stack.pop();
-                }
-                Step::Out(_) => {
-                    format_stack.pop();
-                }
-                _ => {}
-            };
-        }
     }
 
     #[allow(clippy::float_cmp)]

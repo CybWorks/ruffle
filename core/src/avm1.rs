@@ -28,7 +28,6 @@ pub mod object;
 pub mod property;
 pub mod property_map;
 mod scope;
-mod string;
 mod timer;
 mod value;
 
@@ -39,6 +38,7 @@ use crate::avm1::activation::{Activation, ActivationIdentifier};
 pub use crate::avm1::error::Error;
 use crate::avm1::globals::as_broadcaster;
 use crate::avm1::globals::as_broadcaster::BroadcasterFunctions;
+use crate::string::AvmString;
 pub use globals::SystemPrototypes;
 pub use object::array_object::ArrayObject;
 pub use object::script_object::ScriptObject;
@@ -47,7 +47,6 @@ pub use object::stage_object::StageObject;
 pub use object::{Object, ObjectPtr, TObject};
 use scope::Scope;
 use smallvec::alloc::borrow::Cow;
-pub use string::AvmString;
 pub use timer::Timers;
 pub use value::Value;
 
@@ -313,7 +312,7 @@ impl<'gc> Avm1<'gc> {
         obj: Object<'gc>,
         swf_version: u8,
         context: &'a mut UpdateContext<'b, 'gc, '_>,
-        name: &str,
+        name: AvmString<'gc>,
         args: &[Value<'gc>],
     ) {
         if context.avm1.halted {
@@ -325,7 +324,7 @@ impl<'gc> Avm1<'gc> {
 
         let mut activation = Activation::from_nothing(
             context.reborrow(),
-            ActivationIdentifier::root(name.to_owned()),
+            ActivationIdentifier::root(name.to_string()),
             swf_version,
             globals,
             active_clip,
@@ -338,8 +337,8 @@ impl<'gc> Avm1<'gc> {
         active_clip: DisplayObject<'gc>,
         swf_version: u8,
         context: &mut UpdateContext<'_, 'gc, '_>,
-        broadcaster_name: &str,
-        method: &str,
+        broadcaster_name: AvmString<'gc>,
+        method: AvmString<'gc>,
         args: &[Value<'gc>],
     ) {
         let global = context.avm1.global_object_cell();
@@ -386,8 +385,7 @@ impl<'gc> Avm1<'gc> {
         }
     }
 
-    fn push(&mut self, value: impl Into<Value<'gc>>) {
-        let value = value.into();
+    fn push(&mut self, value: Value<'gc>) {
         avm_debug!(self, "Stack push {}: {:?}", self.stack.len(), value);
         self.stack.push(value);
     }

@@ -2,24 +2,24 @@
 
 use crate::avm2::array::ArrayStorage;
 use crate::avm2::class::Class;
+use crate::avm2::domain::Domain;
 use crate::avm2::method::{BytecodeMethod, Method, ParamConfig};
 use crate::avm2::names::{Multiname, Namespace, QName};
 use crate::avm2::object::{
     ArrayObject, ByteArrayObject, ClassObject, FunctionObject, NamespaceObject, ScriptObject,
 };
 use crate::avm2::object::{Object, TObject};
-use crate::avm2::scope::Scope;
+use crate::avm2::scope::{Scope, ScopeChain, ScopeStack};
 use crate::avm2::script::Script;
-use crate::avm2::string::AvmString;
 use crate::avm2::value::Value;
 use crate::avm2::{value, Avm2, Error};
 use crate::context::UpdateContext;
+use crate::string::AvmString;
 use crate::swf::extensions::ReadSwfExt;
 use gc_arena::{Gc, GcCell, MutationContext};
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::cmp::{min, Ordering};
-use std::convert::{TryFrom, TryInto};
 use swf::avm2::read::Reader;
 use swf::avm2::types::{
     Class as AbcClass, Index, Method as AbcMethod, Multiname as AbcMultiname,
@@ -97,14 +97,23 @@ pub struct Activation<'a, 'gc: 'a, 'gc_context: 'a> {
     #[allow(dead_code)]
     return_value: Option<Value<'gc>>,
 
-    /// The current local scope, implemented as a bare object.
-    #[allow(dead_code)]
-    local_scope: Object<'gc>,
-
     /// The current scope stack.
+    scope_stack: ScopeStack<'gc>,
+
+    /// This represents the outer scope of the method that is executing.
     ///
-    /// A `scope` of `None` indicates that the scope stack is empty.
-    scope: Option<GcCell<'gc, Scope<'gc>>>,
+    /// The outer scope gives an activation access to the "outer world", including
+    /// the current Domain.
+    outer: ScopeChain<'gc>,
+
+    /// The domain of the original AS3 caller.
+    ///
+    /// This is intended exclusively for builtin methods to access the domain of the
+    /// bytecode method that called it.
+    ///
+    /// If this activation was not made for a builtin method, this will be the
+    /// current domain instead.
+    caller_domain: Domain<'gc>,
 
     /// The class that yielded the currently executing method.
     ///
@@ -116,7 +125,7 @@ pub struct Activation<'a, 'gc: 'a, 'gc_context: 'a> {
     /// the same method again.
     ///
     /// This will not be available outside of method, setter, or getter calls.
-    subclass_object: Option<Object<'gc>>,
+    subclass_object: Option<ClassObject<'gc>>,
 
     /// The class of all objects returned from `newactivation`.
     ///
@@ -126,7 +135,7 @@ pub struct Activation<'a, 'gc: 'a, 'gc_context: 'a> {
     ///
     /// If this is `None`, then the method did not ask for an activation object
     /// and we will not allocate a class for one.
-    activation_class: Option<Object<'gc>>,
+    activation_class: Option<ClassObject<'gc>>,
 
     pub context: UpdateContext<'a, 'gc, 'gc_context>,
 }
@@ -150,8 +159,9 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             actions_since_timeout_check: 0,
             local_registers,
             return_value: None,
-            local_scope: ScriptObject::bare_object(context.gc_context),
-            scope: None,
+            scope_stack: ScopeStack::new(),
+            outer: ScopeChain::new(context.avm2.globals),
+            caller_domain: context.avm2.globals,
             subclass_object: None,
             activation_class: None,
             context,
@@ -164,8 +174,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         context: UpdateContext<'a, 'gc, 'gc_context>,
         script: Script<'gc>,
     ) -> Result<Self, Error> {
-        let (method, script_scope) = script.init();
-        let scope = Some(Scope::push_scope(None, script_scope, context.gc_context));
+        let (method, global_object, domain) = script.init();
 
         let num_locals = match method {
             Method::Native { .. } => 0,
@@ -182,43 +191,73 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         *local_registers
             .write(context.gc_context)
             .get_mut(0)
-            .unwrap() = script_scope.into();
+            .unwrap() = global_object.into();
 
         Ok(Self {
-            this: Some(script_scope),
+            this: Some(global_object),
             arguments: None,
             is_executing: false,
             actions_since_timeout_check: 0,
             local_registers,
             return_value: None,
-            local_scope: ScriptObject::bare_object(context.gc_context),
-            scope,
+            scope_stack: ScopeStack::new(),
+            outer: ScopeChain::new(domain),
+            caller_domain: domain,
             subclass_object: None,
             activation_class: None,
             context,
         })
     }
 
+    /// Finds an object on either the current or outer scope of this activation by definition.
+    pub fn find_definition(&mut self, name: &Multiname<'gc>) -> Result<Option<Object<'gc>>, Error> {
+        let outer_scope = self.outer;
+
+        if let Some(obj) = self.scope_stack.find(name, outer_scope.is_empty())? {
+            Ok(Some(obj))
+        } else if let Some(obj) = outer_scope.find(name, self)? {
+            Ok(Some(obj))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Resolves a definition using either the current or outer scope of this activation.
+    pub fn resolve_definition(
+        &mut self,
+        name: &Multiname<'gc>,
+    ) -> Result<Option<Value<'gc>>, Error> {
+        let outer_scope = self.outer;
+
+        if let Some(obj) = self.scope_stack.find(name, outer_scope.is_empty())? {
+            Ok(Some(obj.get_property(obj, name, self)?))
+        } else if let Some(result) = outer_scope.resolve(name, self)? {
+            Ok(Some(result))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Resolve a type name to a class.
     ///
     /// This returns an error if a type is named but does not exist; or if the
     /// typed named is not a class object.
-    fn resolve_type(&mut self, type_name: Multiname<'gc>) -> Result<Option<Object<'gc>>, Error> {
+    fn resolve_type(
+        &mut self,
+        type_name: Multiname<'gc>,
+    ) -> Result<Option<ClassObject<'gc>>, Error> {
         if type_name.is_any() {
             return Ok(None);
         }
 
         let class = self
-            .scope()
-            .ok_or("Cannot resolve parameter types without a scope stack")?
-            .read()
-            .resolve(&type_name, self)?
+            .resolve_definition(&type_name)?
             .ok_or_else(|| format!("Could not resolve parameter type {:?}", type_name))?
             .coerce_to_object(self)?;
 
-        if class.as_class().is_none() {
-            return Err(format!("Resolved parameter type {:?} is not a class", type_name).into());
-        }
+        let class = class
+            .as_class_object()
+            .ok_or_else(|| format!("Resolved parameter type {:?} is not a class", type_name))?;
 
         // Type parameters should specialize the returned class.
         // Unresolvable parameter types are treated as Any, which is treated as
@@ -228,7 +267,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
             for param in type_name.params() {
                 param_types.push(match self.resolve_type(param.clone())? {
-                    Some(o) => Value::Object(o),
+                    Some(o) => Value::Object(o.into()),
                     None => Value::Null,
                 });
             }
@@ -321,10 +360,10 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     pub fn from_method(
         mut context: UpdateContext<'a, 'gc, 'gc_context>,
         method: Gc<'gc, BytecodeMethod<'gc>>,
-        scope: Option<GcCell<'gc, Scope<'gc>>>,
+        outer: ScopeChain<'gc>,
         this: Option<Object<'gc>>,
         user_arguments: &[Value<'gc>],
-        subclass_object: Option<Object<'gc>>,
+        subclass_object: Option<ClassObject<'gc>>,
         callee: Object<'gc>,
     ) -> Result<Self, Error> {
         let body: Result<_, Error> = method
@@ -362,10 +401,11 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             let translation_unit = method.translation_unit();
             let abc_method = method.method();
             let mut dummy_activation = Activation::from_nothing(context.reborrow());
+            dummy_activation.set_outer(outer);
             let activation_class =
                 Class::for_activation(&mut dummy_activation, translation_unit, abc_method, body)?;
             let activation_class_object =
-                ClassObject::from_class(&mut dummy_activation, activation_class, None, scope)?;
+                ClassObject::from_class(&mut dummy_activation, activation_class, None)?;
 
             drop(dummy_activation);
 
@@ -381,8 +421,9 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             actions_since_timeout_check: 0,
             local_registers,
             return_value: None,
-            local_scope: ScriptObject::bare_object(context.gc_context),
-            scope,
+            scope_stack: ScopeStack::new(),
+            outer,
+            caller_domain: outer.domain(),
             subclass_object,
             activation_class,
             context,
@@ -420,7 +461,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             if method.method().needs_arguments_object {
                 args_object.set_property(
                     args_object,
-                    &QName::new(Namespace::public(), "callee"),
+                    &QName::new(Namespace::public(), "callee").into(),
                     callee.into(),
                     &mut activation,
                 )?;
@@ -441,15 +482,12 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     /// activation as the method or script that called them. You must use this
     /// function to construct a new activation for the builtin so that it can
     /// properly supercall.
-    ///
-    /// The `scope` provided here should be the scope of the builtin's caller
-    /// (for now), so that it may access global scope and propagate it to
-    /// called methods.
     pub fn from_builtin(
         context: UpdateContext<'a, 'gc, 'gc_context>,
-        scope: Option<GcCell<'gc, Scope<'gc>>>,
         this: Option<Object<'gc>>,
-        subclass_object: Option<Object<'gc>>,
+        subclass_object: Option<ClassObject<'gc>>,
+        outer: ScopeChain<'gc>,
+        caller_domain: Domain<'gc>,
     ) -> Result<Self, Error> {
         let local_registers = GcCell::allocate(context.gc_context, RegisterSet::new(0));
 
@@ -460,8 +498,9 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             actions_since_timeout_check: 0,
             local_registers,
             return_value: None,
-            local_scope: ScriptObject::bare_object(context.gc_context),
-            scope,
+            scope_stack: ScopeStack::new(),
+            outer,
+            caller_domain,
             subclass_object,
             activation_class: None,
             context,
@@ -477,40 +516,21 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         Ok(())
     }
 
-    pub fn global_scope(&self) -> Value<'gc> {
-        let mut scope = self.scope();
-
-        while let Some(this_scope) = scope {
-            let parent = this_scope.read().parent_cell();
-            if parent.is_none() {
-                break;
-            }
-
-            scope = parent;
-        }
-
-        scope
-            .map(|s| (*s.read().locals()).into())
-            .unwrap_or(Value::Undefined)
-    }
-
     /// Call the superclass's instance initializer.
     pub fn super_init(
         &mut self,
         receiver: Object<'gc>,
         args: &[Value<'gc>],
     ) -> Result<Value<'gc>, Error> {
-        let superclass_object: Result<Object<'gc>, Error> = self
+        let superclass_object = self
             .subclass_object()
             .and_then(|c| c.superclass_object())
             .ok_or_else(|| {
-                "Attempted to call super constructor without a superclass."
-                    .to_string()
-                    .into()
+                Error::from("Attempted to call super constructor without a superclass.")
             });
         let superclass_object = superclass_object?;
 
-        superclass_object.call_native_init(Some(receiver), args, self, Some(superclass_object))
+        superclass_object.call_native_init(Some(receiver), args, self)
     }
 
     /// Attempts to lock the activation frame for execution.
@@ -541,16 +561,6 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             .ok_or_else(|| format!("Out of bounds register read: {}", id).into())
     }
 
-    /// Get the current scope stack.
-    pub fn scope(&self) -> Option<GcCell<'gc, Scope<'gc>>> {
-        self.scope
-    }
-
-    /// Set a new scope stack.
-    pub fn set_scope(&mut self, new_scope: Option<GcCell<'gc, Scope<'gc>>>) {
-        self.scope = new_scope;
-    }
-
     /// Set a local register.
     ///
     /// Returns `true` if the set was successful; `false` otherwise
@@ -569,6 +579,39 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         }
     }
 
+    /// Sets the outer scope of this activation
+    pub fn set_outer(&mut self, new_outer: ScopeChain<'gc>) {
+        self.outer = new_outer;
+    }
+
+    /// Creates a new ScopeChain by chaining the current state of this
+    /// activation's scope stack with the outer scope.
+    pub fn create_scopechain(&self) -> ScopeChain<'gc> {
+        self.outer
+            .chain(self.context.gc_context, self.scope_stack.scopes())
+    }
+
+    /// Returns the domain of the original AS3 caller.
+    pub fn caller_domain(&self) -> Domain<'gc> {
+        self.caller_domain
+    }
+
+    /// Returns the global scope of this activation.
+    ///
+    /// The global scope refers to scope at the bottom of the
+    /// outer scope. If the outer scope is empty, we use the bottom
+    /// of the current scope stack instead.
+    ///
+    /// A return value of `None` implies that both the outer scope, and
+    /// the current scope stack were both empty.
+    pub fn global_scope(&self) -> Option<Object<'gc>> {
+        let outer_scope = self.outer;
+        outer_scope
+            .get(0)
+            .or_else(|| self.scope_stack.get(0))
+            .map(|scope| scope.values())
+    }
+
     pub fn avm2(&mut self) -> &mut Avm2<'gc> {
         self.context.avm2
     }
@@ -578,9 +621,12 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         self.return_value = Some(value);
     }
 
-    /// Get the base prototype of the object that the currently executing
-    /// method was retrieved from, if one exists.
-    pub fn subclass_object(&self) -> Option<Object<'gc>> {
+    /// Get the class that defined the currently-executing method, if it
+    /// exists.
+    ///
+    /// If the currently-executing method is not part of an ES4 class, then
+    /// this yields `None`.
+    pub fn subclass_object(&self) -> Option<ClassObject<'gc>> {
         self.subclass_object
     }
 
@@ -784,6 +830,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
                 Op::PushScope => self.op_push_scope(),
                 Op::PushWith => self.op_push_with(),
                 Op::PopScope => self.op_pop_scope(),
+                Op::GetOuterScope { index } => self.op_get_outer_scope(index),
                 Op::GetScopeObject { index } => self.op_get_scope_object(index),
                 Op::GetGlobalScope => self.op_get_global_scope(),
                 Op::FindProperty { index } => self.op_find_property(method, index),
@@ -805,7 +852,12 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
                 Op::ApplyType { num_types } => self.op_apply_type(num_types),
                 Op::NewArray { num_args } => self.op_new_array(num_args),
                 Op::CoerceA => self.op_coerce_a(),
+                Op::CoerceB => self.op_coerce_b(),
+                Op::CoerceD => self.op_coerce_d(),
+                Op::CoerceI => self.op_coerce_i(),
+                Op::CoerceO => self.op_coerce_o(),
                 Op::CoerceS => self.op_coerce_s(),
+                Op::CoerceU => self.op_coerce_u(),
                 Op::ConvertB => self.op_convert_b(),
                 Op::ConvertI => self.op_convert_i(),
                 Op::ConvertD => self.op_convert_d(),
@@ -881,6 +933,9 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
                 } => self.op_debug(method, is_local_register, register_name, register),
                 Op::DebugFile { file_name } => self.op_debug_file(method, file_name),
                 Op::DebugLine { line_num } => self.op_debug_line(line_num),
+                Op::Bkpt => self.op_bkpt(),
+                Op::BkptLine { line_num } => self.op_bkpt_line(line_num),
+                Op::Timestamp => self.op_timestamp(),
                 Op::TypeOf => self.op_type_of(),
                 Op::EscXAttr => self.op_esc_xattr(),
                 Op::EscXElem => self.op_esc_elem(),
@@ -1059,8 +1114,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let args = self.context.avm2.pop_args(arg_count);
         let receiver = self.context.avm2.pop().coerce_to_object(self).ok();
         let function = self.context.avm2.pop().coerce_to_object(self)?;
-        let base_proto = receiver.and_then(|r| r.proto());
-        let value = function.call(receiver, &args, self, base_proto)?;
+        let value = function.call(receiver, &args, self)?;
 
         self.context.avm2.push(value);
 
@@ -1074,11 +1128,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     ) -> Result<FrameControl<'gc>, Error> {
         let args = self.context.avm2.pop_args(arg_count);
         let receiver = self.context.avm2.pop().coerce_to_object(self)?;
-        let function: Result<Object<'gc>, Error> = receiver
-            .get_method(index.0)
-            .ok_or_else(|| format!("Object method {} does not exist", index.0).into());
-        let base_proto = receiver.proto();
-        let value = function?.call(Some(receiver), &args, self, base_proto)?;
+
+        let value = receiver.call_method(index.0, &args, self)?;
 
         self.context.avm2.push(value);
 
@@ -1094,19 +1145,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let args = self.context.avm2.pop_args(arg_count);
         let multiname = self.pool_multiname(method, index)?;
         let receiver = self.context.avm2.pop().coerce_to_object(self)?;
-        let name: Result<QName, Error> = receiver
-            .resolve_multiname(&multiname)?
-            .ok_or_else(|| format!("Could not find method {:?}", multiname.local_name()).into());
-        let name = name?;
-        let superclass_object = if let Some(c) = receiver.as_class_object() {
-            c.find_class_for_trait(&name)?
-        } else {
-            None
-        };
-        let function = receiver
-            .get_property(receiver, &name, self)?
-            .coerce_to_object(self)?;
-        let value = function.call(Some(receiver), &args, self, superclass_object)?;
+
+        let value = receiver.call_property(&multiname, &args, self)?;
 
         self.context.avm2.push(value);
 
@@ -1122,13 +1162,10 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let args = self.context.avm2.pop_args(arg_count);
         let multiname = self.pool_multiname(method, index)?;
         let receiver = self.context.avm2.pop().coerce_to_object(self)?;
-        let name: Result<QName, Error> = receiver
-            .resolve_multiname(&multiname)?
-            .ok_or_else(|| format!("Could not find method {:?}", multiname.local_name()).into());
         let function = receiver
-            .get_property(receiver, &name?, self)?
+            .get_property(receiver, &multiname, self)?
             .coerce_to_object(self)?;
-        let value = function.call(None, &args, self, None)?;
+        let value = function.call(None, &args, self)?;
 
         self.context.avm2.push(value);
 
@@ -1144,20 +1181,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let args = self.context.avm2.pop_args(arg_count);
         let multiname = self.pool_multiname(method, index)?;
         let receiver = self.context.avm2.pop().coerce_to_object(self)?;
-        let name: Result<QName, Error> = receiver
-            .resolve_multiname(&multiname)?
-            .ok_or_else(|| format!("Could not find method {:?}", multiname.local_name()).into());
-        let name = name?;
-        let superclass_object = if let Some(c) = receiver.as_class_object() {
-            c.find_class_for_trait(&name)?
-        } else {
-            None
-        };
-        let function = receiver
-            .get_property(receiver, &name, self)?
-            .coerce_to_object(self)?;
 
-        function.call(Some(receiver), &args, self, superclass_object)?;
+        receiver.call_property(&multiname, &args, self)?;
 
         Ok(FrameControl::Continue)
     }
@@ -1171,9 +1196,10 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let args = self.context.avm2.pop_args(arg_count);
         let receiver = self.context.avm2.pop().coerce_to_object(self)?;
         let method = self.table_method(method, index, false)?;
-        let scope = self.scope(); //TODO: Is this correct?
-        let function = FunctionObject::from_method(self, method.into(), scope, None);
-        let value = function.call(Some(receiver), &args, self, receiver.as_class_object())?;
+        // TODO: What scope should the function be executed with?
+        let scope = self.create_scopechain();
+        let function = FunctionObject::from_method(self, method.into(), scope, None, None);
+        let value = function.call(Some(receiver), &args, self)?;
 
         self.context.avm2.push(value);
 
@@ -1190,22 +1216,12 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let multiname = self.pool_multiname(method, index)?;
         let receiver = self.context.avm2.pop().coerce_to_object(self)?;
 
-        let name: Result<QName, Error> = receiver
-            .resolve_multiname(&multiname)?
-            .ok_or_else(|| format!("Could not find method {:?}", multiname.local_name()).into());
-        let name = name?;
-
-        let superclass_object: Result<Object<'gc>, Error> = self
+        let superclass_object = self
             .subclass_object()
             .and_then(|bc| bc.superclass_object())
-            .ok_or_else(|| {
-                "Attempted to call super method without a superclass."
-                    .to_string()
-                    .into()
-            });
-        let superclass_object = superclass_object?;
+            .ok_or_else(|| Error::from("Attempted to call super method without a superclass."))?;
 
-        let value = superclass_object.supercall_method(&name, Some(receiver), &args, self)?;
+        let value = superclass_object.call_super(&multiname, receiver, &args, self)?;
 
         self.context.avm2.push(value);
 
@@ -1222,22 +1238,12 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let multiname = self.pool_multiname(method, index)?;
         let receiver = self.context.avm2.pop().coerce_to_object(self)?;
 
-        let name: Result<QName, Error> = receiver
-            .resolve_multiname(&multiname)?
-            .ok_or_else(|| format!("Could not find method {:?}", multiname.local_name()).into());
-        let name = name?;
-
-        let superclass_object: Result<Object<'gc>, Error> = self
+        let superclass_object = self
             .subclass_object()
             .and_then(|bc| bc.superclass_object())
-            .ok_or_else(|| {
-                "Attempted to call super method without a superclass."
-                    .to_string()
-                    .into()
-            });
-        let superclass_object = superclass_object?;
+            .ok_or_else(|| Error::from("Attempted to call super method without a superclass."))?;
 
-        superclass_object.supercall_method(&name, Some(receiver), &args, self)?;
+        superclass_object.call_super(&multiname, receiver, &args, self)?;
 
         Ok(FrameControl::Continue)
     }
@@ -1257,26 +1263,41 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         method: Gc<'gc, BytecodeMethod<'gc>>,
         index: Index<AbcMultiname>,
     ) -> Result<FrameControl<'gc>, Error> {
-        let multiname = self.pool_multiname(method, index)?;
-        let object = self.context.avm2.pop().coerce_to_object(self)?;
+        let txunit = method.translation_unit();
+        let abc = txunit.abc();
+        let abc_multiname = Multiname::resolve_multiname_index(&abc, index.clone())?;
+        let (multiname, object) = if matches!(
+            abc_multiname,
+            AbcMultiname::MultinameL { .. } | AbcMultiname::MultinameLA { .. }
+        ) {
+            // `MultinameL` is the only form of multiname that allows fast-path
+            // or alternate-path lookups based on the local name *value*,
+            // rather than it's string representation.
 
-        let name: Result<QName, Error> = object.resolve_multiname(&multiname)?.ok_or_else(|| {
-            format!("Could not resolve property {:?}", multiname.local_name()).into()
-        });
+            let name_value = self.context.avm2.pop();
+            let object = self.context.avm2.pop().coerce_to_object(self)?;
+            if !name_value.is_primitive() {
+                if let Some(dictionary) = object.as_dictionary_object() {
+                    let value =
+                        dictionary.get_property_by_object(name_value.coerce_to_object(self)?);
+                    self.context.avm2.push(value);
 
-        // Special case for dynamic properties as scripts may attempt to get
-        // dynamic properties not yet set
-        if name.is_err()
-            && !object
-                .as_class()
-                .map(|c| c.read().is_sealed())
-                .unwrap_or(false)
-        {
-            self.context.avm2.push(Value::Undefined);
-            return Ok(FrameControl::Continue);
-        }
+                    return Ok(FrameControl::Continue);
+                }
+            }
 
-        let value = object.get_property(object, &name?, self)?;
+            (
+                Multiname::from_multiname_late(txunit, abc_multiname, name_value, self)?,
+                object,
+            )
+        } else {
+            let multiname = self.pool_multiname(method, index)?;
+            let object = self.context.avm2.pop().coerce_to_object(self)?;
+
+            (multiname, object)
+        };
+
+        let value = object.get_property(object, &multiname, self)?;
         self.context.avm2.push(value);
 
         Ok(FrameControl::Continue)
@@ -1288,20 +1309,43 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         index: Index<AbcMultiname>,
     ) -> Result<FrameControl<'gc>, Error> {
         let value = self.context.avm2.pop();
-        let multiname = self.pool_multiname(method, index)?;
-        let mut object = self.context.avm2.pop().coerce_to_object(self)?;
+        let txunit = method.translation_unit();
+        let abc = txunit.abc();
+        let abc_multiname = Multiname::resolve_multiname_index(&abc, index.clone())?;
+        let (multiname, mut object) = if matches!(
+            abc_multiname,
+            AbcMultiname::MultinameL { .. } | AbcMultiname::MultinameLA { .. }
+        ) {
+            // `MultinameL` is the only form of multiname that allows fast-path
+            // or alternate-path lookups based on the local name *value*,
+            // rather than it's string representation.
 
-        if let Some(name) = object.resolve_multiname(&multiname)? {
-            object.set_property(object, &name, value, self)?;
+            let name_value = self.context.avm2.pop();
+            let object = self.context.avm2.pop().coerce_to_object(self)?;
+            if !name_value.is_primitive() {
+                if let Some(dictionary) = object.as_dictionary_object() {
+                    dictionary.set_property_by_object(
+                        name_value.coerce_to_object(self)?,
+                        value,
+                        self.context.gc_context,
+                    );
+
+                    return Ok(FrameControl::Continue);
+                }
+            }
+
+            (
+                Multiname::from_multiname_late(txunit, abc_multiname, name_value, self)?,
+                object,
+            )
         } else {
-            //TODO: Non-dynamic objects should fail
-            //TODO: This should only work if the public namespace is present
-            let local_name: Result<AvmString<'gc>, Error> = multiname
-                .local_name()
-                .ok_or_else(|| "Cannot set property using any name".into());
-            let name = QName::dynamic_name(local_name?);
-            object.set_property(object, &name, value, self)?;
-        }
+            let multiname = self.pool_multiname(method, index)?;
+            let object = self.context.avm2.pop().coerce_to_object(self)?;
+
+            (multiname, object)
+        };
+
+        object.set_property(object, &multiname, value, self)?;
 
         Ok(FrameControl::Continue)
     }
@@ -1315,17 +1359,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let multiname = self.pool_multiname(method, index)?;
         let mut object = self.context.avm2.pop().coerce_to_object(self)?;
 
-        if let Some(name) = object.resolve_multiname(&multiname)? {
-            object.init_property(object, &name, value, self)?;
-        } else {
-            //TODO: Non-dynamic objects should fail
-            //TODO: This should only work if the public namespace is present
-            let local_name: Result<AvmString<'gc>, Error> = multiname
-                .local_name()
-                .ok_or_else(|| "Cannot set property using any name".into());
-            let name = QName::dynamic_name(local_name?);
-            object.init_property(object, &name, value, self)?;
-        }
+        object.init_property(object, &multiname, value, self)?;
 
         Ok(FrameControl::Continue)
     }
@@ -1335,22 +1369,45 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         method: Gc<'gc, BytecodeMethod<'gc>>,
         index: Index<AbcMultiname>,
     ) -> Result<FrameControl<'gc>, Error> {
-        let multiname = self.pool_multiname(method, index)?;
-        let object = self.context.avm2.pop().coerce_to_object(self)?;
+        let txunit = method.translation_unit();
+        let abc = txunit.abc();
+        let abc_multiname = Multiname::resolve_multiname_index(&abc, index.clone())?;
+        let (multiname, object) = if matches!(
+            abc_multiname,
+            AbcMultiname::MultinameL { .. } | AbcMultiname::MultinameLA { .. }
+        ) {
+            // `MultinameL` is the only form of multiname that allows fast-path
+            // or alternate-path lookups based on the local name *value*,
+            // rather than it's string representation.
 
-        if let Some(name) = object.resolve_multiname(&multiname)? {
-            self.context
-                .avm2
-                .push(object.delete_property(self.context.gc_context, &name))
-        } else {
-            // Unknown properties on a dynamic class delete successfully.
-            self.context.avm2.push(
-                !object
-                    .as_class()
-                    .map(|c| c.read().is_sealed())
-                    .unwrap_or(false),
+            let name_value = self.context.avm2.pop();
+            let object = self.context.avm2.pop().coerce_to_object(self)?;
+            if !name_value.is_primitive() {
+                if let Some(dictionary) = object.as_dictionary_object() {
+                    dictionary.delete_property_by_object(
+                        name_value.coerce_to_object(self)?,
+                        self.context.gc_context,
+                    );
+
+                    self.context.avm2.push(true);
+                    return Ok(FrameControl::Continue);
+                }
+            }
+
+            (
+                Multiname::from_multiname_late(txunit, abc_multiname, name_value, self)?,
+                object,
             )
-        }
+        } else {
+            let multiname = self.pool_multiname(method, index)?;
+            let object = self.context.avm2.pop().coerce_to_object(self)?;
+
+            (multiname, object)
+        };
+
+        let did_delete = object.delete_property(self, &multiname)?;
+
+        self.context.avm2.push(did_delete);
 
         Ok(FrameControl::Continue)
     }
@@ -1363,22 +1420,12 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let multiname = self.pool_multiname(method, index)?;
         let object = self.context.avm2.pop().coerce_to_object(self)?;
 
-        let name: Result<QName, Error> = object
-            .resolve_multiname(&multiname)?
-            .ok_or_else(|| format!("Could not find method {:?}", multiname.local_name()).into());
-        let name = name?;
-
-        let superclass_object: Result<Object<'gc>, Error> = self
+        let superclass_object = self
             .subclass_object()
             .and_then(|bc| bc.superclass_object())
-            .ok_or_else(|| {
-                "Attempted to call super method without a superclass."
-                    .to_string()
-                    .into()
-            });
-        let superclass_object = superclass_object?;
+            .ok_or_else(|| Error::from("Attempted to call super method without a superclass."))?;
 
-        let value = superclass_object.supercall_getter(&name, Some(object), self)?;
+        let value = superclass_object.get_super(&multiname, object, self)?;
 
         self.context.avm2.push(value);
 
@@ -1394,32 +1441,34 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let multiname = self.pool_multiname(method, index)?;
         let object = self.context.avm2.pop().coerce_to_object(self)?;
 
-        let name: Result<QName, Error> = object
-            .resolve_multiname(&multiname)?
-            .ok_or_else(|| format!("Could not find method {:?}", multiname.local_name()).into());
-        let name = name?;
-
-        let superclass_object: Result<Object<'gc>, Error> = self
+        let superclass_object = self
             .subclass_object()
             .and_then(|bc| bc.superclass_object())
-            .ok_or_else(|| {
-                "Attempted to call super method without a superclass."
-                    .to_string()
-                    .into()
-            });
-        let superclass_object = superclass_object?;
+            .ok_or_else(|| Error::from("Attempted to call super method without a superclass."))?;
 
-        superclass_object.supercall_setter(&name, value, Some(object), self)?;
+        superclass_object.set_super(&multiname, value, object, self)?;
 
         Ok(FrameControl::Continue)
     }
 
     fn op_in(&mut self) -> Result<FrameControl<'gc>, Error> {
         let obj = self.context.avm2.pop().coerce_to_object(self)?;
-        let name = self.context.avm2.pop().coerce_to_string(self)?;
+        let name_value = self.context.avm2.pop();
 
+        if let Some(dictionary) = obj.as_dictionary_object() {
+            if !name_value.is_primitive() {
+                let obj_key = name_value.coerce_to_object(self)?;
+                self.context
+                    .avm2
+                    .push(dictionary.has_property_by_object(obj_key));
+
+                return Ok(FrameControl::Continue);
+            }
+        }
+
+        let name = name_value.coerce_to_string(self)?;
         let qname = QName::new(Namespace::public(), name);
-        let has_prop = obj.has_property(&qname)?;
+        let has_prop = obj.has_property_via_in(self, &qname)?;
 
         self.context.avm2.push(has_prop);
 
@@ -1428,55 +1477,54 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
     fn op_push_scope(&mut self) -> Result<FrameControl<'gc>, Error> {
         let object = self.context.avm2.pop().coerce_to_object(self)?;
-        let scope_stack = self.scope();
-        let new_scope = Scope::push_scope(scope_stack, object, self.context.gc_context);
-
-        self.set_scope(Some(new_scope));
+        self.scope_stack.push(Scope::new(object));
 
         Ok(FrameControl::Continue)
     }
 
     fn op_push_with(&mut self) -> Result<FrameControl<'gc>, Error> {
         let object = self.context.avm2.pop().coerce_to_object(self)?;
-        let scope_stack = self.scope();
-        let new_scope = Scope::push_with(scope_stack, object, self.context.gc_context);
-
-        self.set_scope(Some(new_scope));
+        self.scope_stack.push(Scope::new_with(object));
 
         Ok(FrameControl::Continue)
     }
 
     fn op_pop_scope(&mut self) -> Result<FrameControl<'gc>, Error> {
-        let scope_stack = self.scope();
-        let new_scope = scope_stack.and_then(|s| s.read().pop_scope());
-
-        self.set_scope(new_scope);
+        self.scope_stack.pop();
 
         Ok(FrameControl::Continue)
     }
 
-    fn op_get_scope_object(&mut self, mut index: u8) -> Result<FrameControl<'gc>, Error> {
-        let mut scope = self.scope();
+    fn op_get_outer_scope(&mut self, index: u32) -> Result<FrameControl<'gc>, Error> {
+        let scope = self.outer.get(index as usize);
 
-        while index > 0 {
-            if let Some(child_scope) = scope {
-                scope = child_scope.read().parent_cell();
-            }
+        if let Some(scope) = scope {
+            self.context.avm2.push(scope.values());
+        } else {
+            self.context.avm2.push(Value::Undefined);
+        };
 
-            index -= 1;
-        }
+        Ok(FrameControl::Continue)
+    }
 
-        self.context.avm2.push(
-            scope
-                .map(|s| (*s.read().locals()).into())
-                .unwrap_or(Value::Undefined),
-        );
+    fn op_get_scope_object(&mut self, index: u8) -> Result<FrameControl<'gc>, Error> {
+        let scope = self.scope_stack.get(index as usize);
+
+        if let Some(scope) = scope {
+            self.context.avm2.push(scope.values());
+        } else {
+            self.context.avm2.push(Value::Undefined);
+        };
 
         Ok(FrameControl::Continue)
     }
 
     fn op_get_global_scope(&mut self) -> Result<FrameControl<'gc>, Error> {
-        self.context.avm2.push(self.global_scope());
+        self.context.avm2.push(
+            self.global_scope()
+                .map(|gs| gs.into())
+                .unwrap_or(Value::Null),
+        );
 
         Ok(FrameControl::Continue)
     }
@@ -1488,11 +1536,9 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     ) -> Result<FrameControl<'gc>, Error> {
         let multiname = self.pool_multiname(method, index)?;
         avm_debug!(self.context.avm2, "Resolving {:?}", multiname);
-        let result = if let Some(scope) = self.scope() {
-            scope.read().find(&multiname, self)?
-        } else {
-            None
-        };
+        let result = self
+            .find_definition(&multiname)?
+            .or_else(|| self.global_scope());
 
         self.context
             .avm2
@@ -1508,12 +1554,9 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     ) -> Result<FrameControl<'gc>, Error> {
         let multiname = self.pool_multiname(method, index)?;
         avm_debug!(self.context.avm2, "Resolving {:?}", multiname);
-        let found: Result<Object<'gc>, Error> = if let Some(scope) = self.scope() {
-            scope.read().find(&multiname, self)?
-        } else {
-            None
-        }
-        .ok_or_else(|| format!("Property does not exist: {:?}", multiname).into());
+        let found: Result<Object<'gc>, Error> = self
+            .find_definition(&multiname)?
+            .ok_or_else(|| format!("Property does not exist: {:?}", multiname).into());
         let result: Value<'gc> = found?.into();
 
         self.context.avm2.push(result);
@@ -1528,15 +1571,11 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     ) -> Result<FrameControl<'gc>, Error> {
         let multiname = self.pool_multiname_static(method, index)?;
         avm_debug!(self.avm2(), "Resolving {:?}", multiname);
-        let found: Result<Value<'gc>, Error> = if let Some(scope) = self.scope() {
-            scope.read().resolve(&multiname, self)?
-        } else {
-            None
-        }
-        .ok_or_else(|| format!("Property does not exist: {:?}", multiname).into());
-        let result: Value<'gc> = found?;
+        let found: Result<Value<'gc>, Error> = self
+            .resolve_definition(&multiname)?
+            .ok_or_else(|| format!("Property does not exist: {:?}", multiname).into());
 
-        self.context.avm2.push(result);
+        self.context.avm2.push(found?);
 
         Ok(FrameControl::Continue)
     }
@@ -1560,7 +1599,11 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn op_get_global_slot(&mut self, index: u32) -> Result<FrameControl<'gc>, Error> {
-        let value = self.scope.unwrap().read().globals().get_slot(index)?;
+        let value = self
+            .global_scope()
+            .map(|global| global.get_slot(index))
+            .transpose()?
+            .unwrap_or(Value::Undefined);
 
         self.context.avm2.push(value);
 
@@ -1570,11 +1613,9 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     fn op_set_global_slot(&mut self, index: u32) -> Result<FrameControl<'gc>, Error> {
         let value = self.context.avm2.pop();
 
-        self.scope
-            .unwrap()
-            .read()
-            .globals()
-            .set_slot(index, value, self.context.gc_context)?;
+        self.global_scope()
+            .map(|global| global.set_slot(index, value, self.context.gc_context))
+            .transpose()?;
 
         Ok(FrameControl::Continue)
     }
@@ -1600,16 +1641,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let multiname = self.pool_multiname(method, index)?;
         let source = self.context.avm2.pop().coerce_to_object(self)?;
 
-        let ctor_name: Result<QName, Error> =
-            source.resolve_multiname(&multiname)?.ok_or_else(|| {
-                format!("Could not resolve property {:?}", multiname.local_name()).into()
-            });
-        let ctor_name = ctor_name?;
-        let ctor = source
-            .get_property(source, &ctor_name, self)?
-            .coerce_to_object(self)?;
-
-        let object = ctor.construct(self, &args)?;
+        let object = source.construct_prop(&multiname, &args, self)?;
 
         self.context.avm2.push(object);
 
@@ -1646,7 +1678,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
             object.set_property(
                 object,
-                &QName::new(Namespace::public(), name.coerce_to_string(self)?),
+                &QName::dynamic_name(name.coerce_to_string(self)?).into(),
                 value,
                 self,
             )?;
@@ -1663,7 +1695,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         index: Index<AbcMethod>,
     ) -> Result<FrameControl<'gc>, Error> {
         let method_entry = self.table_method(method, index, true)?;
-        let scope = self.scope();
+        let scope = self.create_scopechain();
 
         let new_fn = FunctionObject::from_function(self, method_entry.into(), scope)?;
 
@@ -1679,15 +1711,17 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     ) -> Result<FrameControl<'gc>, Error> {
         let base_value = self.context.avm2.pop();
         let base_class = match base_value {
-            Value::Object(o) => Some(o),
+            Value::Object(o) => match o.as_class_object() {
+                Some(cls) => Some(cls),
+                None => return Err("Base class for new class is not a class.".into()),
+            },
             Value::Null => None,
             _ => return Err("Base class for new class is not Object or null.".into()),
         };
 
         let class_entry = self.table_class(method, index)?;
-        let scope = self.scope();
 
-        let new_class = ClassObject::from_class(self, class_entry, base_class, scope)?;
+        let new_class = ClassObject::from_class(self, class_entry, base_class)?;
 
         self.context.avm2.push(new_class);
 
@@ -1726,6 +1760,43 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         Ok(FrameControl::Continue)
     }
 
+    fn op_coerce_b(&mut self) -> Result<FrameControl<'gc>, Error> {
+        let value = self.context.avm2.pop().coerce_to_boolean();
+
+        self.context.avm2.push(value);
+
+        Ok(FrameControl::Continue)
+    }
+
+    fn op_coerce_d(&mut self) -> Result<FrameControl<'gc>, Error> {
+        let value = self.context.avm2.pop().coerce_to_number(self)?;
+
+        self.context.avm2.push(value);
+
+        Ok(FrameControl::Continue)
+    }
+
+    fn op_coerce_i(&mut self) -> Result<FrameControl<'gc>, Error> {
+        let value = self.context.avm2.pop().coerce_to_i32(self)?;
+
+        self.context.avm2.push(value);
+
+        Ok(FrameControl::Continue)
+    }
+
+    fn op_coerce_o(&mut self) -> Result<FrameControl<'gc>, Error> {
+        let value = self.context.avm2.pop();
+
+        let coerced = match value {
+            Value::Undefined | Value::Null => Value::Null,
+            _ => value.coerce_to_object(self)?.into(),
+        };
+
+        self.context.avm2.push(coerced);
+
+        Ok(FrameControl::Continue)
+    }
+
     fn op_coerce_s(&mut self) -> Result<FrameControl<'gc>, Error> {
         let value = self.context.avm2.pop();
 
@@ -1735,6 +1806,14 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         };
 
         self.context.avm2.push(coerced);
+
+        Ok(FrameControl::Continue)
+    }
+
+    fn op_coerce_u(&mut self) -> Result<FrameControl<'gc>, Error> {
+        let value = self.context.avm2.pop().coerce_to_u32(self)?;
+
+        self.context.avm2.push(value);
 
         Ok(FrameControl::Continue)
     }
@@ -2363,9 +2442,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let cur_index = self.context.avm2.pop().coerce_to_u32(self)?;
         let object = self.context.avm2.pop().coerce_to_object(self)?;
 
-        let next_index = cur_index + 1;
-
-        if object.get_enumerant_name(next_index).is_some() {
+        if let Some(next_index) = object.get_next_enumerant(cur_index, self)? {
             self.context.avm2.push(next_index);
         } else {
             self.context.avm2.push(0.0);
@@ -2379,29 +2456,28 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         object_register: u32,
         index_register: u32,
     ) -> Result<FrameControl<'gc>, Error> {
-        let cur_index = self.local_register(index_register)?.coerce_to_u32(self)?;
+        let mut cur_index = self.local_register(index_register)?.coerce_to_u32(self)?;
         let mut object = Some(
             self.local_register(object_register)?
                 .coerce_to_object(self)?,
         );
 
-        let mut next_index = cur_index + 1;
-
         while let Some(cur_object) = object {
-            if cur_object.get_enumerant_name(next_index).is_none() {
-                next_index = 1;
-                object = cur_object.proto();
-            } else {
+            if let Some(index) = cur_object.get_next_enumerant(cur_index, self)? {
+                cur_index = index;
                 break;
+            } else {
+                cur_index = 0;
+                object = cur_object.proto();
             }
         }
 
         if object.is_none() {
-            next_index = 0;
+            cur_index = 0;
         }
 
-        self.context.avm2.push(next_index != 0);
-        self.set_local_register(index_register, next_index, self.context.gc_context)?;
+        self.context.avm2.push(cur_index != 0);
+        self.set_local_register(index_register, cur_index, self.context.gc_context)?;
         self.set_local_register(
             object_register,
             object.map(|v| v.into()).unwrap_or(Value::Null),
@@ -2415,11 +2491,9 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let cur_index = self.context.avm2.pop().coerce_to_number(self)?;
         let object = self.context.avm2.pop().coerce_to_object(self)?;
 
-        let name = object
-            .get_enumerant_name(cur_index as u32)
-            .map(|n| n.local_name().into());
+        let name = object.get_enumerant_name(cur_index as u32, self)?;
 
-        self.context.avm2.push(name.unwrap_or(Value::Undefined));
+        self.context.avm2.push(name);
 
         Ok(FrameControl::Continue)
     }
@@ -2428,12 +2502,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let cur_index = self.context.avm2.pop().coerce_to_number(self)?;
         let object = self.context.avm2.pop().coerce_to_object(self)?;
 
-        let name = object.get_enumerant_name(cur_index as u32);
-        let value = if let Some(name) = name {
-            object.get_property(object, &name, self)?
-        } else {
-            Value::Undefined
-        };
+        let value = object.get_enumerant_value(cur_index as u32, self)?;
 
         self.context.avm2.push(value);
 
@@ -2448,19 +2517,23 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let value = self.context.avm2.pop();
 
         let multiname = self.pool_multiname_static(method, type_name_index)?;
-        let found: Result<Value<'gc>, Error> = if let Some(scope) = self.scope() {
-            scope.read().resolve(&multiname, self)?
-        } else {
-            None
-        }
-        .ok_or_else(|| {
-            format!(
-                "Attempted to check against nonexistent type {:?}",
-                multiname
-            )
-            .into()
-        });
-        let type_object = found?.coerce_to_object(self)?;
+        let found: Result<Value<'gc>, Error> =
+            self.resolve_definition(&multiname)?.ok_or_else(|| {
+                format!(
+                    "Attempted to check against nonexistent type {:?}",
+                    multiname
+                )
+                .into()
+            });
+        let type_object = found?
+            .coerce_to_object(self)?
+            .as_class_object()
+            .ok_or_else(|| {
+                Error::from(format!(
+                    "Attempted to check against nonexistent type {:?}",
+                    multiname
+                ))
+            })?;
 
         let is_instance_of = value.is_of_type(self, type_object)?;
         self.context.avm2.push(is_instance_of);
@@ -2471,6 +2544,10 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     fn op_is_type_late(&mut self) -> Result<FrameControl<'gc>, Error> {
         let type_object = self.context.avm2.pop().coerce_to_object(self)?;
         let value = self.context.avm2.pop();
+
+        let type_object = type_object
+            .as_class_object()
+            .ok_or_else(|| Error::from("Attempted to check against non-type"))?;
 
         let is_instance_of = value.is_of_type(self, type_object)?;
 
@@ -2487,23 +2564,20 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let value = self.context.avm2.pop().coerce_to_object(self)?;
 
         let multiname = self.pool_multiname_static(method, type_name_index)?;
-        let found: Result<Value<'gc>, Error> = if let Some(scope) = self.scope() {
-            scope.read().resolve(&multiname, self)?
-        } else {
-            None
-        }
-        .ok_or_else(|| {
-            format!(
-                "Attempted to check against nonexistent type {:?}",
-                multiname
-            )
-            .into()
-        });
-        let class = found?.coerce_to_object(self)?;
-
-        if class.as_class().is_none() {
-            return Err("TypeError: The right-hand side of operator must be a class.".into());
-        }
+        let found: Result<Value<'gc>, Error> =
+            self.resolve_definition(&multiname)?.ok_or_else(|| {
+                format!(
+                    "Attempted to check against nonexistent type {:?}",
+                    multiname
+                )
+                .into()
+            });
+        let class = found?
+            .coerce_to_object(self)?
+            .as_class_object()
+            .ok_or_else(|| {
+                Error::from("TypeError: The right-hand side of operator must be a class.")
+            })?;
 
         if value.is_of_type(class, self)? {
             self.context.avm2.push(value);
@@ -2518,9 +2592,9 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let class = self.context.avm2.pop().coerce_to_object(self)?;
         let value = self.context.avm2.pop().coerce_to_object(self)?;
 
-        if class.as_class().is_none() {
-            return Err("TypeError: The right-hand side of operator must be a class.".into());
-        }
+        let class = class.as_class_object().ok_or_else(|| {
+            Error::from("TypeError: The right-hand side of operator must be a class.")
+        })?;
 
         if value.is_of_type(class, self)? {
             self.context.avm2.push(value);
@@ -2678,12 +2752,12 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         Ok(FrameControl::Continue)
     }
 
-    fn domain_memory(&self) -> Result<ByteArrayObject<'gc>, Error> {
-        self.scope()
-            .map(|s| s.read().globals())
-            .and_then(|g| g.as_application_domain())
-            .map(|d| d.domain_memory())
-            .ok_or_else(|| "No domain memory assigned".into())
+    pub fn domain(&self) -> Domain<'gc> {
+        self.outer.domain()
+    }
+
+    fn domain_memory(&self) -> ByteArrayObject<'gc> {
+        self.outer.domain().domain_memory()
     }
 
     /// Implements `Op::Si8`
@@ -2691,7 +2765,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let address = self.context.avm2.pop().coerce_to_i32(self)?;
         let val = self.context.avm2.pop().coerce_to_i32(self)?;
 
-        let dm = self.domain_memory()?;
+        let dm = self.domain_memory();
         let mut dm = dm
             .as_bytearray_mut(self.context.gc_context)
             .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
@@ -2708,7 +2782,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let address = self.context.avm2.pop().coerce_to_i32(self)?;
         let val = self.context.avm2.pop().coerce_to_i32(self)?;
 
-        let dm = self.domain_memory()?;
+        let dm = self.domain_memory();
         let mut dm = dm
             .as_bytearray_mut(self.context.gc_context)
             .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
@@ -2725,7 +2799,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let address = self.context.avm2.pop().coerce_to_i32(self)?;
         let val = self.context.avm2.pop().coerce_to_i32(self)?;
 
-        let dm = self.domain_memory()?;
+        let dm = self.domain_memory();
         let mut dm = dm
             .as_bytearray_mut(self.context.gc_context)
             .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
@@ -2742,7 +2816,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let address = self.context.avm2.pop().coerce_to_i32(self)?;
         let val = self.context.avm2.pop().coerce_to_number(self)? as f32;
 
-        let dm = self.domain_memory()?;
+        let dm = self.domain_memory();
         let mut dm = dm
             .as_bytearray_mut(self.context.gc_context)
             .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
@@ -2759,7 +2833,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let address = self.context.avm2.pop().coerce_to_i32(self)?;
         let val = self.context.avm2.pop().coerce_to_number(self)?;
 
-        let dm = self.domain_memory()?;
+        let dm = self.domain_memory();
         let mut dm = dm
             .as_bytearray_mut(self.context.gc_context)
             .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
@@ -2775,7 +2849,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     fn op_li8(&mut self) -> Result<FrameControl<'gc>, Error> {
         let address = self.context.avm2.pop().coerce_to_u32(self)? as usize;
 
-        let dm = self.domain_memory()?;
+        let dm = self.domain_memory();
         let dm = dm
             .as_bytearray()
             .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
@@ -2794,7 +2868,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     fn op_li16(&mut self) -> Result<FrameControl<'gc>, Error> {
         let address = self.context.avm2.pop().coerce_to_u32(self)? as usize;
 
-        let dm = self.domain_memory()?;
+        let dm = self.domain_memory();
         let dm = dm
             .as_bytearray()
             .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
@@ -2810,7 +2884,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     fn op_li32(&mut self) -> Result<FrameControl<'gc>, Error> {
         let address = self.context.avm2.pop().coerce_to_u32(self)? as usize;
 
-        let dm = self.domain_memory()?;
+        let dm = self.domain_memory();
         let dm = dm
             .as_bytearray()
             .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
@@ -2825,7 +2899,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     fn op_lf32(&mut self) -> Result<FrameControl<'gc>, Error> {
         let address = self.context.avm2.pop().coerce_to_u32(self)? as usize;
 
-        let dm = self.domain_memory()?;
+        let dm = self.domain_memory();
         let dm = dm
             .as_bytearray()
             .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
@@ -2841,7 +2915,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     fn op_lf64(&mut self) -> Result<FrameControl<'gc>, Error> {
         let address = self.context.avm2.pop().coerce_to_u32(self)? as usize;
 
-        let dm = self.domain_memory()?;
+        let dm = self.domain_memory();
         let dm = dm
             .as_bytearray()
             .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
@@ -2941,6 +3015,21 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     fn op_debug_line(&mut self, line_num: u32) -> Result<FrameControl<'gc>, Error> {
         avm_debug!(self.avm2(), "Line: {}", line_num);
 
+        Ok(FrameControl::Continue)
+    }
+
+    fn op_bkpt(&mut self) -> Result<FrameControl<'gc>, Error> {
+        // while a debugger is not attached, this is a no-op
+        Ok(FrameControl::Continue)
+    }
+
+    fn op_bkpt_line(&mut self, _line_num: u32) -> Result<FrameControl<'gc>, Error> {
+        // while a debugger is not attached, this is a no-op
+        Ok(FrameControl::Continue)
+    }
+
+    fn op_timestamp(&mut self) -> Result<FrameControl<'gc>, Error> {
+        // while a debugger is not attached, this is a no-op
         Ok(FrameControl::Continue)
     }
 }

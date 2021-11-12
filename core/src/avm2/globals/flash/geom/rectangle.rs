@@ -1,10 +1,10 @@
 //! `flash.geom.Rectangle` builtin/prototype
 
-use crate::avm1::AvmString;
 use crate::avm2::class::{Class, ClassAttributes};
 use crate::avm2::globals::flash::geom::point::create_point;
 use crate::avm2::method::{Method, NativeMethodImpl};
 use crate::avm2::{Activation, Error, Namespace, Object, QName, TObject, Value};
+use crate::string::AvmString;
 use gc_arena::{GcCell, MutationContext};
 
 pub fn create_rectangle<'gc>(
@@ -27,7 +27,11 @@ pub fn create_rectangle<'gc>(
 macro_rules! get_prop {
     ($this:expr, $activation:expr, $name: expr) => {
         $this
-            .get_property($this, &QName::new(Namespace::public(), $name), $activation)?
+            .get_property(
+                $this,
+                &QName::new(Namespace::public(), $name).into(),
+                $activation,
+            )?
             .coerce_to_number($activation)
     };
 }
@@ -36,7 +40,7 @@ macro_rules! set_prop {
     ($this:expr, $activation:expr, $name: expr, $value: expr) => {
         $this.set_property(
             $this,
-            &QName::new(Namespace::public(), $name),
+            &QName::new(Namespace::public(), $name).into(),
             $value.into(),
             $activation,
         )
@@ -452,12 +456,26 @@ pub fn copy_from<'gc>(
 ) -> Result<Value<'gc>, Error> {
     if let Some(rect) = args.get(0) {
         let rect = rect.coerce_to_object(activation)?;
-        let x = rect.get_property(rect, &QName::new(Namespace::public(), "x"), activation)?;
-        let y = rect.get_property(rect, &QName::new(Namespace::public(), "y"), activation)?;
-        let width =
-            rect.get_property(rect, &QName::new(Namespace::public(), "width"), activation)?;
-        let height =
-            rect.get_property(rect, &QName::new(Namespace::public(), "height"), activation)?;
+        let x = rect.get_property(
+            rect,
+            &QName::new(Namespace::public(), "x").into(),
+            activation,
+        )?;
+        let y = rect.get_property(
+            rect,
+            &QName::new(Namespace::public(), "y").into(),
+            activation,
+        )?;
+        let width = rect.get_property(
+            rect,
+            &QName::new(Namespace::public(), "width").into(),
+            activation,
+        )?;
+        let height = rect.get_property(
+            rect,
+            &QName::new(Namespace::public(), "height").into(),
+            activation,
+        )?;
 
         set_to(activation, this, &[x, y, width, height])?;
     }
@@ -740,16 +758,32 @@ pub fn to_string<'gc>(
 ) -> Result<Value<'gc>, Error> {
     if let Some(this) = this {
         let x = this
-            .get_property(this, &QName::new(Namespace::public(), "x"), activation)?
+            .get_property(
+                this,
+                &QName::new(Namespace::public(), "x").into(),
+                activation,
+            )?
             .coerce_to_string(activation)?;
         let y = this
-            .get_property(this, &QName::new(Namespace::public(), "y"), activation)?
+            .get_property(
+                this,
+                &QName::new(Namespace::public(), "y").into(),
+                activation,
+            )?
             .coerce_to_string(activation)?;
         let width = this
-            .get_property(this, &QName::new(Namespace::public(), "width"), activation)?
+            .get_property(
+                this,
+                &QName::new(Namespace::public(), "width").into(),
+                activation,
+            )?
             .coerce_to_string(activation)?;
         let height = this
-            .get_property(this, &QName::new(Namespace::public(), "height"), activation)?
+            .get_property(
+                this,
+                &QName::new(Namespace::public(), "height").into(),
+                activation,
+            )?
             .coerce_to_string(activation)?;
 
         return Ok(AvmString::new(
@@ -862,6 +896,10 @@ pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>
         ("size", Some(size), Some(set_size)),
     ];
     write.define_public_builtin_instance_properties(mc, PUBLIC_INSTANCE_PROPERTIES);
+
+    const PUBLIC_INSTANCE_NUMBER_SLOTS: &[(&str, Option<f64>)] =
+        &[("x", None), ("y", None), ("width", None), ("height", None)];
+    write.define_public_slot_number_instance_traits(PUBLIC_INSTANCE_NUMBER_SLOTS);
 
     const PUBLIC_INSTANCE_METHODS: &[(&str, NativeMethodImpl)] = &[
         ("contains", contains),

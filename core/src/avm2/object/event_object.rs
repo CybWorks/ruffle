@@ -1,24 +1,19 @@
 //! Object representation for events
 
 use crate::avm2::activation::Activation;
-use crate::avm2::class::Class;
 use crate::avm2::events::Event;
 use crate::avm2::names::{Namespace, QName};
 use crate::avm2::object::script_object::ScriptObjectData;
-use crate::avm2::object::{Object, ObjectPtr, TObject};
-use crate::avm2::scope::Scope;
-use crate::avm2::string::AvmString;
+use crate::avm2::object::{ClassObject, Object, ObjectPtr, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
-use crate::{
-    impl_avm2_custom_object, impl_avm2_custom_object_instance, impl_avm2_custom_object_properties,
-};
+use crate::string::AvmString;
 use gc_arena::{Collect, GcCell, MutationContext};
 use std::cell::{Ref, RefMut};
 
 /// A class instance allocator that allocates Event objects.
 pub fn event_allocator<'gc>(
-    class: Object<'gc>,
+    class: ClassObject<'gc>,
     proto: Object<'gc>,
     activation: &mut Activation<'_, 'gc, '_>,
 ) -> Result<Object<'gc>, Error> {
@@ -55,13 +50,13 @@ impl<'gc> EventObject<'gc> {
     /// we will pull the `prototype` off the `class` given to us.
     pub fn from_event(
         activation: &mut Activation<'_, 'gc, '_>,
-        class: Object<'gc>,
+        class: ClassObject<'gc>,
         event: Event<'gc>,
     ) -> Result<Object<'gc>, Error> {
         let proto = class
             .get_property(
-                class,
-                &QName::new(Namespace::public(), "prototype"),
+                class.into(),
+                &QName::new(Namespace::public(), "prototype").into(),
                 activation,
             )?
             .coerce_to_object(activation)?;
@@ -82,9 +77,17 @@ impl<'gc> EventObject<'gc> {
 }
 
 impl<'gc> TObject<'gc> for EventObject<'gc> {
-    impl_avm2_custom_object!(base);
-    impl_avm2_custom_object_properties!(base);
-    impl_avm2_custom_object_instance!(base);
+    fn base(&self) -> Ref<ScriptObjectData<'gc>> {
+        Ref::map(self.0.read(), |read| &read.base)
+    }
+
+    fn base_mut(&self, mc: MutationContext<'gc, '_>) -> RefMut<ScriptObjectData<'gc>> {
+        RefMut::map(self.0.write(mc), |write| &mut write.base)
+    }
+
+    fn as_ptr(&self) -> *const ObjectPtr {
+        self.0.as_ptr() as *const ObjectPtr
+    }
 
     fn derive(&self, activation: &mut Activation<'_, 'gc, '_>) -> Result<Object<'gc>, Error> {
         let base = ScriptObjectData::base_new(Some((*self).into()), None);

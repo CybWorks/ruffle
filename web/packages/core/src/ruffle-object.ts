@@ -5,6 +5,7 @@ import {
     FLASH_MOVIE_MIMETYPE,
     FLASH_ACTIVEX_CLASSID,
     isBuiltInContextMenuVisible,
+    isFallbackElement,
     isScriptAccessAllowed,
     isSwfFilename,
     RufflePlayer,
@@ -120,6 +121,9 @@ export class RuffleObject extends RufflePlayer {
         );
 
         const menu = findCaseInsensitive(this.params, "menu", null);
+        const salign = findCaseInsensitive(this.params, "salign", "");
+        const quality = findCaseInsensitive(this.params, "quality", "high");
+        const scale = findCaseInsensitive(this.params, "scale", "showAll");
 
         if (url) {
             const options: URLLoadOptions = { url };
@@ -137,6 +141,15 @@ export class RuffleObject extends RufflePlayer {
                 options.base = base;
             }
             options.menu = isBuiltInContextMenuVisible(menu);
+            if (salign) {
+                options.salign = salign;
+            }
+            if (quality) {
+                options.quality = quality;
+            }
+            if (scale) {
+                options.scale = scale;
+            }
 
             // Kick off the SWF download.
             this.load(options);
@@ -202,10 +215,15 @@ export class RuffleObject extends RufflePlayer {
      * @returns True if the element looks like a flash object.
      */
     static isInterdictable(elem: HTMLElement): boolean {
+        // Don't polyfill if the element is inside a specific node.
+        if (isFallbackElement(elem)) {
+            return false;
+        }
         // Don't polyfill if there's already a <ruffle-embed> inside the <object>.
         if (elem.getElementsByTagName("ruffle-embed").length > 0) {
             return false;
         }
+
         // Don't polyfill if no movie specified.
         const data = elem.attributes.getNamedItem("data")?.value.toLowerCase();
         const params = paramsOf(elem);

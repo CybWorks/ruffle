@@ -2,7 +2,7 @@
 
 use crate::avm1::activation::{Activation as Avm1Activation, ActivationIdentifier};
 use crate::avm1::{
-    Avm1, AvmString, Object as Avm1Object, StageObject as Avm1StageObject, TObject as Avm1TObject,
+    Avm1, Object as Avm1Object, StageObject as Avm1StageObject, TObject as Avm1TObject,
     Value as Avm1Value,
 };
 use crate::avm2::{
@@ -10,22 +10,24 @@ use crate::avm2::{
 };
 use crate::backend::ui::MouseCursor;
 use crate::context::{RenderContext, UpdateContext};
-use crate::display_object::{DisplayObjectBase, TDisplayObject};
+use crate::display_object::interactive::{
+    InteractiveObject, InteractiveObjectBase, TInteractiveObject,
+};
+use crate::display_object::{DisplayObjectBase, DisplayObjectPtr, TDisplayObject};
 use crate::drawing::Drawing;
 use crate::events::{ButtonKeyCode, ClipEvent, ClipEventResult, KeyCode};
 use crate::font::{round_down_to_pixel, Glyph, TextRenderSettings};
 use crate::html::{BoxBounds, FormatSpans, LayoutBox, LayoutContent, TextFormat};
 use crate::prelude::*;
 use crate::shape_utils::DrawCommand;
-use crate::string_utils;
+use crate::string::{utils as string_utils, AvmString};
 use crate::tag_utils::SwfMovie;
 use crate::transform::Transform;
-use crate::types::{Degrees, Percent};
 use crate::vminterface::{AvmObject, AvmType, Instantiator};
 use crate::xml::XmlDocument;
 use chrono::Utc;
 use gc_arena::{Collect, Gc, GcCell, MutationContext};
-use std::{cell::Ref, sync::Arc};
+use std::{cell::Ref, cell::RefMut, sync::Arc};
 use swf::Twips;
 
 /// Boxed error type.
@@ -57,19 +59,11 @@ pub struct EditText<'gc>(GcCell<'gc, EditTextData<'gc>>);
 #[derive(Clone, Debug, Collect)]
 #[collect(no_drop)]
 pub struct EditTextData<'gc> {
-    /// DisplayObject common properties.
-    base: DisplayObjectBase<'gc>,
+    /// DisplayObject and InteractiveObject common properties.
+    base: InteractiveObjectBase<'gc>,
 
     /// Static data shared among all instances of this `EditText`.
     static_data: Gc<'gc, EditTextStatic>,
-
-    /// The current HTML document displayed by this `EditText`.
-    ///
-    /// The HTML representation of this `EditText` is lowered into an
-    /// appropriate set of format spans, which is used for actual rendering.
-    /// The HTML is only retained if there is also a stylesheet already defined
-    /// on the `EditText`, else it is discarded during the lowering process.
-    document: XmlDocument<'gc>,
 
     /// The underlying text format spans of the `EditText`.
     ///
@@ -223,27 +217,20 @@ impl<'gc> EditText<'gc> {
         let is_password = swf_tag.is_password;
         let is_editable = !swf_tag.is_read_only;
         let is_html = swf_tag.is_html;
-        let document = XmlDocument::new(context.gc_context);
         let text = swf_tag.initial_text.unwrap_or_default();
         let default_format = TextFormat::from_swf_tag(swf_tag.clone(), swf_movie.clone(), context);
         let encoding = swf_movie.encoding();
 
-        let mut text_spans = FormatSpans::new();
-        text_spans.set_default_format(default_format.clone());
-
         let text = text.to_str_lossy(encoding);
-        if is_html {
-            let _ = document
-                .as_node()
-                .replace_with_str(context.gc_context, &text, false, false);
-            text_spans.lower_from_html(document);
+        let mut text_spans = if is_html {
+            FormatSpans::from_html(&*text, default_format)
         } else {
-            text_spans.replace_text(0, text_spans.text().len(), &text, Some(&default_format));
-        }
+            FormatSpans::from_text(&*text, default_format)
+        };
 
         if !is_multiline {
             let filtered = text_spans.text().replace("\n", "");
-            text_spans.replace_text(0, text_spans.text().len(), &filtered, Some(&default_format));
+            text_spans.replace_text(0, text_spans.text().len(), &filtered, None);
         }
 
         if is_password {
@@ -268,10 +255,10 @@ impl<'gc> EditText<'gc> {
         let border_color = 0; // Default is black
         let is_device_font = swf_tag.is_device_font;
 
-        let mut base = DisplayObjectBase::default();
+        let mut base = InteractiveObjectBase::default();
 
-        base.matrix_mut().tx = bounds.x_min;
-        base.matrix_mut().ty = bounds.y_min;
+        base.base.matrix_mut().tx = bounds.x_min;
+        base.base.matrix_mut().ty = bounds.y_min;
 
         let variable = if !swf_tag.variable_name.is_empty() {
             Some(swf_tag.variable_name)
@@ -283,7 +270,6 @@ impl<'gc> EditText<'gc> {
             context.gc_context,
             EditTextData {
                 base,
-                document,
                 text_spans,
                 static_data: gc_arena::Gc::allocate(
                     context.gc_context,
@@ -400,10 +386,12 @@ impl<'gc> EditText<'gc> {
         let text_field = Self::from_swf_tag(context, swf_movie, swf_tag);
 
         // Set position.
-        let mut matrix = text_field.matrix_mut(context.gc_context);
-        matrix.tx = Twips::from_pixels(x);
-        matrix.ty = Twips::from_pixels(y);
-        drop(matrix);
+        {
+            let mut base = text_field.base_mut(context.gc_context);
+            let mut matrix = base.matrix_mut();
+            matrix.tx = Twips::from_pixels(x);
+            matrix.ty = Twips::from_pixels(y);
+        }
 
         text_field
     }
@@ -414,15 +402,12 @@ impl<'gc> EditText<'gc> {
 
     pub fn set_text(
         self,
-        text: String,
+        text: &str,
         context: &mut UpdateContext<'_, 'gc, '_>,
     ) -> Result<(), Error> {
         let mut edit_text = self.0.write(context.gc_context);
-        let len = edit_text.text_spans.text().len();
-        let tf = edit_text.text_spans.default_format().clone();
-
-        edit_text.text_spans.replace_text(0, len, &text, Some(&tf));
-
+        let default_format = edit_text.text_spans.default_format().clone();
+        edit_text.text_spans = FormatSpans::from_text(text, default_format);
         drop(edit_text);
 
         self.relayout(context);
@@ -430,7 +415,7 @@ impl<'gc> EditText<'gc> {
         Ok(())
     }
 
-    pub fn html_text(self, context: &mut UpdateContext<'_, 'gc, '_>) -> Result<String, Error> {
+    pub fn html_text(self, context: &mut UpdateContext<'_, 'gc, '_>) -> String {
         if self.is_html() {
             let html_tree = self.html_tree(context).as_node();
             let html_string_result = html_tree.into_string(&mut |_node| true);
@@ -442,60 +427,34 @@ impl<'gc> EditText<'gc> {
                 );
             }
 
-            Ok(html_string_result.unwrap_or_else(|_| "".to_string()))
+            html_string_result.unwrap_or_default()
         } else {
             // Non-HTML text fields always return plain text.
-            Ok(self.text())
+            self.text()
         }
     }
 
     pub fn set_html_text(
         self,
-        text: String,
+        text: &str,
         context: &mut UpdateContext<'_, 'gc, '_>,
     ) -> Result<(), Error> {
         if self.is_html() {
-            let html_string = text.replace("<sbr>", "\n").replace("<br>", "\n");
-            let document = XmlDocument::new(context.gc_context);
+            let mut write = self.0.write(context.gc_context);
+            let default_format = write.text_spans.default_format().clone();
+            write.text_spans = FormatSpans::from_html(text, default_format);
+            drop(write);
 
-            if let Err(err) =
-                document
-                    .as_node()
-                    .replace_with_str(context.gc_context, &html_string, false, false)
-            {
-                log::warn!("Parsing error when setting TextField.htmlText: {}", err);
-            }
+            self.relayout(context);
 
-            self.set_html_tree(document, context);
-        } else if let Err(err) = self.set_text(text, context) {
-            log::error!("Error when setting TextField.htmlText: {}", err);
+            Ok(())
+        } else {
+            self.set_text(text, context)
         }
-        Ok(())
     }
 
     pub fn html_tree(self, context: &mut UpdateContext<'_, 'gc, '_>) -> XmlDocument<'gc> {
         self.0.read().text_spans.raise_to_html(context.gc_context)
-    }
-
-    /// Set the HTML tree for the given display object.
-    ///
-    /// The document is not rendered directly: instead, it is lowered to text
-    /// spans which drive the actual layout process. User code is capable of
-    /// altering text spans directly, thus the HTML tree will be discarded and
-    /// regenerated.
-    ///
-    /// In stylesheet mode, the opposite is true: text spans are an
-    /// intermediate, user-facing text span APIs don't work, and the document
-    /// is retained.
-    pub fn set_html_tree(self, doc: XmlDocument<'gc>, context: &mut UpdateContext<'_, 'gc, '_>) {
-        let mut write = self.0.write(context.gc_context);
-
-        write.document = doc;
-        write.text_spans.lower_from_html(doc);
-
-        drop(write);
-
-        self.relayout(context);
     }
 
     pub fn text_length(self) -> usize {
@@ -728,7 +687,7 @@ impl<'gc> EditText<'gc> {
             .initial_text
             .clone()
             .unwrap_or_default();
-        let _ = self.set_text(text, &mut activation.context);
+        let _ = self.set_text(&text, &mut activation.context);
 
         self.0.write(activation.context.gc_context).variable = variable;
         self.try_bind_text_field_variable(activation, true);
@@ -841,7 +800,7 @@ impl<'gc> EditText<'gc> {
                 }
 
                 edit_text.bounds.set_height(intrinsic_bounds.height());
-                edit_text.base.set_transformed_by_script(true);
+                edit_text.base.base.set_transformed_by_script(true);
                 drop(edit_text);
                 self.redraw_border(context.gc_context);
             }
@@ -855,7 +814,7 @@ impl<'gc> EditText<'gc> {
                 }
 
                 edit_text.bounds.set_height(intrinsic_bounds.height());
-                edit_text.base.set_transformed_by_script(true);
+                edit_text.base.base.set_transformed_by_script(true);
                 drop(edit_text);
                 self.redraw_border(context.gc_context);
             }
@@ -867,7 +826,7 @@ impl<'gc> EditText<'gc> {
                 }
 
                 edit_text.bounds.set_height(intrinsic_bounds.height());
-                edit_text.base.set_transformed_by_script(true);
+                edit_text.base.base.set_transformed_by_script(true);
                 drop(edit_text);
                 self.redraw_border(context.gc_context);
             }
@@ -1101,16 +1060,15 @@ impl<'gc> EditText<'gc> {
                     if let Ok(Some((object, property))) =
                         activation.resolve_variable_path(parent, &variable)
                     {
+                        let property = AvmString::new(activation.context.gc_context, property);
+
                         // If this text field was just created, we immediately propagate the text to the variable (or vice versa).
                         if set_initial_value {
                             // If the property exists on the object, we overwrite the text with the property's value.
                             if object.has_property(activation, property) {
                                 let value = object.get(property, activation).unwrap();
                                 let _ = self.set_html_text(
-                                    value
-                                        .coerce_to_string(activation)
-                                        .unwrap_or_default()
-                                        .to_string(),
+                                    &value.coerce_to_string(activation).unwrap_or_default(),
                                     &mut activation.context,
                                 );
                             } else {
@@ -1172,13 +1130,7 @@ impl<'gc> EditText<'gc> {
                 if let Ok(Some((object, property))) =
                     activation.resolve_variable_path(self.avm1_parent().unwrap(), &variable_path)
                 {
-                    let text = if self.0.read().is_html {
-                        let html_tree = self.html_tree(&mut activation.context).as_node();
-                        let html_string_result = html_tree.into_string(&mut |_node| true);
-                        html_string_result.unwrap_or_default()
-                    } else {
-                        self.text()
-                    };
+                    let html_text = self.html_text(&mut activation.context);
 
                     // Note that this can call virtual setters, even though the opposite direction won't work
                     // (virtual property changes do not affect the text field)
@@ -1187,9 +1139,10 @@ impl<'gc> EditText<'gc> {
                         self.avm1_parent().unwrap(),
                         activation.context.swf.version(),
                         |activation| {
+                            let property = AvmString::new(activation.context.gc_context, property);
                             let _ = object.set(
                                 property,
-                                AvmString::new(activation.context.gc_context, text).into(),
+                                AvmString::new(activation.context.gc_context, html_text).into(),
                                 activation,
                             );
                         },
@@ -1454,7 +1407,7 @@ impl<'gc> EditText<'gc> {
     fn on_changed(&self, activation: &mut Avm1Activation<'_, 'gc, '_>) {
         if let Avm1Value::Object(object) = self.object() {
             let _ = object.call_method(
-                "broadcastMessage",
+                "broadcastMessage".into(),
                 &["onChanged".into(), object.into()],
                 activation,
             );
@@ -1529,7 +1482,21 @@ impl<'gc> EditText<'gc> {
 }
 
 impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
-    impl_display_object_sansbounds!(base);
+    fn base(&self) -> Ref<DisplayObjectBase<'gc>> {
+        Ref::map(self.0.read(), |r| &r.base.base)
+    }
+
+    fn base_mut<'a>(&'a self, mc: MutationContext<'gc, '_>) -> RefMut<'a, DisplayObjectBase<'gc>> {
+        RefMut::map(self.0.write(mc), |w| &mut w.base.base)
+    }
+
+    fn instantiate(&self, gc_context: MutationContext<'gc, '_>) -> DisplayObject<'gc> {
+        Self(GcCell::allocate(gc_context, self.0.read().clone())).into()
+    }
+
+    fn as_ptr(&self) -> *const DisplayObjectPtr {
+        self.0.as_ptr() as *const DisplayObjectPtr
+    }
 
     fn id(&self) -> CharacterId {
         self.0.read().static_data.text.id
@@ -1541,7 +1508,7 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
 
     /// Construct objects placed on this frame.
     fn construct_frame(&self, context: &mut UpdateContext<'_, 'gc, '_>) {
-        if self.avm_type() == AvmType::Avm2 && matches!(self.object2(), Avm2Value::Undefined) {
+        if context.avm_type() == AvmType::Avm2 && matches!(self.object2(), Avm2Value::Undefined) {
             self.construct_as_avm2_object(context, (*self).into());
         }
     }
@@ -1554,6 +1521,10 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
         Some(*self)
     }
 
+    fn as_interactive(self) -> Option<InteractiveObject<'gc>> {
+        Some(self.into())
+    }
+
     fn post_instantiation(
         &self,
         context: &mut UpdateContext<'_, 'gc, '_>,
@@ -1564,19 +1535,11 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
     ) {
         self.set_default_instance_name(context);
 
-        if self.avm_type() == AvmType::Avm1 {
+        if context.avm_type() == AvmType::Avm1 {
             context
                 .avm1
                 .add_to_exec_list(context.gc_context, (*self).into());
         }
-
-        let mut text = self.0.write(context.gc_context);
-        text.document = text
-            .document
-            .as_node()
-            .duplicate(context.gc_context, true)
-            .document();
-        drop(text);
 
         let movie = self.movie().unwrap();
         let library = context.library.library_for_movie_mut(movie);
@@ -1617,14 +1580,14 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
     fn x(&self) -> f64 {
         let edit_text = self.0.read();
         let offset = edit_text.bounds.x_min;
-        (edit_text.base.transform.matrix.tx + offset).to_pixels()
+        (edit_text.base.base.transform.matrix.tx + offset).to_pixels()
     }
 
     fn set_x(&self, gc_context: MutationContext<'gc, '_>, value: f64) {
         let mut edit_text = self.0.write(gc_context);
         let offset = edit_text.bounds.x_min;
-        edit_text.base.transform.matrix.tx = Twips::from_pixels(value) - offset;
-        edit_text.base.set_transformed_by_script(true);
+        edit_text.base.base.transform.matrix.tx = Twips::from_pixels(value) - offset;
+        edit_text.base.base.set_transformed_by_script(true);
         drop(edit_text);
         self.redraw_border(gc_context);
     }
@@ -1632,14 +1595,14 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
     fn y(&self) -> f64 {
         let edit_text = self.0.read();
         let offset = edit_text.bounds.y_min;
-        (edit_text.base.transform.matrix.ty + offset).to_pixels()
+        (edit_text.base.base.transform.matrix.ty + offset).to_pixels()
     }
 
     fn set_y(&self, gc_context: MutationContext<'gc, '_>, value: f64) {
         let mut edit_text = self.0.write(gc_context);
         let offset = edit_text.bounds.y_min;
-        edit_text.base.transform.matrix.ty = Twips::from_pixels(value) - offset;
-        edit_text.base.set_transformed_by_script(true);
+        edit_text.base.base.transform.matrix.ty = Twips::from_pixels(value) - offset;
+        edit_text.base.base.set_transformed_by_script(true);
         drop(edit_text);
         self.redraw_border(gc_context);
     }
@@ -1648,7 +1611,7 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
         let edit_text = self.0.read();
         edit_text
             .bounds
-            .transform(&edit_text.base.transform.matrix)
+            .transform(&edit_text.base.base.transform.matrix)
             .width()
             .to_pixels()
     }
@@ -1657,7 +1620,7 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
         let mut write = self.0.write(gc_context);
 
         write.bounds.set_width(Twips::from_pixels(value));
-        write.base.set_transformed_by_script(true);
+        write.base.base.set_transformed_by_script(true);
 
         drop(write);
         self.redraw_border(gc_context);
@@ -1667,7 +1630,7 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
         let edit_text = self.0.read();
         edit_text
             .bounds
-            .transform(&edit_text.base.transform.matrix)
+            .transform(&edit_text.base.base.transform.matrix)
             .height()
             .to_pixels()
     }
@@ -1676,14 +1639,14 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
         let mut write = self.0.write(gc_context);
 
         write.bounds.set_height(Twips::from_pixels(value));
-        write.base.set_transformed_by_script(true);
+        write.base.base.set_transformed_by_script(true);
 
         drop(write);
         self.redraw_border(gc_context);
     }
 
     fn set_matrix(&self, gc_context: MutationContext<'gc, '_>, matrix: &Matrix) {
-        self.0.write(gc_context).base.set_matrix(matrix);
+        self.0.write(gc_context).base.base.set_matrix(matrix);
         self.redraw_border(gc_context);
     }
 
@@ -1854,27 +1817,47 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
         // Even if this isn't selectable or editable, a script can focus on it manually
         true
     }
+}
 
-    fn handle_clip_event(
-        &self,
-        context: &mut UpdateContext<'_, 'gc, '_>,
-        event: ClipEvent,
-    ) -> ClipEventResult {
-        if event == ClipEvent::Press {
-            let tracker = context.focus_tracker;
-            tracker.set(Some((*self).into()), context);
-            if let Some(position) = self
-                .screen_position_to_index(*context.mouse_position)
-                .map(TextSelection::for_position)
-            {
-                self.0.write(context.gc_context).selection = Some(position);
-            } else {
-                self.0.write(context.gc_context).selection =
-                    Some(TextSelection::for_position(self.text_length()));
-            }
-            return ClipEventResult::Handled;
+impl<'gc> TInteractiveObject<'gc> for EditText<'gc> {
+    fn ibase(&self) -> Ref<InteractiveObjectBase<'gc>> {
+        Ref::map(self.0.read(), |r| &r.base)
+    }
+
+    fn ibase_mut(&self, mc: MutationContext<'gc, '_>) -> RefMut<InteractiveObjectBase<'gc>> {
+        RefMut::map(self.0.write(mc), |w| &mut w.base)
+    }
+
+    fn as_displayobject(self) -> DisplayObject<'gc> {
+        self.into()
+    }
+
+    fn filter_clip_event(self, event: ClipEvent) -> ClipEventResult {
+        if event != ClipEvent::Press {
+            return ClipEventResult::NotHandled;
         }
-        ClipEventResult::NotHandled
+
+        ClipEventResult::Handled
+    }
+
+    fn event_dispatch(
+        self,
+        context: &mut UpdateContext<'_, 'gc, '_>,
+        _event: ClipEvent,
+    ) -> ClipEventResult {
+        let tracker = context.focus_tracker;
+        tracker.set(Some(self.into()), context);
+        if let Some(position) = self
+            .screen_position_to_index(*context.mouse_position)
+            .map(TextSelection::for_position)
+        {
+            self.0.write(context.gc_context).selection = Some(position);
+        } else {
+            self.0.write(context.gc_context).selection =
+                Some(TextSelection::for_position(self.text_length()));
+        }
+
+        ClipEventResult::Handled
     }
 }
 
@@ -1885,6 +1868,8 @@ struct EditTextStatic {
     swf: Arc<SwfMovie>,
     text: EditTextStaticData,
 }
+
+#[allow(dead_code)]
 #[derive(Debug, Clone, Collect)]
 #[collect(require_static)]
 struct EditTextStaticData {

@@ -5,10 +5,10 @@ use crate::avm2::class::Class;
 use crate::avm2::method::{Method, NativeMethodImpl};
 use crate::avm2::names::{Namespace, QName};
 use crate::avm2::object::{stage_allocator, LoaderInfoObject, Object, TObject};
-use crate::avm2::string::AvmString;
 use crate::avm2::value::Value;
 use crate::avm2::Error;
 use crate::display_object::{DisplayObject, HitTestOptions, TDisplayObject};
+use crate::string::AvmString;
 use crate::types::{Degrees, Percent};
 use crate::vminterface::Instantiator;
 use gc_arena::{GcCell, MutationContext};
@@ -34,8 +34,8 @@ pub fn native_instance_init<'gc>(
 
         if this.as_display_object().is_none() {
             let class_object = this
-                .as_class_object()
-                .ok_or("Attempted to construct non-instance DisplayObject.")?;
+                .instance_of()
+                .ok_or("Attempted to construct DisplayObject on a bare object.")?;
 
             if let Some((movie, symbol)) = activation
                 .context
@@ -380,7 +380,7 @@ pub fn set_name<'gc>(
             .into());
         }
 
-        dobj.set_name(activation.context.gc_context, &new_name);
+        dobj.set_name(activation.context.gc_context, new_name);
     }
 
     Ok(Value::Undefined)
@@ -603,6 +603,8 @@ pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>
         "<DisplayObject native instance initializer>",
         mc,
     ));
+
+    write.implements(QName::new(Namespace::package("flash.display"), "IBitmapDrawable").into());
 
     const PUBLIC_INSTANCE_PROPERTIES: &[(
         &str,

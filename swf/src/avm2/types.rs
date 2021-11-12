@@ -244,6 +244,10 @@ pub enum Op {
     BitNot,
     BitOr,
     BitXor,
+    Bkpt,
+    BkptLine {
+        line_num: u32,
+    },
     Call {
         num_args: u32,
     },
@@ -280,7 +284,12 @@ pub enum Op {
         index: Index<Multiname>,
     },
     CoerceA,
+    CoerceB,
+    CoerceD,
+    CoerceI,
+    CoerceO,
     CoerceS,
+    CoerceU,
     Construct {
         num_args: u32,
     },
@@ -328,6 +337,9 @@ pub enum Op {
     Equals,
     EscXAttr,
     EscXElem,
+    FindDef {
+        index: Index<Multiname>,
+    },
     FindProperty {
         index: Index<Multiname>,
     },
@@ -345,6 +357,9 @@ pub enum Op {
         index: Index<Multiname>,
     },
     GetLocal {
+        index: u32,
+    },
+    GetOuterScope {
         index: u32,
     },
     GetProperty {
@@ -384,6 +399,9 @@ pub enum Op {
     IfLt {
         offset: i32,
     },
+    IfNe {
+        offset: i32,
+    },
     IfNge {
         offset: i32,
     },
@@ -394,9 +412,6 @@ pub enum Op {
         offset: i32,
     },
     IfNlt {
-        offset: i32,
-    },
-    IfNe {
         offset: i32,
     },
     IfStrictEq {
@@ -474,6 +489,9 @@ pub enum Op {
     PushByte {
         value: u8,
     },
+    PushConstant {
+        value: u32,
+    },
     PushDouble {
         value: Index<f64>,
     },
@@ -502,10 +520,10 @@ pub enum Op {
     ReturnValue,
     ReturnVoid,
     RShift,
-    SetLocal {
+    SetGlobalSlot {
         index: u32,
     },
-    SetGlobalSlot {
+    SetLocal {
         index: u32,
     },
     SetProperty {
@@ -531,5 +549,6 @@ pub enum Op {
     Sxi8,
     Throw,
     TypeOf,
+    Timestamp,
     URShift,
 }

@@ -81,6 +81,7 @@ macro_rules! swf_tests_approx {
     ($($(#[$attr:meta])* ($name:ident, $path:expr, $num_frames:literal $(, $opt:ident = $val:expr)*),)*) => {
         $(
         #[test]
+        #[allow(clippy::if_then_panic)] // TODO: Remove when https://github.com/brendanzab/approx/pull/72 is merged.
         $(#[$attr])*
         fn $name() -> Result<(), Error> {
             set_logger();
@@ -110,6 +111,7 @@ swf_tests! {
     (as2_bitand, "avm1/bitand", 1),
     (as2_bitxor, "avm1/bitxor", 1),
     (function_base_clip, "avm1/function_base_clip", 2),
+    (function_base_clip_removed, "avm1/function_base_clip_removed", 3),
     (call, "avm1/call", 2),
     (color, "avm1/color", 1, img = true),
     (clip_events, "avm1/clip_events", 4),
@@ -117,6 +119,7 @@ swf_tests! {
     (create_empty_movie_clip, "avm1/create_empty_movie_clip", 2),
     (empty_movieclip_can_attach_movies, "avm1/empty_movieclip_can_attach_movies", 1),
     (duplicate_movie_clip, "avm1/duplicate_movie_clip", 1),
+    (duplicate_movie_clip_drawing, "avm1/duplicate_movie_clip_drawing", 1),
     (mouse_listeners, "avm1/mouse_listeners", 1),
     (do_init_action, "avm1/do_init_action", 3),
     (execution_order1, "avm1/execution_order1", 3),
@@ -126,6 +129,7 @@ swf_tests! {
     (export_assets, "avm1/export_assets", 1),
     (single_frame, "avm1/single_frame", 2),
     (looping, "avm1/looping", 6),
+    (math_min_max, "avm1/math_min_max", 1),
     (matrix, "avm1/matrix", 1),
     (point, "avm1/point", 1),
     (rectangle, "avm1/rectangle", 1),
@@ -149,6 +153,7 @@ swf_tests! {
     (greaterthan_swf8, "avm1/greaterthan_swf8", 1),
     (strictly_equals, "avm1/strictly_equals", 1),
     (tell_target, "avm1/tell_target", 3),
+    (tell_target_invalid, "avm1/tell_target_invalid", 1),
     (typeofs, "avm1/typeof", 1),
     (typeof_globals, "avm1/typeof_globals", 1),
     (closure_scope, "avm1/closure_scope", 1),
@@ -339,6 +344,7 @@ swf_tests! {
     (glow_filter, "avm1/glow_filter", 1),
     (date_constructor, "avm1/date/constructor", 1),
     (removed_clip_halts_script, "avm1/removed_clip_halts_script", 13),
+    (removed_base_clip_tell_target, "avm1/removed_base_clip_tell_target", 2),
     (target_clip_removed, "avm1/target_clip_removed", 1),
     (date_utc, "avm1/date/UTC", 1),
     (date_set_date, "avm1/date/setDate", 1),
@@ -438,6 +444,7 @@ swf_tests! {
     (as3_greaterthan, "avm2/greaterthan", 1),
     (as3_lessequals, "avm2/lessequals", 1),
     (as3_lessthan, "avm2/lessthan", 1),
+    (as3_issue_5292, "avm2/issue_5292", 1),
     (nested_textfields_in_buttons, "avm1/nested_textfields_in_buttons", 1),
     (conflicting_instance_names, "avm1/conflicting_instance_names", 6),
     (button_children, "avm1/button_children", 1),
@@ -468,10 +475,14 @@ swf_tests! {
     (as3_urshift, "avm2/urshift", 1),
     (as3_in, "avm2/in", 1),
     (as3_bytearray, "avm2/bytearray", 1),
+    (as3_date, "avm2/date", 1),
+    (as3_date_parse, "avm2/date_parse", 1),
     (as3_generate_random_bytes, "avm2/generate_random_bytes", 1),
     (as3_get_definition_by_name, "avm2/get_definition_by_name", 1),
     (as3_get_qualified_class_name, "avm2/get_qualified_class_name", 1),
     (as3_get_qualified_super_class_name, "avm2/get_qualified_super_class_name", 1),
+    (as3_bytearray_readobject_amf3, "avm2/bytearray_readobject_amf3", 1),
+    (as3_bytearray_readobject_amf0, "avm2/bytearray_readobject_amf0", 1),
     (as3_array_constr, "avm2/array_constr", 1),
     (as3_array_access, "avm2/array_access", 1),
     (as3_array_storage, "avm2/array_storage", 1),
@@ -501,9 +512,13 @@ swf_tests! {
     (as3_array_sorton, "avm2/array_sorton", 1),
     (as3_array_hasownproperty, "avm2/array_hasownproperty", 1),
     (as3_array_length, "avm2/array_length", 1),
+    (as3_array_enumeration, "avm2/array_enumeration", 1),
+    (as3_array_enumeration_elements, "avm2/array_enumeration_elements", 1),
     (stage_property_representation, "avm1/stage_property_representation", 1),
+    (stage_display_state, "avm1/stage_display_state", 1),
     (as3_timeline_scripts, "avm2/timeline_scripts", 3),
     (as3_movieclip_properties, "avm2/movieclip_properties", 4),
+    (as3_movieclip_goto_during_frame_script, "avm2/movieclip_goto_during_frame_script", 1),
     (as3_movieclip_gotoandplay, "avm2/movieclip_gotoandplay", 5),
     (as3_movieclip_gotoandstop, "avm2/movieclip_gotoandstop", 5),
     (as3_movieclip_stop, "avm2/movieclip_stop", 5),
@@ -520,6 +535,7 @@ swf_tests! {
     (as3_movieclip_constr, "avm2/movieclip_constr", 1),
     (as3_lazyinit, "avm2/lazyinit", 1),
     (as3_trace, "avm2/trace", 1),
+    (as3_default_values, "avm2/default_values", 1),
     (as3_displayobjectcontainer_getchildat, "avm2/displayobjectcontainer_getchildat", 1),
     (as3_displayobjectcontainer_getchildbyname, "avm2/displayobjectcontainer_getchildbyname", 1),
     (as3_displayobjectcontainer_addchild, "avm2/displayobjectcontainer_addchild", 1),
@@ -606,12 +622,14 @@ swf_tests! {
     (as3_documentclass, "avm2/documentclass", 1),
     (timer_run_actions, "avm1/timer_run_actions", 1),
     (as3_op_coerce, "avm2/op_coerce", 1),
+    (as3_op_coerce_x, "avm2/op_coerce_x", 1),
     (as3_domain_memory, "avm2/domain_memory", 1),
     (as3_movieclip_symbol_constr, "avm2/movieclip_symbol_constr", 1),
     (as3_stage_access, "avm2/stage_access", 1),
     (as3_stage_displayobject_properties, "avm2/stage_displayobject_properties", 1),
     (as3_stage_loaderinfo_properties, "avm2/stage_loaderinfo_properties", 2),
     (as3_stage_properties, "avm2/stage_properties", 1),
+    (as3_stage_display_state, "avm2/stage_display_state", 1),
     (as3_closures, "avm2/closures", 1),
     (as3_simplebutton_structure, "avm2/simplebutton_structure", 2),
     (as3_simplebutton_childevents, "avm2/simplebutton_childevents", 2),
@@ -656,7 +674,9 @@ swf_tests! {
     (as3_vector_tostring, "avm2/vector_tostring", 1),
     (as3_vector_constr, "avm2/vector_constr", 1),
     (as3_vector_legacy, "avm2/vector_legacy", 1),
+    (as3_vector_enumeration, "avm2/vector_enumeration", 1),
     (as3_sound_valueof, "avm2/sound_valueof", 1),
+    (as3_with, "avm2/with", 1),
     (as3_sound_embeddedprops, "avm2/sound_embeddedprops", 1),
     (as3_soundtransform, "avm2/soundtransform", 1),
     (as3_movieclip_soundtransform, "avm2/movieclip_soundtransform", 49),
@@ -669,6 +689,47 @@ swf_tests! {
     (as3_soundmixer_stopall, "avm2/soundmixer_stopall", 4),
     #[ignore] (as3_soundchannel_soundcomplete, "avm2/soundchannel_soundcomplete", 25),
     (as3_soundmixer_buffertime, "avm2/soundmixer_buffertime", 1),
+    (as3_bitmap_timeline, "avm2/bitmap_timeline", 1),
+    #[ignore] (as3_bitmapdata_embedded, "avm2/bitmapdata_embedded", 1),
+    (as3_bitmapdata_constr, "avm2/bitmapdata_constr", 1),
+    (as3_bitmap_constr, "avm2/bitmap_constr", 1),
+    #[ignore] (as3_bitmap_properties, "avm2/bitmap_properties", 1),
+    (as3_string_concat_fromcharcode, "avm2/string_concat_fromcharcode", 1),
+    (as3_string_indexof_lastindexof, "avm2/string_indexof_lastindexof", 1),
+    (as3_string_match, "avm2/string_match", 1),
+    (as3_string_slice_substr_substring, "avm2/string_slice_substr_substring", 1),
+    (as3_class_is, "avm2/class_is", 1),
+    (as3_dictionary_access, "avm2/dictionary_access", 1),
+    (as3_dictionary_delete, "avm2/dictionary_delete", 1),
+    (as3_dictionary_hasownproperty, "avm2/dictionary_hasownproperty", 1),
+    (as3_dictionary_namespaces, "avm2/dictionary_namespaces", 1),
+    (as3_dictionary_in, "avm2/dictionary_in", 1),
+    (as3_dictionary_foreach, "avm2/dictionary_foreach", 1),
+    (as3_qname_constr, "avm2/qname_constr", 1),
+    (as3_qname_constr_namespace, "avm2/qname_constr_namespace", 1),
+    (as3_qname_tostring, "avm2/qname_tostring", 1),
+    (as3_qname_valueof, "avm2/qname_valueof", 1),
+    (as3_getouterscope, "avm2/getouterscope", 1),
+    (as3_hasownproperty_namespaces, "avm2/hasownproperty_namespaces", 1),
+    (as3_propertyisenumerable_namespaces, "avm2/propertyisenumerable_namespaces", 1),
+    (as3_interface_namespaces, "avm2/interface_namespaces", 1),
+    (as3_interactiveobject_enabled, "avm2/interactiveobject_enabled", 1),
+    (as3_stage_mouseenabled, "avm2/stage_mouseenabled", 1),
+    (as3_simplebutton_mouseenabled, "avm2/simplebutton_mouseenabled", 1),
+    (as3_edittext_mouseenabled, "avm2/edittext_mouseenabled", 1),
+    (as3_proxy_getproperty, "avm2/proxy_getproperty", 1),
+    (as3_proxy_setproperty, "avm2/proxy_setproperty", 1),
+    (as3_proxy_deleteproperty, "avm2/proxy_deleteproperty", 1),
+    (as3_proxy_callproperty, "avm2/proxy_callproperty", 1),
+    (as3_proxy_hasproperty, "avm2/proxy_hasproperty", 1),
+    (as3_proxy_enumeration, "avm2/proxy_enumeration", 1),
+    (as3_nonconflicting_declarations, "avm2/nonconflicting_declarations", 1),
+    (as3_eventdispatcher_tostring, "avm2/eventdispatcher_tostring", 1),
+    (as3_boolean_constr, "avm2/boolean_constr", 1),
+    (as3_int_constr, "avm2/int_constr", 1),
+    (as3_uint_constr, "avm2/uint_constr", 1),
+    (as3_number_constr, "avm2/number_constr", 1),
+    (as3_function_type, "avm2/function_type", 1),
 }
 
 // TODO: These tests have some inaccuracies currently, so we use approx_eq to test that numeric values are close enough.
@@ -989,18 +1050,20 @@ fn run_swf(
     let trace_output = Rc::new(RefCell::new(Vec::new()));
 
     let mut platform_id = None;
-    let backend_bit = wgpu::BackendBit::PRIMARY;
+    let backend_bit = wgpu::Backends::PRIMARY;
 
     let (render_backend, video_backend): (Box<dyn RenderBackend>, Box<dyn VideoBackend>) =
         if check_img {
             let instance = wgpu::Instance::new(backend_bit);
 
-            let descriptors = WgpuRenderBackend::<TextureTarget>::build_descriptors(
-                backend_bit,
-                instance,
-                None,
-                Default::default(),
-                None,
+            let descriptors = futures::executor::block_on(
+                WgpuRenderBackend::<TextureTarget>::build_descriptors(
+                    backend_bit,
+                    instance,
+                    None,
+                    Default::default(),
+                    None,
+                ),
             )?;
 
             platform_id = Some(get_img_platform_suffix(&descriptors.info));

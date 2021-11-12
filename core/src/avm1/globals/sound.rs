@@ -113,16 +113,15 @@ fn duration<'gc>(
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if activation.swf_version() >= 6 {
-        if let Some(sound_object) = this.as_sound_object() {
-            return Ok(sound_object
-                .duration()
-                .map_or(Value::Undefined, |d| d.into()));
-        } else {
-            avm_warn!(activation, "Sound.duration: this is not a Sound");
-        }
+    // TODO: Sound.duration was only added in SWFv6, but it is not version gated.
+    // Return undefined for player <6 if we ever add player version emulation.
+    if let Some(sound_object) = this.as_sound_object() {
+        return Ok(sound_object
+            .duration()
+            .map_or(Value::Undefined, |d| d.into()));
+    } else {
+        avm_warn!(activation, "Sound.duration: this is not a Sound");
     }
-
     Ok(Value::Undefined)
 }
 
@@ -168,7 +167,7 @@ fn get_pan<'gc>(
     let transform = this.as_sound_object().map(|sound| {
         sound
             .owner()
-            .map(|owner| owner.sound_transform().clone())
+            .map(|owner| owner.base().sound_transform().clone())
             .unwrap_or_else(|| activation.context.global_sound_transform().clone())
     });
 
@@ -187,7 +186,7 @@ fn get_transform<'gc>(
     let transform = this.as_sound_object().map(|sound| {
         sound
             .owner()
-            .map(|owner| owner.sound_transform().clone())
+            .map(|owner| owner.base().sound_transform().clone())
             .unwrap_or_else(|| activation.context.global_sound_transform().clone())
     });
 
@@ -215,7 +214,7 @@ fn get_volume<'gc>(
     let transform = this.as_sound_object().map(|sound| {
         sound
             .owner()
-            .map(|owner| owner.sound_transform().clone())
+            .map(|owner| owner.base().sound_transform().clone())
             .unwrap_or_else(|| activation.context.global_sound_transform().clone())
     });
 
@@ -253,18 +252,14 @@ fn position<'gc>(
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if activation.swf_version() >= 6 {
-        if let Some(sound_object) = this.as_sound_object() {
-            // TODO: The position is "sticky"; even if the sound is no longer playing, it should return
-            // the previous valid position.
-            // Needs some audio backend work for this.
-            if sound_object.sound().is_some() {
-                avm_warn!(activation, "Sound.position: Unimplemented");
-                return Ok(sound_object.position().into());
-            }
-        } else {
-            avm_warn!(activation, "Sound.position: this is not a Sound");
+    // TODO: Sound.position was only added in SWFv6, but it is not version gated.
+    // Return undefined for player <6 if we ever add player version emulation.
+    if let Some(sound_object) = this.as_sound_object() {
+        if sound_object.sound().is_some() {
+            return Ok(sound_object.position().into());
         }
+    } else {
+        avm_warn!(activation, "Sound.position: this is not a Sound");
     }
     Ok(Value::Undefined)
 }
@@ -279,7 +274,7 @@ fn set_pan<'gc>(
 
     if let Some(sound) = this.as_sound_object() {
         if let Some(owner) = sound.owner() {
-            let mut transform = owner.sound_transform().clone();
+            let mut transform = owner.base().sound_transform().clone();
             transform.set_pan(pan);
             owner.set_sound_transform(&mut activation.context, transform);
         } else {
@@ -304,22 +299,22 @@ fn set_transform<'gc>(
 
     if let Some(sound) = this.as_sound_object() {
         let mut transform = if let Some(owner) = sound.owner() {
-            owner.sound_transform().clone()
+            owner.base().sound_transform().clone()
         } else {
             activation.context.global_sound_transform().clone()
         };
 
-        if obj.has_own_property(activation, "ll") {
+        if obj.has_own_property(activation, "ll".into()) {
             transform.left_to_left = obj.get("ll", activation)?.coerce_to_i32(activation)?;
         }
         // Surprisngly `lr` means "right-to-left" and `rl` means "left-to-right".
-        if obj.has_own_property(activation, "rl") {
+        if obj.has_own_property(activation, "rl".into()) {
             transform.left_to_right = obj.get("rl", activation)?.coerce_to_i32(activation)?;
         }
-        if obj.has_own_property(activation, "lr") {
+        if obj.has_own_property(activation, "lr".into()) {
             transform.right_to_left = obj.get("lr", activation)?.coerce_to_i32(activation)?;
         }
-        if obj.has_own_property(activation, "rr") {
+        if obj.has_own_property(activation, "rr".into()) {
             transform.right_to_right = obj.get("rr", activation)?.coerce_to_i32(activation)?;
         }
 
@@ -344,7 +339,7 @@ fn set_volume<'gc>(
         if let Some(owner) = sound.owner() {
             let transform = SoundTransform {
                 volume,
-                ..*owner.sound_transform()
+                ..*owner.base().sound_transform()
             };
             owner.set_sound_transform(&mut activation.context, transform);
         } else {

@@ -24,14 +24,14 @@ jobs:
 
   build:
     needs: changes
-    if: ${{ needs.changes.outputs.src == 'true' }}
+    if: needs.changes.outputs.src == 'true'
     name: Test Node.js ${{ matrix.node_version }} / Rust ${{ matrix.rust_version }} / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.rust_version == 'nightly' }}
     strategy:
       fail-fast: false
       matrix:
-        node_version: ['12', '14']
+        node_version: ["14", "16"]
         # We most likely don't care about Rust versions here, we'll catch those issues in test_rust.yml.
         rust_version: [stable]
         # MIKE: Turning off macOS-latest for now (flaky tests on CI).
@@ -55,7 +55,7 @@ jobs:
       # wasm-bindgen-cli version must match wasm-bindgen crate version.
       # Be sure to update in release_nightly.yml, web/Cargo.toml and web/README.md.
       - name: Install wasm-bindgen
-        run: cargo install wasm-bindgen-cli --version 0.2.76
+        run: cargo install wasm-bindgen-cli --version 0.2.78
 
       - name: Setup conda
         uses: conda-incubator/setup-miniconda@v2
@@ -82,3 +82,20 @@ jobs:
       - name: Run tests
         working-directory: web
         run: npm test
+
+  check-required:
+    needs: changes
+    if: needs.changes.outputs.src == 'false'
+    name: Test Node.js ${{ matrix.node_version }} / Rust ${{ matrix.rust_version }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        node_version: ["14", "16"]
+        # We most likely don't care about Rust versions here, we'll catch those issues in test_rust.yml.
+        rust_version: [stable]
+        # MIKE: Turning off macOS-latest for now (flaky tests on CI).
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: No-op
+        run: echo noop

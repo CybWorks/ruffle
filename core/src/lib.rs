@@ -11,6 +11,7 @@
 
 #[macro_use]
 mod display_object;
+pub use display_object::StageDisplayState;
 
 #[macro_use]
 extern crate smallvec;
@@ -43,7 +44,7 @@ pub mod matrix;
 mod player;
 mod prelude;
 pub mod shape_utils;
-pub mod string_utils;
+pub mod string;
 pub mod tag_utils;
 mod transform;
 mod types;
