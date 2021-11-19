@@ -573,6 +573,15 @@ impl FormatSpans {
         let mut buf = Vec::new();
         loop {
             match reader.read_event(&mut buf) {
+                Ok(Event::Empty(ref e)) => match &e.name().to_ascii_lowercase()[..] {
+                    b"br" | b"sbr" => {
+                        text.push('\n');
+                        if let Some(span) = spans.last_mut() {
+                            span.span_length += 1;
+                        }
+                    }
+                    _ => {}
+                },
                 Ok(Event::Start(ref e)) => {
                     let attribute = move |name| {
                         e.attributes().with_checks(false).find_map(|attribute| {
@@ -659,7 +668,7 @@ impl FormatSpans {
                         b"li" => {
                             format.bullet = Some(true);
                         }
-                        b"texformatormat" => {
+                        b"textformat" => {
                             //TODO: Spec says these are all in twips. That doesn't seem to
                             //match Flash 8.
                             if let Some(left_margin) = attribute(b"leftmargin") {
