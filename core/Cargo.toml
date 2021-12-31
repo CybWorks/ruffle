@@ -20,23 +20,23 @@ png = { version = "0.17.2" }
 ruffle_macros = { path = "macros" }
 swf = { path = "../swf" }
 bitflags = "1.3.2"
-smallvec = "1.7.0"
+smallvec = { version = "1.7.0", features = ["union"] }
 num-traits = "0.2"
 num-derive = "0.3"
 quick-xml = { git = "https://github.com/ruffle-rs/quick-xml", rev = "8496365ec1412eb5ba5de350937b6bce352fa0ba" }
 downcast-rs = "1.2.0"
 url = "2.2.2"
-weak-table = "0.3.0"
+weak-table = "0.3.2"
 percent-encoding = "2.1.0"
 thiserror = "1.0"
 chrono = "0.4"
 instant = "0.1"
-encoding_rs = "0.8.29"
+encoding_rs = "0.8.30"
 rand = { version = "0.8.4", features = ["std", "small_rng"], default-features = false }
-serde = { version = "1.0.130", features = ["derive"], optional = true }
+serde = { version = "1.0.132", features = ["derive"], optional = true }
 nellymoser-rs = { git = "https://github.com/ruffle-rs/nellymoser" }
-h263-rs = { git = "https://github.com/ruffle-rs/h263-rs", rev = "03dcd486e88381635647a7386105cb802921b69c", optional = true }
-h263-rs-yuv = { git = "https://github.com/ruffle-rs/h263-rs", rev = "03dcd486e88381635647a7386105cb802921b69c", optional = true }
+h263-rs = { git = "https://github.com/ruffle-rs/h263-rs", rev = "b810e8c3fdb8ea5df0b7808891076e774bee40a9", optional = true }
+h263-rs-yuv = { git = "https://github.com/ruffle-rs/h263-rs", rev = "b810e8c3fdb8ea5df0b7808891076e774bee40a9", optional = true }
 regress = "0.4"
 flash-lso = { git = "https://github.com/ruffle-rs/rust-flash-lso", rev = "19fecd07b9888c4bdaa66771c468095783b52bed" }
 json = "0.12.4"
@@ -48,7 +48,7 @@ nihav_codec_support = { git = "https://github.com/ruffle-rs/nihav-vp6", rev = "9
 nihav_duck = { git = "https://github.com/ruffle-rs/nihav-vp6", rev = "9416fcc9fc8aab8f4681aa9093b42922214abbd3", optional = true }
 
 [dependencies.jpeg-decoder]
-version = "0.1.22"
+version = "0.2.1"
 default-features = false # can't use rayon on web
 
 [dev-dependencies]
@@ -58,6 +58,7 @@ approx = "0.5.0"
 default = ["minimp3", "serde"]
 h263 = ["h263-rs", "h263-rs-yuv"]
 vp6 = ["nihav_core", "nihav_codec_support", "nihav_duck", "h263-rs-yuv"]
+screenvideo = []
 lzma = ["lzma-rs", "swf/lzma"]
 wasm-bindgen = [ "instant/wasm-bindgen" ]
 avm_debug = []

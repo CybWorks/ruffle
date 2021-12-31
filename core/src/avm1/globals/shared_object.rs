@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::function::{Executable, FunctionObject};
@@ -80,7 +82,7 @@ fn serialize_value<'gc>(
                 Some(AmfValue::ECMAArray(vec![], values, length as u32))
             } else if let Some(xml_node) = o.as_xml_node() {
                 xml_node
-                    .into_string(&mut |_| true)
+                    .into_string(&|_| true)
                     .map(|xml_string| AmfValue::XML(xml_string, true))
                     .ok()
             } else if let Some(date) = o.as_date_object() {
@@ -105,7 +107,7 @@ fn recursive_serialize<'gc>(
     for element_name in obj.get_keys(activation).into_iter().rev() {
         if let Ok(elem) = obj.get(element_name, activation) {
             if let Some(v) = serialize_value(activation, elem) {
-                elements.push(Element::new(element_name.as_str(), v));
+                elements.push(Element::new(element_name.to_utf8_lossy(), v));
             }
         }
     }
@@ -117,7 +119,7 @@ fn deserialize_value<'gc>(activation: &mut Activation<'_, 'gc, '_>, val: &AmfVal
         AmfValue::Null => Value::Null,
         AmfValue::Undefined => Value::Undefined,
         AmfValue::Number(f) => (*f).into(),
-        AmfValue::String(s) => Value::String(AvmString::new(activation.context.gc_context, s)),
+        AmfValue::String(s) => Value::String(AvmString::new_utf8(activation.context.gc_context, s)),
         AmfValue::Bool(b) => (*b).into(),
         AmfValue::ECMAArray(_, associative, len) => {
             let array_constructor = activation.context.avm1.prototypes.array_constructor;
@@ -132,7 +134,7 @@ fn deserialize_value<'gc>(activation: &mut Activation<'_, 'gc, '_>, val: &AmfVal
                     } else {
                         obj.define_value(
                             activation.context.gc_context,
-                            AvmString::new(activation.context.gc_context, entry.name.clone()),
+                            AvmString::new_utf8(activation.context.gc_context, &entry.name),
                             value,
                             Attribute::empty(),
                         );
@@ -152,7 +154,7 @@ fn deserialize_value<'gc>(activation: &mut Activation<'_, 'gc, '_>, val: &AmfVal
             );
             for entry in elements {
                 let value = deserialize_value(activation, entry.value());
-                let name = AvmString::new(activation.context.gc_context, entry.name.clone());
+                let name = AvmString::new_utf8(activation.context.gc_context, &entry.name);
                 obj.define_value(
                     activation.context.gc_context,
                     name,
@@ -176,7 +178,7 @@ fn deserialize_value<'gc>(activation: &mut Activation<'_, 'gc, '_>, val: &AmfVal
 
             if let Ok(Value::Object(obj)) = xml_proto.construct(
                 activation,
-                &[Value::String(AvmString::new(
+                &[Value::String(AvmString::new_utf8(
                     activation.context.gc_context,
                     content,
                 ))],
@@ -204,7 +206,7 @@ fn deserialize_lso<'gc>(
     for child in &lso.body {
         obj.define_value(
             activation.context.gc_context,
-            AvmString::new(activation.context.gc_context, child.name.clone()),
+            AvmString::new_utf8(activation.context.gc_context, &child.name),
             deserialize_value(activation, child.value()),
             Attribute::empty(),
         );
@@ -215,17 +217,20 @@ fn deserialize_lso<'gc>(
 
 /// Deserialize a Json shared object element into a Value
 fn recursive_deserialize_json<'gc>(
-    json_value: JsonValue,
+    json_value: &JsonValue,
     activation: &mut Activation<'_, 'gc, '_>,
 ) -> Value<'gc> {
     match json_value {
         JsonValue::Null => Value::Null,
-        JsonValue::Short(s) => {
-            Value::String(AvmString::new(activation.context.gc_context, s.to_string()))
+        JsonValue::Short(s) => Value::String(AvmString::new_utf8(
+            activation.context.gc_context,
+            s.to_string(),
+        )),
+        JsonValue::String(s) => {
+            Value::String(AvmString::new_utf8(activation.context.gc_context, s))
         }
-        JsonValue::String(s) => Value::String(AvmString::new(activation.context.gc_context, s)),
-        JsonValue::Number(f) => Value::Number(f.into()),
-        JsonValue::Boolean(b) => b.into(),
+        JsonValue::Number(f) => Value::Number((*f).into()),
+        JsonValue::Boolean(b) => (*b).into(),
         JsonValue::Object(o) => {
             if o.get("__proto__").and_then(JsonValue::as_str) == Some("Array") {
                 deserialize_array_json(o, activation)
@@ -239,7 +244,7 @@ fn recursive_deserialize_json<'gc>(
 
 /// Deserialize an Object and any children from a JSON object
 fn deserialize_object_json<'gc>(
-    json_obj: json::object::Object,
+    json_obj: &json::object::Object,
     activation: &mut Activation<'_, 'gc, '_>,
 ) -> Value<'gc> {
     // Deserialize Object
@@ -247,13 +252,11 @@ fn deserialize_object_json<'gc>(
         activation.context.gc_context,
         Some(activation.context.avm1.prototypes.object),
     );
-    for entry in json_obj.iter() {
-        let value = recursive_deserialize_json(entry.1.clone(), activation);
-        let name = AvmString::new(activation.context.gc_context, entry.0);
+    for (name, value) in json_obj.iter() {
         obj.define_value(
             activation.context.gc_context,
-            name,
-            value,
+            AvmString::new_utf8(activation.context.gc_context, name),
+            recursive_deserialize_json(value, activation),
             Attribute::empty(),
         );
     }
@@ -262,7 +265,7 @@ fn deserialize_object_json<'gc>(
 
 /// Deserialize an Array and any children from a JSON object
 fn deserialize_array_json<'gc>(
-    mut json_obj: json::object::Object,
+    json_obj: &json::object::Object,
     activation: &mut Activation<'_, 'gc, '_>,
 ) -> Value<'gc> {
     let array_constructor = activation.context.avm1.prototypes.array_constructor;
@@ -271,19 +274,19 @@ fn deserialize_array_json<'gc>(
         .and_then(JsonValue::as_i32)
         .unwrap_or_default();
     if let Ok(Value::Object(obj)) = array_constructor.construct(activation, &[len.into()]) {
-        // Remove length and proto meta-properties.
-        json_obj.remove("length");
-        json_obj.remove("__proto__");
-
-        for entry in json_obj.iter() {
-            let value = recursive_deserialize_json(entry.1.clone(), activation);
-            if let Ok(i) = entry.0.parse::<i32>() {
+        for (name, value) in json_obj.iter() {
+            let value = recursive_deserialize_json(value, activation);
+            if let Ok(i) = name.parse::<i32>() {
                 obj.set_element(activation, i, value).unwrap();
             } else {
-                let name = AvmString::new(activation.context.gc_context, entry.0);
+                // Ignore length and proto meta-properties
+                if name == "length" || name == "__proto__" {
+                    continue;
+                }
+
                 obj.define_value(
                     activation.context.gc_context,
-                    name,
+                    AvmString::new_utf8(activation.context.gc_context, name),
                     value,
                     Attribute::empty(),
                 );
@@ -301,11 +304,14 @@ pub fn get_local<'gc>(
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    // TODO: It appears that Flash does some kind of escaping here:
+    // the name "foo\uD800" correspond to a file named "fooE#FB#FB#D.sol".
+
     let name = args
         .get(0)
         .unwrap_or(&Value::Undefined)
-        .coerce_to_string(activation)?
-        .to_string();
+        .coerce_to_string(activation)?;
+    let name = name.to_utf8_lossy();
 
     const INVALID_CHARS: &str = "~%&\\;:\"',<>?# ";
     if name.contains(|c| INVALID_CHARS.contains(c)) {
@@ -371,11 +377,26 @@ pub fn get_local<'gc>(
         }
 
         // Remove leading/trailing slashes.
-        let mut local_path = local_path.as_str().strip_prefix('/').unwrap_or(local_path);
-        local_path = local_path.strip_suffix('/').unwrap_or(local_path);
+        let mut local_path = local_path.to_utf8_lossy();
+        if local_path.ends_with('/') {
+            match &mut local_path {
+                Cow::Owned(p) => {
+                    p.pop();
+                }
+                Cow::Borrowed(p) => *p = &p[..p.len() - 1],
+            }
+        }
+        if local_path.starts_with('/') {
+            match &mut local_path {
+                Cow::Owned(p) => {
+                    p.remove(0);
+                }
+                Cow::Borrowed(p) => *p = &p[1..],
+            }
+        }
 
         // Verify that local_path is a prefix of the SWF path.
-        if movie_path.starts_with(&local_path)
+        if movie_path.starts_with(local_path.as_ref())
             && (local_path.is_empty()
                 || movie_path.len() == local_path.len()
                 || movie_path[local_path.len()..].starts_with('/'))
@@ -386,7 +407,7 @@ pub fn get_local<'gc>(
             return Ok(Value::Null);
         }
     } else {
-        movie_path
+        Cow::Borrowed(movie_path)
     };
 
     // Final SO path: foo.com/folder/game.swf/SOName
@@ -428,7 +449,7 @@ pub fn get_local<'gc>(
             // Attempt to load legacy Json
             if let Ok(saved_string) = String::from_utf8(saved) {
                 if let Ok(json_data) = json::parse(&saved_string) {
-                    data = recursive_deserialize_json(json_data, activation);
+                    data = recursive_deserialize_json(&json_data, activation);
                 }
             }
         }

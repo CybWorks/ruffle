@@ -40,7 +40,7 @@ pub fn instance_init<'gc>(
             }
 
             for (i, arg) in args.iter().enumerate() {
-                array.set(i, arg.clone());
+                array.set(i, *arg);
             }
         }
     }
@@ -114,7 +114,7 @@ pub fn concat<'gc>(
         if let Some(other_array) = arg.coerce_to_object(activation)?.as_array_storage() {
             base_array.append(&other_array);
         } else {
-            base_array.push(arg.clone());
+            base_array.push(*arg);
         }
     }
 
@@ -132,10 +132,9 @@ pub fn resolve_array_hole<'gc>(
         this.proto()
             .map(|p| {
                 p.get_property(
-                    p,
                     &QName::new(
                         Namespace::public(),
-                        AvmString::new(activation.context.gc_context, i.to_string()),
+                        AvmString::new_utf8(activation.context.gc_context, i.to_string()),
                     )
                     .into(),
                     activation,
@@ -170,17 +169,13 @@ where
                 if matches!(item, Value::Undefined) || matches!(item, Value::Null) {
                     accum.push("".into());
                 } else {
-                    accum.push(
-                        conv(item, activation)?
-                            .coerce_to_string(activation)?
-                            .to_string(),
-                    );
+                    accum.push(conv(item, activation)?.coerce_to_string(activation)?);
                 }
             }
 
             return Ok(AvmString::new(
                 activation.context.gc_context,
-                accum.join(&string_separator),
+                crate::string::join(&accum, &string_separator),
             )
             .into());
         }
@@ -275,7 +270,6 @@ impl<'gc> ArrayIter<'gc> {
     ) -> Result<Self, Error> {
         let length = array_object
             .get_property(
-                array_object,
                 &QName::new(Namespace::public(), "length").into(),
                 activation,
             )?
@@ -304,10 +298,9 @@ impl<'gc> ArrayIter<'gc> {
             Some(
                 self.array_object
                     .get_property(
-                        self.array_object,
                         &QName::new(
                             Namespace::public(),
-                            AvmString::new(activation.context.gc_context, i.to_string()),
+                            AvmString::new_utf8(activation.context.gc_context, i.to_string()),
                         )
                         .into(),
                         activation,
@@ -335,10 +328,9 @@ impl<'gc> ArrayIter<'gc> {
             Some(
                 self.array_object
                     .get_property(
-                        self.array_object,
                         &QName::new(
                             Namespace::public(),
-                            AvmString::new(activation.context.gc_context, i.to_string()),
+                            AvmString::new_utf8(activation.context.gc_context, i.to_string()),
                         )
                         .into(),
                         activation,
@@ -439,7 +431,7 @@ pub fn filter<'gc>(
         while let Some(r) = iter.next(activation) {
             let (i, item) = r?;
             let is_allowed = callback
-                .call(receiver, &[item.clone(), i.into(), this.into()], activation)?
+                .call(receiver, &[item, i.into(), this.into()], activation)?
                 .coerce_to_boolean();
 
             if is_allowed {
@@ -611,7 +603,7 @@ pub fn push<'gc>(
     if let Some(this) = this {
         if let Some(mut array) = this.as_array_storage_mut(activation.context.gc_context) {
             for arg in args {
-                array.push(arg.clone())
+                array.push(*arg)
             }
         }
     }
@@ -680,7 +672,7 @@ pub fn unshift<'gc>(
     if let Some(this) = this {
         if let Some(mut array) = this.as_array_storage_mut(activation.context.gc_context) {
             for arg in args.iter().rev() {
-                array.unshift(arg.clone())
+                array.unshift(*arg)
             }
         }
     }
@@ -777,7 +769,7 @@ pub fn splice<'gc>(
 
                 let mut resolved = Vec::with_capacity(contents.len());
                 for (i, v) in contents.iter().enumerate() {
-                    resolved.push(resolve_array_hole(activation, this, i, v.clone())?);
+                    resolved.push(resolve_array_hole(activation, this, i, *v)?);
                 }
 
                 let removed = resolved
@@ -856,8 +848,8 @@ where
     let mut error_signal = Ok(());
 
     values.sort_unstable_by(|(_a_index, a), (_b_index, b)| {
-        let unresolved_a = a.clone();
-        let unresolved_b = b.clone();
+        let unresolved_a = *a;
+        let unresolved_b = *b;
 
         if matches!(unresolved_a, Value::Undefined) && matches!(unresolved_b, Value::Undefined) {
             unique_sort_satisfied = false;
@@ -868,7 +860,7 @@ where
             return Ordering::Less;
         }
 
-        match sort_func(activation, a.clone(), b.clone()) {
+        match sort_func(activation, *a, *b) {
             Ok(Ordering::Equal) => {
                 unique_sort_satisfied = false;
                 Ordering::Equal
@@ -903,10 +895,10 @@ pub fn compare_string_case_insensitive<'gc>(
     a: Value<'gc>,
     b: Value<'gc>,
 ) -> Result<Ordering, Error> {
-    let string_a = a.coerce_to_string(activation)?.to_lowercase();
-    let string_b = b.coerce_to_string(activation)?.to_lowercase();
+    let string_a = a.coerce_to_string(activation)?;
+    let string_b = b.coerce_to_string(activation)?;
 
-    Ok(string_a.cmp(&string_b))
+    Ok(string_a.cmp_ignore_case(&string_b))
 }
 
 pub fn compare_numeric<'gc>(
@@ -952,7 +944,7 @@ fn sort_postprocess<'gc>(
                         if let Some(old_value) = old_array.get(*src) {
                             Some(old_value)
                         } else if !matches!(v, Value::Undefined) {
-                            Some(v.clone())
+                            Some(*v)
                         } else {
                             None
                         }
@@ -991,12 +983,7 @@ fn extract_array_values<'gc>(
 
     let mut unholey_vec = Vec::with_capacity(holey_vec.length());
     for (i, v) in holey_vec.iter().enumerate() {
-        unholey_vec.push(resolve_array_hole(
-            activation,
-            object.unwrap(),
-            i,
-            v.clone(),
-        )?);
+        unholey_vec.push(resolve_array_hole(activation, object.unwrap(), i, v)?);
     }
 
     Ok(Some(unholey_vec))
@@ -1040,7 +1027,7 @@ pub fn sort<'gc>(
             values
                 .iter()
                 .enumerate()
-                .map(|(i, v)| (i, v.clone()))
+                .map(|(i, v)| (i, *v))
                 .collect::<Vec<(usize, Value<'gc>)>>()
         } else {
             return Ok(0.into());
@@ -1098,7 +1085,7 @@ fn extract_maybe_array_values<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     value: Value<'gc>,
 ) -> Result<Vec<Value<'gc>>, Error> {
-    Ok(extract_array_values(activation, value.clone())?.unwrap_or_else(|| vec![value]))
+    Ok(extract_array_values(activation, value)?.unwrap_or_else(|| vec![value]))
 }
 
 /// Given a value, extract its array values and coerce them to strings.
@@ -1161,7 +1148,7 @@ pub fn sort_on<'gc>(
                 values
                     .iter()
                     .enumerate()
-                    .map(|(i, v)| (i, v.clone()))
+                    .map(|(i, v)| (i, *v))
                     .collect::<Vec<(usize, Value<'gc>)>>()
             } else {
                 return Ok(0.into());
@@ -1182,14 +1169,12 @@ pub fn sort_on<'gc>(
                     for (field_name, options) in field_names.iter().zip(options.iter()) {
                         let a_object = a.coerce_to_object(activation)?;
                         let a_field = a_object.get_property(
-                            a_object,
                             &QName::new(Namespace::public(), *field_name).into(),
                             activation,
                         )?;
 
                         let b_object = b.coerce_to_object(activation)?;
                         let b_field = b_object.get_property(
-                            b_object,
                             &QName::new(Namespace::public(), *field_name).into(),
                             activation,
                         )?;

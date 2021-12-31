@@ -12,7 +12,7 @@ use crate::backend::{
     navigator::NavigatorBackend,
     render::RenderBackend,
     storage::StorageBackend,
-    ui::UiBackend,
+    ui::{InputManager, UiBackend},
     video::VideoBackend,
 };
 use crate::context_menu::ContextMenuState;
@@ -83,7 +83,9 @@ pub struct UpdateContext<'a, 'gc, 'gc_context> {
     /// The locale backend, used for localisation and personalisation
     pub locale: &'a mut dyn LocaleBackend,
 
-    /// The logging backend, used for trace output capturing
+    /// The logging backend, used for trace output capturing.
+    ///
+    /// **DO NOT** use this field directly, use the `avm_trace` method instead.
     pub log: &'a mut dyn LogBackend,
 
     /// The video backend, used for video decoding
@@ -100,6 +102,9 @@ pub struct UpdateContext<'a, 'gc, 'gc_context> {
 
     /// If the mouse is down, the display object that the mouse is currently pressing.
     pub mouse_down_object: Option<DisplayObject<'gc>>,
+
+    /// The input manager, tracking keys state.
+    pub input: &'a InputManager,
 
     /// The location of the mouse when it was last over the player.
     pub mouse_position: &'a (Twips, Twips),
@@ -297,6 +302,7 @@ impl<'a, 'gc, 'gc_context> UpdateContext<'a, 'gc, 'gc_context> {
             stage: self.stage,
             mouse_over_object: self.mouse_over_object,
             mouse_down_object: self.mouse_down_object,
+            input: self.input,
             mouse_position: self.mouse_position,
             drag_object: self.drag_object,
             player: self.player.clone(),
@@ -322,6 +328,10 @@ impl<'a, 'gc, 'gc_context> UpdateContext<'a, 'gc, 'gc_context> {
     /// Return the VM that this object belongs to
     pub fn avm_type(&self) -> AvmType {
         self.swf.avm_type()
+    }
+
+    pub fn avm_trace(&self, message: &str) {
+        self.log.avm_trace(&message.replace('\r', "\n"));
     }
 }
 

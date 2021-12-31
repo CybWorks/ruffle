@@ -4,7 +4,7 @@ use crate::avm1::function::{Executable, FunctionObject};
 use crate::avm1::property::Attribute;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Object, ScriptObject, TObject, Value};
-use crate::string::AvmString;
+use crate::string::{AvmString, WStr, WString};
 use gc_arena::Collect;
 use gc_arena::MutationContext;
 use rand::Rng;
@@ -59,6 +59,7 @@ mod text_format;
 mod transform;
 mod video;
 mod xml;
+mod xml_node;
 
 const GLOBAL_DECLS: &[Declaration] = declare_properties! {
     "isFinite" => method(is_finite; DONT_ENUM);
@@ -128,86 +129,93 @@ pub fn parse_int<'gc>(
         .get(1)
         .map(|x| x.coerce_to_i32(activation))
         .transpose()?;
-    if let Some(radix) = radix {
-        if radix < 2 || radix > 36 {
-            return Ok(f64::NAN.into());
-        }
-    }
+    let radix = match radix {
+        Some(r @ 2..=36) => Some(r as u32),
+        Some(_) => return Ok(f64::NAN.into()),
+        None => None,
+    };
 
     let string = args
         .get(0)
         .unwrap_or(&Value::Undefined)
         .coerce_to_string(activation)?;
-    let mut string_s = string.as_bytes();
+    let string = string.as_wstr();
 
-    let mut ignore_sign = false;
-    let radix = match string_s {
-        // Emulate bug: unless "0x" is a valid sequence of digits in a given radix, these prefixes
-        // should result in NaN instead of 0. Otherwise, the minus sign should be ignored.
-        [b'+', b'0', b'x', ..]
-        | [b'+', b'0', b'X', ..]
-        | [b'-', b'0', b'x', ..]
-        | [b'-', b'0', b'X', ..] => {
-            if radix.unwrap_or(0) <= 33 {
-                return Ok(f64::NAN.into());
+    fn parse_sign(string: &WStr) -> Option<f64> {
+        string.get(0).and_then(|c| match u8::try_from(c) {
+            Ok(b'+') => Some(1.),
+            Ok(b'-') => Some(-1.),
+            _ => None,
+        })
+    }
+
+    let (radix, ignore_sign, string) = {
+        let has_sign = parse_sign(string).is_some();
+
+        let off = if has_sign { 1 } else { 0 };
+        let zero = string.get(off) == Some(b'0' as u16);
+        let hex = if zero {
+            let hex = string.get(off + 1);
+            hex == Some(b'x' as u16) || hex == Some(b'X' as u16)
+        } else {
+            false
+        };
+
+        if hex {
+            if has_sign {
+                // Emulate bug: unless "0x" is a valid sequence of digits in a given radix, the
+                // prefixes "+0x", "+0X", "-0x", "-0X" should result in NaN instead of 0.
+                // Otherwise, the minus sign should be ignored.
+                match radix {
+                    None | Some(0..=33) => return Ok(f64::NAN.into()),
+                    Some(radix) => (radix, true, string),
+                }
             } else {
-                ignore_sign = true;
-                radix.unwrap() // radix is present and is > 33
+                // Auto-detect hexadecimal prefix "0x" and strip it.
+                // Emulate bug: the prefix is stripped regardless of the radix.
+                //   parseInt('0x100', 10) == 100  // not 0
+                //   parseInt('0x100', 36) == 1296 // not 1540944
+                // Emulate bug: the prefix is expected before the sign or spaces.
+                //   parseInt("0x  -10") == -16 // not NaN
+                //   parseInt("  -0x10") == NaN // not -16
+                (radix.unwrap_or(16), false, &string[2..])
             }
-        }
-
-        // Auto-detect hexadecimal prefix and strip it.
-        // Emulate bug: the prefix is stripped regardless of the radix.
-        //   parseInt('0x100', 10) == 100  // not 0
-        //   parseInt('0x100', 36) == 1296 // not 1540944
-        // Emulate bug: the prefix is expected before the sign or spaces.
-        //   parseInt("0x  -10") == -16 // not NaN
-        //   parseInt("  -0x10") == NaN // not -16
-        [b'0', b'x', rest @ ..] | [b'0', b'X', rest @ ..] => {
-            string_s = rest;
-            radix.unwrap_or(16)
-        }
-
-        // ECMA-262 violation: auto-detect octal numbers.
-        // An auto-detected octal number cannot contain leading spaces or extra trailing characters.
-        [b'0', rest @ ..] | [b'+', b'0', rest @ ..] | [b'-', b'0', rest @ ..]
-            if radix.is_none() && rest.iter().all(|&x| b'0' <= x && x <= b'7') =>
+        } else if zero
+            && radix.is_none()
+            && string[1..]
+                .iter()
+                .all(|c| c >= b'0' as u16 && c <= b'7' as u16)
         {
-            8
+            // ECMA-262 violation: auto-detect octal numbers ("0", "+0" or "-0" prefixes).
+            // An auto-detected octal number cannot contain leading spaces or extra trailing characters.
+            (8, false, string)
+        } else {
+            (radix.unwrap_or(10), false, string)
         }
-
-        _ => radix.unwrap_or(10),
     };
 
     // Strip spaces.
-    while let Some(chr) = string_s.first() {
-        if !b"\t\n\r ".contains(chr) {
-            break;
-        }
-        string_s = &string_s[1..];
-    }
+    let string = string.trim_start_matches(b"\t\n\r ".as_ref());
 
-    let (sign, string_s) = match string_s {
-        [b'+', rest @ ..] => (1., rest),
-        [b'-', rest @ ..] => (-1., rest),
-        rest => (1., rest),
+    let (sign, string) = if let Some(sign) = parse_sign(string) {
+        let sign = if ignore_sign { 1. } else { sign };
+        (sign, &string[1..])
+    } else {
+        (1., string)
     };
-    let sign = if ignore_sign { 1. } else { sign };
 
     let mut empty = true;
     let mut result = 0.0f64;
-    for &chr in string_s {
-        let digit = match chr {
-            b'0'..=b'9' => chr as u32 - b'0' as u32,
-            b'a'..=b'z' => chr as u32 - b'a' as u32 + 10,
-            b'A'..=b'Z' => chr as u32 - b'A' as u32 + 10,
-            _ => break,
-        };
-        if digit as i32 >= radix {
+    for chr in string {
+        let digit = u8::try_from(chr)
+            .ok()
+            .and_then(|c| (c as char).to_digit(radix));
+        if let Some(digit) = digit {
+            result = result * radix as f64 + digit as f64;
+            empty = false;
+        } else {
             break;
         }
-        result = result * radix as f64 + digit as f64;
-        empty = false;
     }
 
     if empty {
@@ -241,18 +249,7 @@ pub fn get_nan<'gc>(
     }
 }
 
-pub fn parse_float<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
-    _this: Object<'gc>,
-    args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    let s = if let Some(val) = args.get(0) {
-        val.coerce_to_string(activation)?
-    } else {
-        return Ok(f64::NAN.into());
-    };
-
-    let s = s.trim_start().bytes();
+pub fn parse_float_impl(s: &WStr, allow_multiple_dots: bool) -> f64 {
     let mut out_str = String::with_capacity(s.len());
 
     // TODO: Implementing this in a very janky way for now,
@@ -262,7 +259,13 @@ pub fn parse_float<'gc>(
     let mut allow_dot = true;
     let mut allow_exp = true;
     let mut allow_sign = true;
-    for c in s {
+    for unit in s.iter() {
+        let c = match u8::try_from(unit) {
+            Ok(c) => c,
+            // Invalid char, `parseFloat` ignores all trailing garbage.
+            Err(_) => break,
+        };
+
         match c {
             b'0'..=b'9' => {
                 allow_sign = false;
@@ -274,13 +277,17 @@ pub fn parse_float<'gc>(
                 out_str.push(c.into());
             }
             b'.' if allow_exp => {
-                // Flash allows multiple . except after e
                 allow_sign = false;
                 if allow_dot {
                     allow_dot = false;
                     out_str.push(c.into());
                 } else {
-                    allow_exp = false;
+                    // AVM1 allows multiple . except after e
+                    if allow_multiple_dots {
+                        allow_exp = false;
+                    } else {
+                        break;
+                    }
                 }
             }
             b'e' | b'E' if allow_exp => {
@@ -295,8 +302,23 @@ pub fn parse_float<'gc>(
         };
     }
 
-    let n = out_str.parse::<f64>().unwrap_or(f64::NAN);
-    Ok(n.into())
+    out_str.parse::<f64>().unwrap_or(f64::NAN)
+}
+
+pub fn parse_float<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    _this: Object<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let s = if let Some(val) = args.get(0) {
+        val.coerce_to_string(activation)?
+    } else {
+        return Ok(f64::NAN.into());
+    };
+
+    let s = s.trim_start();
+
+    Ok(parse_float_impl(s, true).into())
 }
 
 pub fn set_interval<'gc>(
@@ -338,9 +360,9 @@ pub fn create_timer<'gc>(
         _ => return Ok(Value::Undefined),
     };
 
-    let interval = match args.get(i) {
-        Some(Value::Undefined) | None => return Ok(Value::Undefined),
-        Some(value) => value.coerce_to_i32(activation)?,
+    let interval = match args.get(i).unwrap_or(&Value::Undefined) {
+        Value::Undefined => return Ok(Value::Undefined),
+        value => value.coerce_to_i32(activation)?,
     };
     let params = if let Some(params) = args.get(i + 1..) {
         params.to_vec()
@@ -409,20 +431,26 @@ pub fn escape<'gc>(
         return Ok(Value::Undefined);
     };
 
-    let mut buffer = String::new();
-    for c in s.bytes() {
+    let mut buffer = Vec::<u8>::new();
+    // TODO: unpaired surrogates will be lost; this is incorrect:
+    // - `\u{DC00}` should become "%ED%B0%80";
+    // - `\u{DFFF}` should become "%ED%BF%BF".
+    for c in s.to_utf8_lossy().bytes() {
         match c {
             // ECMA-262 violation: @*_+-./ are not unescaped chars.
             b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' => {
-                buffer.push(c.into());
+                buffer.push(c);
             }
             // ECMA-262 violation: Avm1 does not support unicode escapes.
             _ => {
-                buffer.push_str(&format!("%{:02X}", c));
+                const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
+                buffer.push(b'%');
+                buffer.push(DIGITS[(c / 16) as usize]);
+                buffer.push(DIGITS[(c % 16) as usize]);
             }
         };
     }
-    Ok(AvmString::new(activation.context.gc_context, buffer).into())
+    Ok(AvmString::new(activation.context.gc_context, WString::from_buf(buffer)).into())
 }
 
 pub fn unescape<'gc>(
@@ -436,13 +464,16 @@ pub fn unescape<'gc>(
         return Ok(Value::Undefined);
     };
 
-    let s = s.bytes();
+    let s = s.to_utf8_lossy();
     let mut out_bytes = Vec::<u8>::with_capacity(s.len());
 
     let mut remain = 0;
     let mut hex_chars = Vec::<u8>::with_capacity(2);
 
-    for c in s {
+    // TODO: unpaired surrogates will be lost; this is incorrect:
+    // - "%ED%B0%80" should become `\u{DC00}`;
+    // - "%ED%BF%BF" should become `\u{DFFF}`.
+    for c in s.bytes() {
         match c {
             b'%' => {
                 remain = 2;
@@ -470,7 +501,7 @@ pub fn unescape<'gc>(
             }
         }
     }
-    Ok(AvmString::new(
+    Ok(AvmString::new_utf8(
         activation.context.gc_context,
         String::from_utf8_lossy(&out_bytes),
     )
@@ -570,9 +601,9 @@ pub fn create_globals<'gc>(
 
     let error_proto = error::create_proto(gc_context, object_proto, function_proto);
 
-    let xmlnode_proto = xml::create_xmlnode_proto(gc_context, object_proto, function_proto);
+    let xmlnode_proto = xml_node::create_proto(gc_context, object_proto, function_proto);
 
-    let xml_proto = xml::create_xml_proto(gc_context, xmlnode_proto, function_proto);
+    let xml_proto = xml::create_proto(gc_context, xmlnode_proto, function_proto);
 
     let string_proto = string::create_proto(gc_context, object_proto, function_proto);
     let number_proto = number::create_proto(gc_context, object_proto, function_proto);
@@ -683,15 +714,15 @@ pub fn create_globals<'gc>(
     let array = array::create_array_object(gc_context, array_proto, function_proto);
     let xmlnode = FunctionObject::constructor(
         gc_context,
-        Executable::Native(xml::xmlnode_constructor),
-        constructor_to_fn!(xml::xmlnode_constructor),
+        Executable::Native(xml_node::constructor),
+        constructor_to_fn!(xml_node::constructor),
         Some(function_proto),
         xmlnode_proto,
     );
     let xml = FunctionObject::constructor(
         gc_context,
-        Executable::Native(xml::xml_constructor),
-        constructor_to_fn!(xml::xml_constructor),
+        Executable::Native(xml::constructor),
+        constructor_to_fn!(xml::constructor),
         Some(function_proto),
         xml_proto,
     );

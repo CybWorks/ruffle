@@ -102,7 +102,7 @@ pub enum TraitKind<'gc> {
 
 impl<'gc> Trait<'gc> {
     pub fn from_class(class: GcCell<'gc, Class<'gc>>) -> Self {
-        let name = class.read().name().clone();
+        let name = class.read().name();
 
         Trait {
             name,
@@ -185,7 +185,7 @@ impl<'gc> Trait<'gc> {
         activation: &mut Activation<'_, 'gc, '_>,
     ) -> Result<Self, Error> {
         let mc = activation.context.gc_context;
-        let name = QName::from_abc_multiname(unit, abc_trait.name.clone(), mc)?;
+        let name = QName::from_abc_multiname(unit, abc_trait.name, mc)?;
 
         Ok(match &abc_trait.kind {
             AbcTraitKind::Slot {
@@ -196,7 +196,7 @@ impl<'gc> Trait<'gc> {
                 let type_name = if type_name.0 == 0 {
                     Multiname::any()
                 } else {
-                    Multiname::from_abc_multiname_static(unit, type_name.clone(), mc)?
+                    Multiname::from_abc_multiname_static(unit, *type_name, mc)?
                 };
                 let default_value = slot_default_value(unit, value, &type_name, activation)?;
                 Trait {
@@ -214,7 +214,7 @@ impl<'gc> Trait<'gc> {
                 attributes: trait_attribs_from_abc_traits(abc_trait),
                 kind: TraitKind::Method {
                     disp_id: *disp_id,
-                    method: unit.load_method(method.0, false, activation)?,
+                    method: unit.load_method(*method, false, activation)?,
                 },
             },
             AbcTraitKind::Getter { disp_id, method } => Trait {
@@ -222,7 +222,7 @@ impl<'gc> Trait<'gc> {
                 attributes: trait_attribs_from_abc_traits(abc_trait),
                 kind: TraitKind::Getter {
                     disp_id: *disp_id,
-                    method: unit.load_method(method.0, false, activation)?,
+                    method: unit.load_method(*method, false, activation)?,
                 },
             },
             AbcTraitKind::Setter { disp_id, method } => Trait {
@@ -230,7 +230,7 @@ impl<'gc> Trait<'gc> {
                 attributes: trait_attribs_from_abc_traits(abc_trait),
                 kind: TraitKind::Setter {
                     disp_id: *disp_id,
-                    method: unit.load_method(method.0, false, activation)?,
+                    method: unit.load_method(*method, false, activation)?,
                 },
             },
             AbcTraitKind::Class { slot_id, class } => Trait {
@@ -246,7 +246,7 @@ impl<'gc> Trait<'gc> {
                 attributes: trait_attribs_from_abc_traits(abc_trait),
                 kind: TraitKind::Function {
                     slot_id: *slot_id,
-                    function: unit.load_method(function.0, true, activation)?,
+                    function: unit.load_method(*function, true, activation)?,
                 },
             },
             AbcTraitKind::Const {
@@ -257,7 +257,7 @@ impl<'gc> Trait<'gc> {
                 let type_name = if type_name.0 == 0 {
                     Multiname::any()
                 } else {
-                    Multiname::from_abc_multiname_static(unit, type_name.clone(), mc)?
+                    Multiname::from_abc_multiname_static(unit, *type_name, mc)?
                 };
                 let default_value = slot_default_value(unit, value, &type_name, activation)?;
                 Trait {
@@ -273,8 +273,8 @@ impl<'gc> Trait<'gc> {
         })
     }
 
-    pub fn name(&self) -> &QName<'gc> {
-        &self.name
+    pub fn name(&self) -> QName<'gc> {
+        self.name
     }
 
     pub fn kind(&self) -> &TraitKind<'gc> {
@@ -390,13 +390,19 @@ fn default_value_for_type<'gc>(type_name: &Multiname<'gc>) -> Value<'gc> {
     if type_name.is_any() {
         Value::Undefined
     } else if type_name.namespace_set().any(|ns| ns.is_public()) {
-        match type_name.local_name().unwrap_or_default().as_str() {
-            "Boolean" => false.into(),
-            "Number" => f64::NAN.into(),
-            "int" => 0.into(),
-            "String" => Value::Null,
-            "uint" => 0.into(),
-            _ => Value::Null, // Object type
+        let name = type_name.local_name().unwrap_or_default();
+        if &name == b"Boolean" {
+            false.into()
+        } else if &name == b"Number" {
+            f64::NAN.into()
+        } else if &name == b"int" {
+            0.into()
+        } else if &name == b"String" {
+            Value::Null
+        } else if &name == b"uint" {
+            0.into()
+        } else {
+            Value::Null // Object type
         }
     } else {
         // Object type

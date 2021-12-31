@@ -724,8 +724,8 @@ impl RenderBackend for WebGlRenderBackend {
         self.build_matrices();
 
         // Setup GL viewport and renderbuffers clamped to reasonable sizes.
-        self.renderbuffer_width = self.view_width.max(1).min(self.gl.drawing_buffer_width());
-        self.renderbuffer_height = self.view_height.max(1).min(self.gl.drawing_buffer_height());
+        self.renderbuffer_width = self.view_width.clamp(1, self.gl.drawing_buffer_width());
+        self.renderbuffer_height = self.view_height.clamp(1, self.gl.drawing_buffer_height());
 
         // Recreate framebuffers with the new size.
         let _ = self.build_msaa_buffers(self.renderbuffer_width, self.renderbuffer_height);
@@ -776,7 +776,7 @@ impl RenderBackend for WebGlRenderBackend {
         self.register_bitmap(bitmap)
     }
 
-    fn register_bitmap_jpeg_3(
+    fn register_bitmap_jpeg_3_or_4(
         &mut self,
         jpeg_data: &[u8],
         alpha_data: &[u8],

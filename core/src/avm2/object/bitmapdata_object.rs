@@ -1,7 +1,6 @@
 //! Object representation for BitmapData
 
 use crate::avm2::activation::Activation;
-use crate::avm2::names::{Namespace, QName};
 use crate::avm2::object::script_object::ScriptObjectData;
 use crate::avm2::object::{ClassObject, Object, ObjectPtr, TObject};
 use crate::avm2::value::Value;
@@ -47,13 +46,7 @@ impl<'gc> BitmapDataObject<'gc> {
         bitmap_data: GcCell<'gc, BitmapData<'gc>>,
         class: ClassObject<'gc>,
     ) -> Result<Object<'gc>, Error> {
-        let proto = class
-            .get_property(
-                class.into(),
-                &QName::new(Namespace::public(), "prototype").into(),
-                activation,
-            )?
-            .coerce_to_object(activation)?;
+        let proto = class.prototype();
 
         let mut instance = Self(GcCell::allocate(
             activation.context.gc_context,
@@ -66,7 +59,7 @@ impl<'gc> BitmapDataObject<'gc> {
         bitmap_data
             .write(activation.context.gc_context)
             .init_object2(instance.into());
-        instance.install_instance_traits(activation, class)?;
+        instance.install_instance_slots(activation);
         class.call_native_init(Some(instance.into()), &[], activation)?;
 
         Ok(instance.into())

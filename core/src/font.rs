@@ -1,8 +1,10 @@
 use crate::backend::render::{RenderBackend, ShapeHandle};
 use crate::html::TextSpan;
 use crate::prelude::*;
+use crate::string::WStr;
 use crate::transform::Transform;
 use gc_arena::{Collect, Gc, MutationContext};
+use std::cell::{Cell, Ref, RefCell};
 
 pub use swf::TextGridFit;
 
@@ -103,20 +105,37 @@ impl<'gc> Font<'gc> {
     pub fn from_swf_tag(
         gc_context: MutationContext<'gc, '_>,
         renderer: &mut dyn RenderBackend,
-        tag: &swf::Font,
+        tag: swf::Font,
         encoding: &'static swf::Encoding,
     ) -> Result<Font<'gc>, Error> {
         let mut glyphs = vec![];
         let mut code_point_to_glyph = fnv::FnvHashMap::default();
-        for swf_glyph in &tag.glyphs {
+
+        let tag_version = tag.version;
+        let descriptor = FontDescriptor::from_swf_tag(&tag, encoding);
+        let (ascent, descent, leading) = if let Some(layout) = &tag.layout {
+            (layout.ascent, layout.descent, layout.leading)
+        } else {
+            (0, 0, 0)
+        };
+
+        for swf_glyph in tag.glyphs {
+            // load non-ascii chars lazily
+            let handle = if swf_glyph.code <= 127 {
+                Some(renderer.register_glyph_shape(&swf_glyph))
+            } else {
+                None
+            };
+            let glyph_code = swf_glyph.code;
             let glyph = Glyph {
-                shape_handle: renderer.register_glyph_shape(swf_glyph),
+                shape_handle: Cell::new(handle),
                 advance: swf_glyph.advance.unwrap_or(0),
-                shape: crate::shape_utils::swf_glyph_to_shape(swf_glyph),
+                shape: RefCell::new(None),
+                swf_glyph,
             };
             let index = glyphs.len();
             glyphs.push(glyph);
-            code_point_to_glyph.insert(swf_glyph.code, index);
+            code_point_to_glyph.insert(glyph_code, index);
         }
         let kerning_pairs: fnv::FnvHashMap<(u16, u16), Twips> = if let Some(layout) = &tag.layout {
             layout
@@ -128,13 +147,6 @@ impl<'gc> Font<'gc> {
             fnv::FnvHashMap::default()
         };
 
-        let descriptor = FontDescriptor::from_swf_tag(tag, encoding);
-        let (ascent, descent, leading) = if let Some(layout) = &tag.layout {
-            (layout.ascent, layout.descent, layout.leading)
-        } else {
-            (0, 0, 0)
-        };
-
         Ok(Font(Gc::allocate(
             gc_context,
             FontData {
@@ -143,7 +155,7 @@ impl<'gc> Font<'gc> {
 
                 /// DefineFont3 stores coordinates at 20x the scale of DefineFont1/2.
                 /// (SWF19 p.164)
-                scale: if tag.version >= 3 { 20480.0 } else { 1024.0 },
+                scale: if tag_version >= 3 { 20480.0 } else { 1024.0 },
                 kerning_pairs,
                 ascent,
                 descent,
@@ -178,9 +190,10 @@ impl<'gc> Font<'gc> {
     }
 
     /// Determine if this font contains all the glyphs within a given string.
-    pub fn has_glyphs_for_str(&self, target_str: &str) -> bool {
+    pub fn has_glyphs_for_str(&self, target_str: &WStr) -> bool {
         for character in target_str.chars() {
-            if self.get_glyph_for_char(character).is_none() {
+            let c = character.unwrap_or(char::REPLACEMENT_CHARACTER);
+            if self.get_glyph_for_char(c).is_none() {
                 return false;
             }
         }
@@ -235,7 +248,7 @@ impl<'gc> Font<'gc> {
     /// to render the text on a single horizontal line.
     pub fn evaluate<FGlyph>(
         &self,
-        text: &str,
+        text: &WStr, // TODO: take an `IntoIterator<Item=char>`, to not depend on string representation?
         mut transform: Transform,
         params: EvalParameters,
         mut glyph_func: FGlyph,
@@ -251,10 +264,12 @@ impl<'gc> Font<'gc> {
         let has_kerning_info = self.has_kerning_info();
         let mut x = Twips::ZERO;
         while let Some((pos, c)) = char_indices.next() {
+            let c = c.unwrap_or(char::REPLACEMENT_CHARACTER);
             if let Some(glyph) = self.get_glyph_for_char(c) {
                 let mut advance = Twips::new(glyph.advance);
                 if has_kerning_info && params.kerning {
-                    let next_char = char_indices.peek().cloned().unwrap_or((0, '\0')).1;
+                    let next_char = char_indices.peek().cloned().unwrap_or((0, Ok('\0'))).1;
+                    let next_char = next_char.unwrap_or(char::REPLACEMENT_CHARACTER);
                     advance += self.get_kerning_offset(c, next_char);
                 }
                 let twips_advance =
@@ -273,7 +288,7 @@ impl<'gc> Font<'gc> {
     ///
     /// The `round` flag causes the returned coordinates to be rounded down to
     /// the nearest pixel.
-    pub fn measure(&self, text: &str, params: EvalParameters, round: bool) -> (Twips, Twips) {
+    pub fn measure(&self, text: &WStr, params: EvalParameters, round: bool) -> (Twips, Twips) {
         let mut size = (Twips::ZERO, Twips::ZERO);
 
         self.evaluate(
@@ -315,7 +330,7 @@ impl<'gc> Font<'gc> {
     /// be internationalized to implement AS3 `flash.text.engine`.
     pub fn wrap_line(
         &self,
-        text: &str,
+        text: &WStr,
         params: EvalParameters,
         width: Twips,
         offset: Twips,
@@ -328,13 +343,13 @@ impl<'gc> Font<'gc> {
 
         let mut line_end = 0;
 
-        for word in text.split(' ') {
-            let word_start = word.as_ptr() as usize - text.as_ptr() as usize;
+        for word in text.split(b' ') {
+            let word_start = word.offset_in(text).unwrap();
             let word_end = word_start + word.len();
 
             let measure = self.measure(
-                // +1 is fine because ' ' is 1 byte
-                text.get(word_start..word_end + 1).unwrap_or(word),
+                // +1 is fine because ' ' is 1 unit
+                text.slice(word_start..word_end + 1).unwrap_or(word),
                 params,
                 false,
             );
@@ -391,9 +406,37 @@ impl<'gc> Font<'gc> {
 
 #[derive(Debug, Clone)]
 pub struct Glyph {
-    pub shape_handle: ShapeHandle,
-    pub shape: swf::Shape,
     pub advance: i16,
+    // Handle to registered shape.
+    // If None, it'll be loaded lazily on first render of this glyph.
+    shape_handle: Cell<Option<ShapeHandle>>,
+    // Same shape as one in swf_glyph, but wrapped in an swf::Shape;
+    // For use in hit tests. Created lazily on first use.
+    // (todo: refactor hit tests to not require this?
+    // this literally copies the shape_record, which is wasteful...)
+    shape: RefCell<Option<swf::Shape>>,
+    // The underlying glyph record, containing its shape.
+    swf_glyph: swf::Glyph,
+}
+
+impl Glyph {
+    pub fn shape_handle(&self, renderer: &mut dyn RenderBackend) -> ShapeHandle {
+        if self.shape_handle.get().is_none() {
+            self.shape_handle
+                .set(Some(renderer.register_glyph_shape(&self.swf_glyph)))
+        }
+        self.shape_handle.get().unwrap()
+    }
+
+    pub fn as_shape(&self) -> Ref<'_, swf::Shape> {
+        let mut write = self.shape.borrow_mut();
+        if write.is_none() {
+            *write = Some(crate::shape_utils::swf_glyph_to_shape(&self.swf_glyph));
+        }
+        drop(write);
+        let read = self.shape.borrow();
+        Ref::map(read, |s| s.as_ref().unwrap())
+    }
 }
 
 /// Structure which identifies a particular font by name and properties.
@@ -502,6 +545,7 @@ mod tests {
     use crate::backend::render::{NullRenderer, RenderBackend};
     use crate::font::{EvalParameters, Font};
     use crate::player::{Player, DEVICE_FONT_TAG};
+    use crate::string::WStr;
     use gc_arena::{rootless_arena, MutationContext};
     use std::ops::DerefMut;
     use swf::Twips;
@@ -524,7 +568,7 @@ mod tests {
         with_device_font(|_mc, df| {
             let params =
                 EvalParameters::from_parts(Twips::from_pixels(12.0), Twips::from_pixels(0.0), true);
-            let string = "abcdefghijklmnopqrstuv";
+            let string = WStr::from_units(b"abcdefghijklmnopqrstuv");
             let breakpoint = df.wrap_line(
                 string,
                 params,
@@ -542,7 +586,7 @@ mod tests {
         with_device_font(|_mc, df| {
             let params =
                 EvalParameters::from_parts(Twips::from_pixels(12.0), Twips::from_pixels(0.0), true);
-            let string = "abcd efgh ijkl mnop";
+            let string = WStr::from_units(b"abcd efgh ijkl mnop");
             let mut last_bp = 0;
             let breakpoint = df.wrap_line(
                 string,
@@ -597,7 +641,7 @@ mod tests {
         with_device_font(|_mc, df| {
             let params =
                 EvalParameters::from_parts(Twips::from_pixels(12.0), Twips::from_pixels(0.0), true);
-            let string = "abcd efgh ijkl mnop";
+            let string = WStr::from_units(b"abcd efgh ijkl mnop");
             let breakpoint = df.wrap_line(
                 string,
                 params,
@@ -615,7 +659,7 @@ mod tests {
         with_device_font(|_mc, df| {
             let params =
                 EvalParameters::from_parts(Twips::from_pixels(12.0), Twips::from_pixels(0.0), true);
-            let string = "abcdi j kl mnop q rstuv";
+            let string = WStr::from_units(b"abcdi j kl mnop q rstuv");
             let mut last_bp = 0;
             let breakpoint = df.wrap_line(
                 string,

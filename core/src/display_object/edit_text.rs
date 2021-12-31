@@ -20,11 +20,10 @@ use crate::font::{round_down_to_pixel, Glyph, TextRenderSettings};
 use crate::html::{BoxBounds, FormatSpans, LayoutBox, LayoutContent, TextFormat};
 use crate::prelude::*;
 use crate::shape_utils::DrawCommand;
-use crate::string::{utils as string_utils, AvmString};
+use crate::string::{utils as string_utils, AvmString, WStr, WString};
 use crate::tag_utils::SwfMovie;
 use crate::transform::Transform;
 use crate::vminterface::{AvmObject, AvmType, Instantiator};
-use crate::xml::XmlDocument;
 use chrono::Utc;
 use gc_arena::{Collect, Gc, GcCell, MutationContext};
 use std::{cell::Ref, cell::RefMut, sync::Arc};
@@ -221,17 +220,12 @@ impl<'gc> EditText<'gc> {
         let default_format = TextFormat::from_swf_tag(swf_tag.clone(), swf_movie.clone(), context);
         let encoding = swf_movie.encoding();
 
-        let text = text.to_str_lossy(encoding);
+        let text = WString::from_utf8(&text.to_str_lossy(encoding));
         let mut text_spans = if is_html {
-            FormatSpans::from_html(&*text, default_format)
+            FormatSpans::from_html(&text, default_format, is_multiline)
         } else {
-            FormatSpans::from_text(&*text, default_format)
+            FormatSpans::from_text(text, default_format)
         };
-
-        if !is_multiline {
-            let filtered = text_spans.text().replace("\n", "");
-            text_spans.replace_text(0, text_spans.text().len(), &filtered, None);
-        }
 
         if is_password {
             text_spans.hide_text();
@@ -286,8 +280,12 @@ impl<'gc> EditText<'gc> {
                             color: swf_tag.color.clone(),
                             max_length: swf_tag.max_length,
                             layout: swf_tag.layout.clone(),
-                            variable_name: swf_tag.variable_name.to_string_lossy(encoding),
-                            initial_text: swf_tag.initial_text.map(|s| s.to_string_lossy(encoding)),
+                            variable_name: WString::from_utf8_owned(
+                                swf_tag.variable_name.to_string_lossy(encoding),
+                            ),
+                            initial_text: swf_tag
+                                .initial_text
+                                .map(|s| WString::from_utf8_owned(s.to_string_lossy(encoding))),
                             is_word_wrap: swf_tag.is_word_wrap,
                             is_multiline: swf_tag.is_multiline,
                             is_password: swf_tag.is_password,
@@ -396,18 +394,18 @@ impl<'gc> EditText<'gc> {
         text_field
     }
 
-    pub fn text(self) -> String {
-        self.0.read().text_spans.text().to_string()
+    pub fn text(self) -> WString {
+        self.0.read().text_spans.text().into()
     }
 
     pub fn set_text(
         self,
-        text: &str,
+        text: &WStr,
         context: &mut UpdateContext<'_, 'gc, '_>,
     ) -> Result<(), Error> {
         let mut edit_text = self.0.write(context.gc_context);
         let default_format = edit_text.text_spans.default_format().clone();
-        edit_text.text_spans = FormatSpans::from_text(text, default_format);
+        edit_text.text_spans = FormatSpans::from_text(text.into(), default_format);
         drop(edit_text);
 
         self.relayout(context);
@@ -415,19 +413,9 @@ impl<'gc> EditText<'gc> {
         Ok(())
     }
 
-    pub fn html_text(self, context: &mut UpdateContext<'_, 'gc, '_>) -> String {
+    pub fn html_text(self) -> WString {
         if self.is_html() {
-            let html_tree = self.html_tree(context).as_node();
-            let html_string_result = html_tree.into_string(&mut |_node| true);
-
-            if let Err(err) = &html_string_result {
-                log::warn!(
-                    "Serialization error when reading TextField.htmlText: {}",
-                    err
-                );
-            }
-
-            html_string_result.unwrap_or_default()
+            self.0.read().text_spans.to_html()
         } else {
             // Non-HTML text fields always return plain text.
             self.text()
@@ -436,13 +424,13 @@ impl<'gc> EditText<'gc> {
 
     pub fn set_html_text(
         self,
-        text: &str,
+        text: &WStr,
         context: &mut UpdateContext<'_, 'gc, '_>,
     ) -> Result<(), Error> {
         if self.is_html() {
             let mut write = self.0.write(context.gc_context);
             let default_format = write.text_spans.default_format().clone();
-            write.text_spans = FormatSpans::from_html(text, default_format);
+            write.text_spans = FormatSpans::from_html(text, default_format, write.is_multiline);
             drop(write);
 
             self.relayout(context);
@@ -451,10 +439,6 @@ impl<'gc> EditText<'gc> {
         } else {
             self.set_text(text, context)
         }
-    }
-
-    pub fn html_tree(self, context: &mut UpdateContext<'_, 'gc, '_>) -> XmlDocument<'gc> {
-        self.0.read().text_spans.raise_to_html(context.gc_context)
     }
 
     pub fn text_length(self) -> usize {
@@ -605,7 +589,7 @@ impl<'gc> EditText<'gc> {
         self,
         from: usize,
         to: usize,
-        text: &str,
+        text: &WStr,
         context: &mut UpdateContext<'_, 'gc, '_>,
     ) {
         self.0
@@ -989,9 +973,10 @@ impl<'gc> EditText<'gc> {
                     }
 
                     // Render glyph.
+                    let glyph_shape_handle = glyph.shape_handle(context.renderer);
                     context
                         .renderer
-                        .render_shape(glyph.shape_handle, context.transform_stack.transform());
+                        .render_shape(glyph_shape_handle, context.transform_stack.transform());
                     context.transform_stack.pop();
 
                     if let Some((caret_pos, length)) = caret {
@@ -1047,7 +1032,7 @@ impl<'gc> EditText<'gc> {
 
             // Avoid double-borrows by copying the string.
             // TODO: Can we avoid this somehow? Maybe when we have a better string type.
-            let variable = (*var_path).to_string();
+            let variable_path = WString::from_utf8(&var_path);
             drop(var_path);
 
             let parent = self.avm1_parent().unwrap();
@@ -1058,7 +1043,7 @@ impl<'gc> EditText<'gc> {
                 activation.context.swf.version(),
                 |activation| {
                     if let Ok(Some((object, property))) =
-                        activation.resolve_variable_path(parent, &variable)
+                        activation.resolve_variable_path(parent, &variable_path)
                     {
                         let property = AvmString::new(activation.context.gc_context, property);
 
@@ -1124,14 +1109,12 @@ impl<'gc> EditText<'gc> {
             if let Some(variable) = self.variable() {
                 // Avoid double-borrows by copying the string.
                 // TODO: Can we avoid this somehow? Maybe when we have a better string type.
-                let variable_path = variable.to_string();
+                let variable_path = WString::from_utf8(&variable);
                 drop(variable);
 
                 if let Ok(Some((object, property))) =
                     activation.resolve_variable_path(self.avm1_parent().unwrap(), &variable_path)
                 {
-                    let html_text = self.html_text(&mut activation.context);
-
                     // Note that this can call virtual setters, even though the opposite direction won't work
                     // (virtual property changes do not affect the text field)
                     activation.run_with_child_frame_for_display_object(
@@ -1142,7 +1125,8 @@ impl<'gc> EditText<'gc> {
                             let property = AvmString::new(activation.context.gc_context, property);
                             let _ = object.set(
                                 property,
-                                AvmString::new(activation.context.gc_context, html_text).into(),
+                                AvmString::new(activation.context.gc_context, self.html_text())
+                                    .into(),
                                 activation,
                             );
                         },
@@ -1263,7 +1247,7 @@ impl<'gc> EditText<'gc> {
             match character as u8 {
                 8 | 127 if !selection.is_caret() => {
                     // Backspace or delete with multiple characters selected
-                    self.replace_text(selection.start(), selection.end(), "", context);
+                    self.replace_text(selection.start(), selection.end(), WStr::empty(), context);
                     self.set_selection(
                         Some(TextSelection::for_position(selection.start())),
                         context.gc_context,
@@ -1276,7 +1260,7 @@ impl<'gc> EditText<'gc> {
                         // Delete previous character
                         let text = self.text();
                         let start = string_utils::prev_char_boundary(&text, selection.start());
-                        self.replace_text(start, selection.start(), "", context);
+                        self.replace_text(start, selection.start(), WStr::empty(), context);
                         self.set_selection(
                             Some(TextSelection::for_position(start)),
                             context.gc_context,
@@ -1290,7 +1274,7 @@ impl<'gc> EditText<'gc> {
                         // Delete next character
                         let text = self.text();
                         let end = string_utils::next_char_boundary(&text, selection.start());
-                        self.replace_text(selection.start(), end, "", context);
+                        self.replace_text(selection.start(), end, WStr::empty(), context);
                         // No need to change selection
                         changed = true;
                     }
@@ -1299,7 +1283,7 @@ impl<'gc> EditText<'gc> {
                     self.replace_text(
                         selection.start(),
                         selection.end(),
-                        &character.to_string(),
+                        &WString::from_char(character),
                         context,
                     );
                     let new_start = selection.start() + character.len_utf8();
@@ -1344,14 +1328,14 @@ impl<'gc> EditText<'gc> {
                 let length = text.len();
                 match key_code {
                     ButtonKeyCode::Left => {
-                        if (context.ui.is_key_down(KeyCode::Shift) || selection.is_caret())
+                        if (context.input.is_key_down(KeyCode::Shift) || selection.is_caret())
                             && selection.to > 0
                         {
                             selection.to = string_utils::prev_char_boundary(text, selection.to);
-                            if !context.ui.is_key_down(KeyCode::Shift) {
+                            if !context.input.is_key_down(KeyCode::Shift) {
                                 selection.from = selection.to;
                             }
-                        } else if !context.ui.is_key_down(KeyCode::Shift) {
+                        } else if !context.input.is_key_down(KeyCode::Shift) {
                             selection.to = selection.start();
                             selection.from = selection.to;
                         }
@@ -1360,14 +1344,14 @@ impl<'gc> EditText<'gc> {
                         return ClipEventResult::Handled;
                     }
                     ButtonKeyCode::Right => {
-                        if (context.ui.is_key_down(KeyCode::Shift) || selection.is_caret())
+                        if (context.input.is_key_down(KeyCode::Shift) || selection.is_caret())
                             && selection.to < length
                         {
                             selection.to = string_utils::next_char_boundary(text, selection.to);
-                            if !context.ui.is_key_down(KeyCode::Shift) {
+                            if !context.input.is_key_down(KeyCode::Shift) {
                                 selection.from = selection.to;
                             }
-                        } else if !context.ui.is_key_down(KeyCode::Shift) {
+                        } else if !context.input.is_key_down(KeyCode::Shift) {
                             selection.to = selection.end();
                             selection.from = selection.to;
                         }
@@ -1881,8 +1865,8 @@ struct EditTextStaticData {
     color: Option<Color>,
     max_length: Option<u16>,
     layout: Option<swf::TextLayout>,
-    variable_name: String,
-    initial_text: Option<String>,
+    variable_name: WString,
+    initial_text: Option<WString>,
     is_word_wrap: bool,
     is_multiline: bool,
     is_password: bool,

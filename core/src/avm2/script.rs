@@ -11,12 +11,11 @@ use crate::avm2::value::Value;
 use crate::avm2::{Avm2, Error};
 use crate::context::UpdateContext;
 use crate::string::AvmString;
-use fnv::FnvHashMap;
 use gc_arena::{Collect, Gc, GcCell, MutationContext};
 use std::cell::Ref;
 use std::mem::drop;
 use std::rc::Rc;
-use swf::avm2::types::{AbcFile, Index, Script as AbcScript};
+use swf::avm2::types::{AbcFile, Index, Method as AbcMethod, Script as AbcScript};
 
 #[derive(Copy, Clone, Debug, Collect)]
 #[collect(no_drop)]
@@ -45,31 +44,37 @@ pub struct TranslationUnitData<'gc> {
     abc: Rc<AbcFile>,
 
     /// All classes loaded from the ABC's class list.
-    classes: FnvHashMap<u32, GcCell<'gc, Class<'gc>>>,
+    classes: Vec<Option<GcCell<'gc, Class<'gc>>>>,
 
     /// All methods loaded from the ABC's method list.
-    methods: FnvHashMap<u32, Method<'gc>>,
+    methods: Vec<Option<Method<'gc>>>,
 
     /// All scripts loaded from the ABC's scripts list.
-    scripts: FnvHashMap<u32, Script<'gc>>,
+    scripts: Vec<Option<Script<'gc>>>,
 
     /// All strings loaded from the ABC's strings list.
-    strings: FnvHashMap<u32, AvmString<'gc>>,
+    /// They're lazy loaded and offset by 1, with the 0th element being always None.
+    strings: Vec<Option<AvmString<'gc>>>,
 }
 
 impl<'gc> TranslationUnit<'gc> {
     /// Construct a new `TranslationUnit` for a given ABC file intended to
     /// execute within a particular domain.
     pub fn from_abc(abc: Rc<AbcFile>, domain: Domain<'gc>, mc: MutationContext<'gc, '_>) -> Self {
+        let classes = vec![None; abc.classes.len()];
+        let methods = vec![None; abc.methods.len()];
+        let scripts = vec![None; abc.scripts.len()];
+        let strings = vec![None; abc.constant_pool.strings.len() + 1];
+
         Self(GcCell::allocate(
             mc,
             TranslationUnitData {
                 domain,
                 abc,
-                classes: FnvHashMap::default(),
-                methods: FnvHashMap::default(),
-                scripts: FnvHashMap::default(),
-                strings: FnvHashMap::default(),
+                classes,
+                methods,
+                scripts,
+                strings,
             },
         ))
     }
@@ -82,29 +87,23 @@ impl<'gc> TranslationUnit<'gc> {
     /// Load a method from the ABC file and return its method definition.
     pub fn load_method(
         self,
-        method_index: u32,
+        method_index: Index<AbcMethod>,
         is_function: bool,
         activation: &mut Activation<'_, 'gc, '_>,
     ) -> Result<Method<'gc>, Error> {
         let read = self.0.read();
-        if let Some(method) = read.methods.get(&method_index) {
+        if let Some(Some(method)) = read.methods.get(method_index.0 as usize) {
             return Ok(method.clone());
         }
 
         drop(read);
 
-        let method: Result<Gc<'gc, BytecodeMethod<'gc>>, Error> = BytecodeMethod::from_method_index(
-            self,
-            Index::new(method_index),
-            is_function,
-            activation,
-        );
+        let method: Result<Gc<'gc, BytecodeMethod<'gc>>, Error> =
+            BytecodeMethod::from_method_index(self, method_index, is_function, activation);
         let method: Method<'gc> = method?.into();
 
-        self.0
-            .write(activation.context.gc_context)
-            .methods
-            .insert(method_index, method.clone());
+        self.0.write(activation.context.gc_context).methods[method_index.0 as usize] =
+            Some(method.clone());
 
         Ok(method)
     }
@@ -116,17 +115,14 @@ impl<'gc> TranslationUnit<'gc> {
         activation: &mut Activation<'_, 'gc, '_>,
     ) -> Result<GcCell<'gc, Class<'gc>>, Error> {
         let read = self.0.read();
-        if let Some(class) = read.classes.get(&class_index) {
+        if let Some(Some(class)) = read.classes.get(class_index as usize) {
             return Ok(*class);
         }
 
         drop(read);
 
         let class = Class::from_abc_index(self, class_index, activation)?;
-        self.0
-            .write(activation.context.gc_context)
-            .classes
-            .insert(class_index, class);
+        self.0.write(activation.context.gc_context).classes[class_index as usize] = Some(class);
 
         class
             .write(activation.context.gc_context)
@@ -142,7 +138,7 @@ impl<'gc> TranslationUnit<'gc> {
         uc: &mut UpdateContext<'_, 'gc, '_>,
     ) -> Result<Script<'gc>, Error> {
         let read = self.0.read();
-        if let Some(scripts) = read.scripts.get(&script_index) {
+        if let Some(Some(scripts)) = read.scripts.get(script_index as usize) {
             return Ok(*scripts);
         }
 
@@ -153,13 +149,11 @@ impl<'gc> TranslationUnit<'gc> {
         let mut activation = Activation::from_nothing(uc.reborrow());
         let global_class = activation.avm2().classes().global;
         let global_obj = global_class.construct(&mut activation, &[])?;
+        global_obj.fork_vtable(activation.context.gc_context);
 
         let mut script =
             Script::from_abc_index(self, script_index, global_obj, domain, &mut activation)?;
-        self.0
-            .write(activation.context.gc_context)
-            .scripts
-            .insert(script_index, script);
+        self.0.write(activation.context.gc_context).scripts[script_index as usize] = Some(script);
 
         script.load_traits(self, script_index, &mut activation)?;
 
@@ -178,7 +172,7 @@ impl<'gc> TranslationUnit<'gc> {
         mc: MutationContext<'gc, '_>,
     ) -> Result<Option<AvmString<'gc>>, Error> {
         let mut write = self.0.write(mc);
-        if let Some(string) = write.strings.get(&string_index) {
+        if let Some(Some(string)) = write.strings.get(string_index as usize) {
             return Ok(Some(*string));
         }
 
@@ -186,7 +180,7 @@ impl<'gc> TranslationUnit<'gc> {
             return Ok(None);
         }
 
-        let avm_string = AvmString::new(
+        let avm_string = AvmString::new_utf8(
             mc,
             write
                 .abc
@@ -195,7 +189,7 @@ impl<'gc> TranslationUnit<'gc> {
                 .get(string_index as usize - 1)
                 .ok_or_else(|| format!("Unknown string constant {}", string_index))?,
         );
-        write.strings.insert(string_index, avm_string);
+        write.strings[string_index as usize] = Some(avm_string);
 
         Ok(Some(avm_string))
     }
@@ -300,7 +294,7 @@ impl<'gc> Script<'gc> {
             .ok_or_else(|| "LoadError: Script index not valid".into());
         let script = script?;
 
-        let init = unit.load_method(script.init_method.0, false, activation)?;
+        let init = unit.load_method(script.init_method, false, activation)?;
 
         Ok(Self(GcCell::allocate(
             activation.context.gc_context,
@@ -346,7 +340,7 @@ impl<'gc> Script<'gc> {
             let newtrait = Trait::from_abc_trait(unit, abc_trait, activation)?;
             if !newtrait.name().namespace().is_private() {
                 write.domain.export_definition(
-                    newtrait.name().clone(),
+                    newtrait.name(),
                     *self,
                     activation.context.gc_context,
                 )?;
@@ -372,6 +366,7 @@ impl<'gc> Script<'gc> {
         context: &mut UpdateContext<'_, 'gc, '_>,
     ) -> Result<Object<'gc>, Error> {
         let mut write = self.0.write(context.gc_context);
+
         if !write.initialized {
             write.initialized = true;
 
@@ -381,12 +376,16 @@ impl<'gc> Script<'gc> {
 
             drop(write);
 
-            globals.install_traits(
-                &mut null_activation,
-                &self.traits()?,
-                ScopeChain::new(domain),
+            let scope = ScopeChain::new(domain);
+
+            globals.vtable().unwrap().init_vtable(
                 None,
+                &self.traits()?,
+                scope,
+                None,
+                &mut null_activation,
             )?;
+            globals.install_instance_slots(&mut null_activation);
 
             Avm2::run_script_initializer(*self, context)?;
 

@@ -33,18 +33,10 @@ fn coords<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
 ) -> Result<(f64, f64), Error> {
     let x = this
-        .get_property(
-            *this,
-            &QName::new(Namespace::public(), "x").into(),
-            activation,
-        )?
+        .get_property(&QName::new(Namespace::public(), "x").into(), activation)?
         .coerce_to_number(activation)?;
     let y = this
-        .get_property(
-            *this,
-            &QName::new(Namespace::public(), "y").into(),
-            activation,
-        )?
+        .get_property(&QName::new(Namespace::public(), "y").into(), activation)?
         .coerce_to_number(activation)?;
     Ok((x, y))
 }
@@ -55,13 +47,11 @@ fn set_coords<'gc>(
     value: (f64, f64),
 ) -> Result<(), Error> {
     this.set_property(
-        *this,
         &QName::new(Namespace::public(), "x").into(),
         value.0.into(),
         activation,
     )?;
     this.set_property(
-        *this,
         &QName::new(Namespace::public(), "y").into(),
         value.1.into(),
         activation,
@@ -328,22 +318,16 @@ pub fn to_string<'gc>(
 ) -> Result<Value<'gc>, Error> {
     if let Some(this) = this {
         let x = this
-            .get_property(
-                this,
-                &QName::new(Namespace::public(), "x").into(),
-                activation,
-            )?
+            .get_property(&QName::new(Namespace::public(), "x").into(), activation)?
             .coerce_to_string(activation)?;
         let y = this
-            .get_property(
-                this,
-                &QName::new(Namespace::public(), "y").into(),
-                activation,
-            )?
+            .get_property(&QName::new(Namespace::public(), "y").into(), activation)?
             .coerce_to_string(activation)?;
-        return Ok(
-            AvmString::new(activation.context.gc_context, format!("(x={}, y={})", x, y)).into(),
-        );
+        return Ok(AvmString::new_utf8(
+            activation.context.gc_context,
+            format!("(x={}, y={})", x, y),
+        )
+        .into());
     }
 
     Ok(Value::Undefined)

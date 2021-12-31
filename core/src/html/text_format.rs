@@ -2,96 +2,100 @@
 
 use crate::context::UpdateContext;
 use crate::html::iterators::TextSpanIter;
+use crate::string::{Integer, Units, WStr, WString};
 use crate::tag_utils::SwfMovie;
-use crate::xml::{XmlDocument, XmlName, XmlNode};
-use gc_arena::{Collect, MutationContext};
-use quick_xml::events::Event;
-use quick_xml::Reader;
+use gc_arena::Collect;
+use quick_xml::{escape::escape, events::Event, Reader};
 use std::borrow::Cow;
 use std::cmp::{min, Ordering};
+use std::collections::VecDeque;
+use std::fmt::Write;
 use std::sync::Arc;
 
 /// Replace HTML entities with their equivalent characters.
 ///
 /// Unknown entities will be ignored.
-fn process_html_entity(src: &str) -> Cow<str> {
-    if let Some(amp_index) = src.bytes().position(|c| c == b'&') {
-        // Contains entities; copy and replace.
-        let mut result_str = String::with_capacity(src.len());
+fn process_html_entity(src: &WStr) -> Option<WString> {
+    let amp_index = match src.find(b'&') {
+        Some(i) => i,
+        None => return None, // No entities.
+    };
 
-        // Copy initial segment.
-        result_str.push_str(&src[0..amp_index]);
+    // Contains entities; copy and replace.
+    let mut result_str = WString::with_capacity(src.len(), src.is_wide());
 
-        let src = &src[amp_index..];
-        let mut entity_start = None;
-        let mut char_indices = src.char_indices().peekable();
-        while let Some((i, ch)) = char_indices.next() {
-            if let Some(start) = entity_start {
-                if ch == ';' {
-                    let s = src[start + 1..i].to_ascii_lowercase();
-                    match s.as_str() {
-                        "amp" => result_str.push('&'),
-                        "lt" => result_str.push('<'),
-                        "gt" => result_str.push('>'),
-                        "quot" => result_str.push('"'),
-                        "apos" => result_str.push('\''),
-                        "nbsp" => result_str.push('\u{00A0}'),
-                        s if s.len() >= 2 && s.as_bytes()[0] == b'#' => {
-                            // Number entity: &#nnnn; or &#xhhhh;
-                            let (digits, radix) = if src.as_bytes()[1] == b'x' {
-                                // Only trailing 4 hex digits are used.
-                                let start = usize::max(s.len(), 6) - 4;
-                                (&s[start..], 16)
-                            } else {
-                                // Only trailing 16 digits are used.
-                                let start = usize::max(s.len(), 17) - 16;
-                                (&s[start..], 10)
-                            };
-                            if let Ok(n) = u32::from_str_radix(digits, radix) {
-                                if let Some(c) = std::char::from_u32(n) {
-                                    result_str.push(c);
-                                }
-                            } else {
-                                // Invalid entity; output text as is.
-                                if let Some((next_idx, _)) = char_indices.peek() {
-                                    result_str.push_str(&src[start..*next_idx]);
-                                } else {
-                                    result_str.push_str(&src[start..]);
-                                }
-                            }
-                        }
-                        // Invalid entity; output text as is.
-                        _ => {
-                            if let Some((next_idx, _)) = char_indices.peek() {
-                                result_str.push_str(&src[start..*next_idx]);
-                            } else {
-                                result_str.push_str(&src[start..]);
-                            }
-                        }
-                    };
+    // Copy initial segment.
+    let (initial, src) = src.split_at(amp_index);
+    result_str.push_str(initial);
 
-                    entity_start = None;
-                } else if ch == '&' {
-                    result_str.push_str(&src[start..i]);
-                    entity_start = Some(i);
-                }
-            } else if ch == '&' {
-                entity_start = Some(i);
-            } else {
-                result_str.push(ch);
-            }
-        }
-
-        // Output remaining text if we were in the middle of parsing an entity.
+    let mut entity_start = None;
+    let mut unit_indices = src.iter().enumerate().peekable();
+    while let Some((i, ch)) = unit_indices.next() {
         if let Some(start) = entity_start {
-            result_str.push_str(&src[start..]);
-        }
+            if ch == b';' as u16 {
+                let s = &src[start + 1..i];
+                if s.eq_ignore_case(WStr::from_units(b"amp")) {
+                    result_str.push_byte(b'&');
+                } else if s.eq_ignore_case(WStr::from_units(b"lt")) {
+                    result_str.push_byte(b'<');
+                } else if s.eq_ignore_case(WStr::from_units(b"gt")) {
+                    result_str.push_byte(b'>');
+                } else if s.eq_ignore_case(WStr::from_units(b"quot")) {
+                    result_str.push_byte(b'"');
+                } else if s.eq_ignore_case(WStr::from_units(b"apos")) {
+                    result_str.push_byte(b'\'');
+                } else if s.eq_ignore_case(WStr::from_units(b"nbsp")) {
+                    result_str.push_byte(b'\xA0');
+                } else if s.len() >= 2 && s.at(0) == b'#' as u16 {
+                    // Number entity: &#nnnn; or &#xhhhh;
+                    let (digits, radix) = if src.at(1) == b'x' as u16 {
+                        // Only trailing 4 hex digits are used.
+                        let start = usize::max(s.len(), 6) - 4;
+                        (&s[start..], 16)
+                    } else {
+                        // Only trailing 16 digits are used.
+                        let start = usize::max(s.len(), 17) - 16;
+                        (&s[start..], 10)
+                    };
+                    if let Ok(n) = u32::from_wstr_radix(digits, radix) {
+                        if let Some(c) = std::char::from_u32(n) {
+                            result_str.push_char(c);
+                        }
+                    } else {
+                        // Invalid entity; output text as is.
+                        if let Some((next_idx, _)) = unit_indices.peek() {
+                            result_str.push_str(&src[start..*next_idx]);
+                        } else {
+                            result_str.push_str(&src[start..]);
+                        }
+                    }
+                } else {
+                    // Invalid entity; output text as is.
+                    if let Some((next_idx, _)) = unit_indices.peek() {
+                        result_str.push_str(&src[start..*next_idx]);
+                    } else {
+                        result_str.push_str(&src[start..]);
+                    }
+                }
 
-        Cow::Owned(result_str)
-    } else {
-        // No entities; return borrow.
-        Cow::Borrowed(src)
+                entity_start = None;
+            } else if ch == b'&' as u16 {
+                result_str.push_str(&src[start..i]);
+                entity_start = Some(i);
+            }
+        } else if ch == b'&' as u16 {
+            entity_start = Some(i);
+        } else {
+            result_str.push(ch);
+        }
     }
+
+    // Output remaining text if we were in the middle of parsing an entity.
+    if let Some(start) = entity_start {
+        result_str.push_str(&src[start..]);
+    }
+
+    Some(result_str)
 }
 
 /// A set of text formatting options to be applied to some part, or the whole
@@ -106,7 +110,7 @@ fn process_html_entity(src: &str) -> Cow<str> {
 #[derive(Clone, Debug, Collect, Default)]
 #[collect(require_static)]
 pub struct TextFormat {
-    pub font: Option<String>,
+    pub font: Option<WString>,
     pub size: Option<f64>,
     pub color: Option<swf::Color>,
     pub align: Option<swf::TextAlign>,
@@ -122,8 +126,8 @@ pub struct TextFormat {
     pub letter_spacing: Option<f64>,
     pub tab_stops: Option<Vec<f64>>,
     pub bullet: Option<bool>,
-    pub url: Option<String>,
-    pub target: Option<String>,
+    pub url: Option<WString>,
+    pub target: Option<WString>,
 }
 
 impl TextFormat {
@@ -141,13 +145,13 @@ impl TextFormat {
         let font = et.font_id.and_then(|fid| movie_library.get_font(fid));
         let font_class = et
             .font_class_name
-            .map(|s| s.to_string_lossy(encoding))
-            .or_else(|| font.map(|font| font.descriptor().class().to_string()))
-            .unwrap_or_else(|| "Times New Roman".to_string());
-        let align = et.layout.clone().map(|l| l.align);
-        let left_margin = et.layout.clone().map(|l| l.left_margin.to_pixels());
-        let right_margin = et.layout.clone().map(|l| l.right_margin.to_pixels());
-        let indent = et.layout.clone().map(|l| l.indent.to_pixels());
+            .map(|s| WString::from_utf8(&s.to_string_lossy(encoding)))
+            .or_else(|| font.map(|font| WString::from_utf8(font.descriptor().class())))
+            .unwrap_or_else(|| WString::from_utf8("Times New Roman"));
+        let align = et.layout.as_ref().map(|l| l.align);
+        let left_margin = et.layout.as_ref().map(|l| l.left_margin.to_pixels());
+        let right_margin = et.layout.as_ref().map(|l| l.right_margin.to_pixels());
+        let indent = et.layout.as_ref().map(|l| l.indent.to_pixels());
         let leading = et.layout.map(|l| l.leading.to_pixels());
 
         // TODO: Text fields that don't specify a font are assumed to be 12px
@@ -174,8 +178,8 @@ impl TextFormat {
             bullet: Some(false),       // TODO: Default tab stops?
 
             // TODO: These are probably empty strings by default
-            url: Some("".to_string()),
-            target: Some("".to_string()),
+            url: Some(WString::new()),
+            target: Some(WString::new()),
         }
     }
 
@@ -318,7 +322,7 @@ pub struct TextSpan {
     /// length of the underlying source string.
     pub span_length: usize,
 
-    pub font: String,
+    pub font: WString,
     pub size: f64,
     pub color: swf::Color,
     pub align: swf::TextAlign,
@@ -334,15 +338,15 @@ pub struct TextSpan {
     pub letter_spacing: f64,
     pub tab_stops: Vec<f64>,
     pub bullet: bool,
-    pub url: String,
-    pub target: String,
+    pub url: WString,
+    pub target: WString,
 }
 
 impl Default for TextSpan {
     fn default() -> Self {
         Self {
             span_length: 0,
-            font: "".to_string(),
+            font: WString::new(),
             size: 12.0,
             color: swf::Color {
                 r: 0,
@@ -363,8 +367,8 @@ impl Default for TextSpan {
             letter_spacing: 0.0,
             tab_stops: vec![],
             bullet: false,
-            url: "".to_string(),
-            target: "".to_string(),
+            url: WString::new(),
+            target: WString::new(),
         }
     }
 }
@@ -515,8 +519,8 @@ impl TextSpan {
 #[derive(Clone, Debug, Collect)]
 #[collect(require_static)]
 pub struct FormatSpans {
-    text: String,
-    displayed_text: String,
+    text: WString,
+    displayed_text: WString,
     spans: Vec<TextSpan>,
     default_format: TextFormat,
 }
@@ -530,29 +534,30 @@ impl Default for FormatSpans {
 impl FormatSpans {
     pub fn new() -> Self {
         Self {
-            text: "".to_string(),
-            displayed_text: "".to_string(),
-            spans: vec![Default::default()],
-            default_format: Default::default(),
+            text: WString::new(),
+            displayed_text: WString::new(),
+            spans: vec![TextSpan::default()],
+            default_format: TextFormat::default(),
         }
     }
 
     /// Construct a format span from its raw parts.
     #[allow(dead_code)]
-    pub fn from_str_and_spans(text: &str, spans: &[TextSpan]) -> Self {
+    pub fn from_str_and_spans(text: &WStr, spans: &[TextSpan]) -> Self {
         Self {
-            text: text.to_string(),
-            displayed_text: "".to_string(),
+            text: text.into(),
+            displayed_text: WString::new(),
             spans: spans.to_vec(),
             default_format: Default::default(),
         }
     }
 
-    pub fn from_text(text: &str, format: TextFormat) -> Self {
+    pub fn from_text(text: WString, format: TextFormat) -> Self {
+        let len = text.len();
         Self {
-            text: text.to_string(),
-            displayed_text: "".to_string(),
-            spans: vec![TextSpan::with_length_and_format(text.len(), format.clone())],
+            text,
+            displayed_text: WString::new(),
+            spans: vec![TextSpan::with_length_and_format(len, format.clone())],
             default_format: format,
         }
     }
@@ -563,39 +568,74 @@ impl FormatSpans {
     /// a handful of presentational attributes in the HTML tree to generate
     /// styling. There's also a `lower_from_css` that respects both
     /// presentational markup and CSS stylesheets.
-    pub fn from_html(html: &str, default_format: TextFormat) -> Self {
+    pub fn from_html(html: &WStr, default_format: TextFormat, is_multiline: bool) -> Self {
         let mut format_stack = vec![default_format.clone()];
-        let mut text = String::new();
+        let mut text = WString::new();
         let mut spans: Vec<TextSpan> = Vec::new();
 
-        let mut reader = Reader::from_str(html);
-        reader.trim_text(true);
+        // quick_xml::Reader requires a [u8] slice, but doesn't actually care about Unicode;
+        // this means we can pass the raw buffer in the Latin1 case.
+        let (raw_bytes, is_raw_latin1) = match html.units() {
+            Units::Bytes(units) => (Cow::Borrowed(units), true),
+            // TODO: In principle, we should be able to encode (and later decode)
+            // the utf16 units in the [u8] array without discarding losing surrogates.
+            Units::Wide(_) => (
+                Cow::Owned(html.to_utf8_lossy().into_owned().into_bytes()),
+                false,
+            ),
+        };
+
+        // Helper function to decode a byte sequence returned by quick_xml into a WString.
+        // TODO: use Cow<'_, WStr>?
+        let decode_to_wstr = |raw: &[u8]| -> WString {
+            if is_raw_latin1 {
+                WString::from_buf(raw.to_vec())
+            } else {
+                let utf8 = std::str::from_utf8(raw).expect("raw should be valid utf8");
+                WString::from_utf8(utf8)
+            }
+        };
+
+        let mut reader = Reader::from_reader(&raw_bytes[..]);
+        reader.expand_empty_elements(true);
+        reader.check_end_names(false);
         let mut buf = Vec::new();
         loop {
             match reader.read_event(&mut buf) {
-                Ok(Event::Empty(ref e)) => match &e.name().to_ascii_lowercase()[..] {
-                    b"br" | b"sbr" => {
-                        text.push('\n');
-                        if let Some(span) = spans.last_mut() {
-                            span.span_length += 1;
-                        }
-                    }
-                    _ => {}
-                },
                 Ok(Event::Start(ref e)) => {
+                    let attributes: Result<Vec<_>, _> = e.attributes().with_checks(false).collect();
+                    let attributes = match attributes {
+                        Ok(attributes) => attributes,
+                        Err(e) => {
+                            log::warn!("Error while parsing HTML: {}", e);
+                            return Default::default();
+                        }
+                    };
                     let attribute = move |name| {
-                        e.attributes().with_checks(false).find_map(|attribute| {
-                            let attribute = attribute.unwrap();
+                        attributes.iter().find_map(|attribute| {
                             attribute
                                 .key
                                 .eq_ignore_ascii_case(name)
-                                .then(|| attribute.value)
+                                .then(|| decode_to_wstr(&attribute.value))
                         })
                     };
                     let mut format = format_stack.last().unwrap().clone();
                     match &e.name().to_ascii_lowercase()[..] {
-                        b"br" | b"sbr" => {
-                            text.push('\n');
+                        b"br" => {
+                            if is_multiline {
+                                text.push_byte(b'\n');
+                                if let Some(span) = spans.last_mut() {
+                                    span.span_length += 1;
+                                }
+                            }
+
+                            // Skip push to `format_stack`.
+                            continue;
+                        }
+                        b"sbr" => {
+                            // TODO: <sbr> tags do not add a newline, but rather only break
+                            // the format span.
+                            text.push_byte(b'\n');
                             if let Some(span) = spans.last_mut() {
                                 span.span_length += 1;
                             }
@@ -603,41 +643,46 @@ impl FormatSpans {
                             // Skip push to `format_stack`.
                             continue;
                         }
-                        b"p" => match attribute(b"align").as_deref() {
-                            Some(b"left") => format.align = Some(swf::TextAlign::Left),
-                            Some(b"center") => format.align = Some(swf::TextAlign::Center),
-                            Some(b"right") => format.align = Some(swf::TextAlign::Right),
-                            _ => {}
-                        },
+                        b"p" if is_multiline => {
+                            if let Some(align) = attribute(b"align") {
+                                if align == WStr::from_units(b"left") {
+                                    format.align = Some(swf::TextAlign::Left)
+                                } else if align == WStr::from_units(b"center") {
+                                    format.align = Some(swf::TextAlign::Center)
+                                } else if align == WStr::from_units(b"right") {
+                                    format.align = Some(swf::TextAlign::Right)
+                                }
+                            }
+                        }
                         b"a" => {
                             if let Some(href) = attribute(b"href") {
-                                format.url = Some(String::from_utf8_lossy(&href).to_string());
+                                format.url = Some(href);
                             }
 
                             if let Some(target) = attribute(b"target") {
-                                format.target = Some(String::from_utf8_lossy(&target).to_string());
+                                format.target = Some(target);
                             }
                         }
                         b"font" => {
                             if let Some(face) = attribute(b"face") {
-                                format.font = Some(String::from_utf8_lossy(&face).to_string());
+                                format.font = Some(face);
                             }
 
                             if let Some(size) = attribute(b"size") {
-                                format.size = String::from_utf8_lossy(&size).parse().ok();
+                                format.size = size.parse().ok();
                             }
 
                             if let Some(color) = attribute(b"color") {
-                                if color.starts_with(b"#") {
-                                    let rval = color.get(1..3).and_then(|v| {
-                                        u8::from_str_radix(&String::from_utf8_lossy(v), 16).ok()
-                                    });
-                                    let gval = color.get(3..5).and_then(|v| {
-                                        u8::from_str_radix(&String::from_utf8_lossy(v), 16).ok()
-                                    });
-                                    let bval = color.get(5..7).and_then(|v| {
-                                        u8::from_str_radix(&String::from_utf8_lossy(v), 16).ok()
-                                    });
+                                if color.starts_with(b'#') {
+                                    let rval = color
+                                        .slice(1..3)
+                                        .and_then(|v| u8::from_wstr_radix(v, 16).ok());
+                                    let gval = color
+                                        .slice(3..5)
+                                        .and_then(|v| u8::from_wstr_radix(v, 16).ok());
+                                    let bval = color
+                                        .slice(5..7)
+                                        .and_then(|v| u8::from_wstr_radix(v, 16).ok());
 
                                     if let (Some(r), Some(g), Some(b)) = (rval, gval, bval) {
                                         format.color = Some(swf::Color { r, g, b, a: 0 });
@@ -646,14 +691,15 @@ impl FormatSpans {
                             }
 
                             if let Some(letter_spacing) = attribute(b"letterSpacing") {
-                                format.letter_spacing =
-                                    String::from_utf8_lossy(&letter_spacing).parse().ok();
+                                format.letter_spacing = letter_spacing.parse().ok();
                             }
 
-                            match attribute(b"kerning").as_deref() {
-                                Some(b"1") => format.kerning = Some(true),
-                                Some(b"0") => format.kerning = Some(false),
-                                _ => {}
+                            if let Some(kerning) = attribute(b"kerning") {
+                                if kerning == WStr::from_units(b"1") {
+                                    format.kerning = Some(true);
+                                } else if kerning == WStr::from_units(b"0") {
+                                    format.kerning = Some(false);
+                                }
                             }
                         }
                         b"b" => {
@@ -665,39 +711,36 @@ impl FormatSpans {
                         b"u" => {
                             format.underline = Some(true);
                         }
-                        b"li" => {
+                        b"li" if is_multiline => {
                             format.bullet = Some(true);
                         }
                         b"textformat" => {
                             //TODO: Spec says these are all in twips. That doesn't seem to
                             //match Flash 8.
                             if let Some(left_margin) = attribute(b"leftmargin") {
-                                format.left_margin =
-                                    String::from_utf8_lossy(&left_margin).parse().ok();
+                                format.left_margin = left_margin.parse().ok();
                             }
 
                             if let Some(right_margin) = attribute(b"rightmargin") {
-                                format.right_margin =
-                                    String::from_utf8_lossy(&right_margin).parse().ok();
+                                format.right_margin = right_margin.parse().ok();
                             }
 
                             if let Some(indent) = attribute(b"indent") {
-                                format.indent = String::from_utf8_lossy(&indent).parse().ok();
+                                format.indent = indent.parse().ok();
                             }
 
                             if let Some(block_indent) = attribute(b"blockindent") {
-                                format.block_indent =
-                                    String::from_utf8_lossy(&block_indent).parse().ok();
+                                format.block_indent = block_indent.parse().ok();
                             }
 
                             if let Some(leading) = attribute(b"leading") {
-                                format.leading = String::from_utf8_lossy(&leading).parse().ok();
+                                format.leading = leading.parse().ok();
                             }
 
                             if let Some(tab_stops) = attribute(b"tabstops") {
                                 format.tab_stops = Some(
-                                    String::from_utf8_lossy(&tab_stops)
-                                        .split(',')
+                                    tab_stops
+                                        .split(b',')
                                         .filter_map(|v| v.trim().parse().ok())
                                         .collect(),
                                 );
@@ -707,9 +750,9 @@ impl FormatSpans {
                     }
                     format_stack.push(format);
                 }
-                Ok(Event::Text(e)) => {
-                    let e = String::from_utf8_lossy(&e);
-                    let e = process_html_entity(&e);
+                Ok(Event::Text(e)) if !e.is_empty() => {
+                    let e = decode_to_wstr(e.escaped());
+                    let e = process_html_entity(&e).unwrap_or(e);
                     let format = format_stack.last().unwrap().clone();
                     text.push_str(&e);
                     spans.push(TextSpan::with_length_and_format(e.len(), format));
@@ -720,8 +763,8 @@ impl FormatSpans {
                             // Skip pop from `format_stack`.
                             continue;
                         }
-                        b"p" | b"li" => {
-                            text.push('\n');
+                        b"p" | b"li" if is_multiline => {
+                            text.push_byte(b'\n');
                             if let Some(span) = spans.last_mut() {
                                 span.span_length += 1;
                             }
@@ -743,7 +786,7 @@ impl FormatSpans {
 
         Self {
             text,
-            displayed_text: "".to_string(),
+            displayed_text: WString::new(),
             spans,
             default_format,
         }
@@ -758,11 +801,11 @@ impl FormatSpans {
     }
 
     pub fn hide_text(&mut self) {
-        self.displayed_text = "*".repeat(self.text.len());
+        self.displayed_text = WStr::from_units(b"*").repeat(self.text.len());
     }
 
     pub fn clear_displayed_text(&mut self) {
-        self.displayed_text = "".to_string();
+        self.displayed_text = WString::new();
     }
 
     pub fn has_displayed_text(&self) -> bool {
@@ -770,11 +813,11 @@ impl FormatSpans {
     }
 
     /// Retrieve the text backing the format spans.
-    pub fn text(&self) -> &str {
+    pub fn text(&self) -> &WStr {
         &self.text
     }
 
-    pub fn displayed_text(&self) -> &str {
+    pub fn displayed_text(&self) -> &WStr {
         if self.has_displayed_text() {
             &self.displayed_text
         } else {
@@ -1017,7 +1060,7 @@ impl FormatSpans {
         &mut self,
         from: usize,
         to: usize,
-        with: &str,
+        with: &WStr,
         new_tf: Option<&TextFormat>,
     ) {
         if to < from {
@@ -1048,8 +1091,8 @@ impl FormatSpans {
             ));
         }
 
-        let mut new_string = String::new();
-        if let Some(text) = self.text.get(0..from) {
+        let mut new_string = WString::new();
+        if let Some(text) = self.text.slice(0..from) {
             new_string.push_str(text);
         } else {
             // `get` will fail if `from` exceeds the bounds of the text, rather
@@ -1059,7 +1102,7 @@ impl FormatSpans {
         }
         new_string.push_str(with);
 
-        if let Some(text) = self.text.get(to..) {
+        if let Some(text) = self.text.slice(to..) {
             new_string.push_str(text);
         }
 
@@ -1078,336 +1121,278 @@ impl FormatSpans {
     ///    character covered by the span, plus one)
     /// 3. The string contents of the text span
     /// 4. The formatting applied to the text span.
-    pub fn iter_spans(&self) -> impl Iterator<Item = (usize, usize, &str, &TextSpan)> {
+    pub fn iter_spans(&self) -> TextSpanIter {
         TextSpanIter::for_format_spans(self)
     }
 
-    #[allow(clippy::float_cmp)]
-    pub fn raise_to_html<'gc>(&self, mc: MutationContext<'gc, '_>) -> XmlDocument<'gc> {
-        let document = XmlDocument::new(mc);
-        let mut root = document.as_node();
+    pub fn to_html(&self) -> WString {
+        let mut spans = self.iter_spans();
+        let mut state = if let Some((_start, _end, text, span)) = spans.next() {
+            let mut state = FormatState {
+                result: WString::new(),
+                font_stack: VecDeque::new(),
+                span,
+                is_open: false,
+            };
+            state.push_text(text);
+            state
+        } else {
+            return WString::new();
+        };
 
-        let mut last_span = self.span(0);
+        for (_start, _end, text, span) in spans {
+            state.set_span(span);
+            state.push_text(text);
+        }
 
-        //HTML elements are nested roughly in this order.
-        //Some of them nest within themselves, but we only store the last one,
-        //as Flash doesn't seem to un-nest them at all.
-        let mut last_text_format_element = None;
-        let mut last_bullet = None;
-        let mut last_paragraph = None;
-        let mut last_font = None;
-        let mut last_a = None;
-        let mut last_b = None;
-        let mut last_i = None;
-        let mut last_u = None;
+        state.close_tags();
+        state.result
+    }
+}
 
-        for (start, _end, text, span) in self.iter_spans() {
-            let ls = &last_span.unwrap();
+/// Holds required state for HTML formatting.
+struct FormatState<'a> {
+    result: WString,
+    font_stack: VecDeque<&'a TextSpan>,
+    span: &'a TextSpan,
+    is_open: bool,
+}
 
-            if ls.left_margin != span.left_margin
-                || ls.right_margin != span.right_margin
-                || ls.indent != span.indent
-                || ls.block_indent != span.block_indent
-                || ls.leading != span.leading
-                || ls.tab_stops != span.tab_stops
-                || last_text_format_element.is_none()
-            {
-                let new_tf = XmlNode::new_element(mc, "TEXTFORMAT", document);
+impl<'a> FormatState<'a> {
+    fn open_tags(&mut self) {
+        if self.is_open {
+            return;
+        }
 
-                if ls.left_margin != 0.0 {
-                    new_tf.set_attribute_value(
-                        mc,
-                        &XmlName::from_str("LEFTMARGIN"),
-                        &format!("{}", span.left_margin),
-                    );
-                }
-
-                if ls.right_margin != 0.0 {
-                    new_tf.set_attribute_value(
-                        mc,
-                        &XmlName::from_str("RIGHTMARGIN"),
-                        &format!("{}", span.right_margin),
-                    );
-                }
-
-                if ls.indent != 0.0 {
-                    new_tf.set_attribute_value(
-                        mc,
-                        &XmlName::from_str("INDENT"),
-                        &format!("{}", span.indent),
-                    );
-                }
-
-                if ls.block_indent != 0.0 {
-                    new_tf.set_attribute_value(
-                        mc,
-                        &XmlName::from_str("BLOCKINDENT"),
-                        &format!("{}", span.block_indent),
-                    );
-                }
-
-                if ls.leading != 0.0 {
-                    new_tf.set_attribute_value(
-                        mc,
-                        &XmlName::from_str("LEADING"),
-                        &format!("{}", span.leading),
-                    );
-                }
-
-                if !ls.tab_stops.is_empty() {
-                    new_tf.set_attribute_value(
-                        mc,
-                        &XmlName::from_str("TABSTOPS"),
-                        &span
-                            .tab_stops
-                            .iter()
-                            .map(|s| format!("{}", s))
-                            .collect::<Vec<_>>()
-                            .join(","),
-                    );
-                }
-
-                last_text_format_element = Some(new_tf);
-                last_bullet = None;
-                last_paragraph = None;
-                last_font = None;
-                last_a = None;
-                last_b = None;
-                last_i = None;
-                last_u = None;
-
-                root.append_child(mc, new_tf).unwrap();
+        if self.span.left_margin != 0.0
+            || self.span.right_margin != 0.0
+            || self.span.indent != 0.0
+            || self.span.leading != 0.0
+            || self.span.block_indent != 0.0
+            || !self.span.tab_stops.is_empty()
+        {
+            self.result.push_str(WStr::from_units(b"<TEXTFORMAT"));
+            if self.span.left_margin != 0.0 {
+                let _ = write!(self.result, " LEFTMARGIN=\"{}\"", self.span.left_margin);
             }
+            if self.span.right_margin != 0.0 {
+                let _ = write!(self.result, " RIGHTMARGIN=\"{}\"", self.span.right_margin);
+            }
+            if self.span.indent != 0.0 {
+                let _ = write!(self.result, " INDENT=\"{}\"", self.span.indent);
+            }
+            if self.span.leading != 0.0 {
+                let _ = write!(self.result, " LEADING=\"{}\"", self.span.leading);
+            }
+            if self.span.block_indent != 0.0 {
+                let _ = write!(self.result, " BLOCKINDENT=\"{}\"", self.span.block_indent);
+            }
+            if !self.span.tab_stops.is_empty() {
+                let _ = write!(
+                    self.result,
+                    " TABSTOPS=\"{}\"",
+                    self.span
+                        .tab_stops
+                        .iter()
+                        .map(f64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
+            }
+            self.result.push_byte(b'>');
+        }
 
-            let mut can_span_create_bullets = start == 0;
-            for line in text.split(|c| c == '\n' || c == '\r') {
-                if can_span_create_bullets && span.bullet
-                    || !can_span_create_bullets && last_span.map(|ls| ls.bullet).unwrap_or(false)
-                {
-                    let new_li = XmlNode::new_element(mc, "LI", document);
-
-                    last_bullet = Some(new_li);
-                    last_paragraph = None;
-                    last_font = None;
-                    last_a = None;
-                    last_b = None;
-                    last_i = None;
-                    last_u = None;
-
-                    last_text_format_element
-                        .unwrap_or(root)
-                        .append_child(mc, new_li)
-                        .unwrap();
+        if self.span.bullet {
+            self.result.push_str(WStr::from_units(b"<LI>"));
+        } else {
+            let _ = write!(
+                self.result,
+                "<P ALIGN=\"{}\">",
+                match self.span.align {
+                    swf::TextAlign::Left => "LEFT",
+                    swf::TextAlign::Center => "CENTER",
+                    swf::TextAlign::Right => "RIGHT",
+                    swf::TextAlign::Justify => "JUSTIFY",
                 }
+            );
+        }
 
-                if ls.align != span.align || last_paragraph.is_none() {
-                    let new_p = XmlNode::new_element(mc, "P", document);
+        let _ = write!(
+            self.result,
+            "<FONT FACE=\"{}\" SIZE=\"{}\" COLOR=\"#{:0>2X}{:0>2X}{:0>2X}\" LETTERSPACING=\"{}\" KERNING=\"{}\">",
+            self.span.font,
+            self.span.size,
+            self.span.color.r,
+            self.span.color.g,
+            self.span.color.b,
+            self.span.letter_spacing,
+            if self.span.kerning { "1" } else { "0" },
+        );
+        self.font_stack.push_front(self.span);
 
-                    new_p.set_attribute_value(
-                        mc,
-                        &XmlName::from_str("ALIGN"),
-                        match span.align {
-                            swf::TextAlign::Left => "LEFT",
-                            swf::TextAlign::Center => "CENTER",
-                            swf::TextAlign::Right => "RIGHT",
-                            swf::TextAlign::Justify => "JUSTIFY",
-                        },
+        if !self.span.url.is_empty() {
+            let _ = write!(
+                self.result,
+                "<A HREF=\"{}\" TARGET=\"{}\">",
+                self.span.url, self.span.target
+            );
+        }
+
+        if self.span.bold {
+            self.result.push_str(WStr::from_units(b"<B>"));
+        }
+
+        if self.span.italic {
+            self.result.push_str(WStr::from_units(b"<I>"));
+        }
+
+        if self.span.underline {
+            self.result.push_str(WStr::from_units(b"<U>"));
+        }
+
+        self.is_open = true;
+    }
+
+    fn close_tags(&mut self) {
+        if !self.is_open {
+            return;
+        }
+
+        if self.span.underline {
+            self.result.push_str(WStr::from_units(b"</U>"));
+        }
+
+        if self.span.italic {
+            self.result.push_str(WStr::from_units(b"</I>"));
+        }
+
+        if self.span.bold {
+            self.result.push_str(WStr::from_units(b"</B>"));
+        }
+
+        if !self.span.url.is_empty() {
+            self.result.push_str(WStr::from_units(b"</A>"));
+        }
+
+        self.result
+            .push_str(&WStr::from_units(b"</FONT>").repeat(self.font_stack.len()));
+        self.font_stack.clear();
+
+        if self.span.bullet {
+            self.result.push_str(WStr::from_units(b"</LI>"));
+        } else {
+            self.result.push_str(WStr::from_units(b"</P>"));
+        }
+
+        if self.span.left_margin != 0.0
+            || self.span.right_margin != 0.0
+            || self.span.indent != 0.0
+            || self.span.leading != 0.0
+            || self.span.block_indent != 0.0
+            || !self.span.tab_stops.is_empty()
+        {
+            self.result.push_str(WStr::from_units(b"</TEXTFORMAT>"));
+        }
+
+        self.is_open = false;
+    }
+
+    fn set_span(&mut self, span: &'a TextSpan) {
+        if !span.underline && self.span.underline {
+            self.result.push_str(WStr::from_units(b"</U>"));
+        }
+
+        if !span.italic && self.span.italic {
+            self.result.push_str(WStr::from_units(b"</I>"));
+        }
+
+        if !span.bold && self.span.bold {
+            self.result.push_str(WStr::from_units(b"</B>"));
+        }
+
+        if span.url != self.span.url && !self.span.url.is_empty() {
+            self.result.push_str(WStr::from_units(b"</A>"));
+        }
+
+        if span.font != self.span.font
+            || span.size != self.span.size
+            || span.color != self.span.color
+            || span.letter_spacing != self.span.letter_spacing
+            || span.kerning != self.span.kerning
+        {
+            let pos = self.font_stack.iter().position(|font| {
+                span.font == font.font
+                    && span.size == font.size
+                    && span.color == font.color
+                    && span.letter_spacing == font.letter_spacing
+                    && span.kerning == font.kerning
+            });
+            if let Some(pos) = pos {
+                self.result
+                    .push_str(&WStr::from_units(b"</FONT>").repeat(pos));
+                self.font_stack.drain(0..pos);
+            } else {
+                self.result.push_str(WStr::from_units(b"<FONT"));
+                if span.font != self.span.font {
+                    let _ = write!(self.result, " FACE=\"{}\"", span.font);
+                }
+                if span.size != self.span.size {
+                    let _ = write!(self.result, " SIZE=\"{}\"", span.size);
+                }
+                if span.color != self.span.color {
+                    let _ = write!(
+                        self.result,
+                        " COLOR=\"#{:0>2X}{:0>2X}{:0>2X}\"",
+                        span.color.r, span.color.g, span.color.b
                     );
-
-                    last_bullet
-                        .or(last_text_format_element)
-                        .unwrap_or(root)
-                        .append_child(mc, new_p)
-                        .unwrap();
-                    last_paragraph = Some(new_p);
-                    last_font = None;
-                    last_a = None;
-                    last_b = None;
-                    last_i = None;
-                    last_u = None;
                 }
-
-                if ls.font != span.font
-                    || ls.size != span.size
-                    || ls.color != span.color
-                    || ls.letter_spacing != span.letter_spacing
-                    || ls.kerning != span.kerning
-                    || last_font.is_none()
-                {
-                    let new_font = XmlNode::new_element(mc, "FONT", document);
-
-                    if ls.font != span.font || last_font.is_none() {
-                        new_font.set_attribute_value(mc, &XmlName::from_str("FACE"), &span.font);
-                    }
-
-                    if ls.size != span.size || last_font.is_none() {
-                        new_font.set_attribute_value(
-                            mc,
-                            &XmlName::from_str("SIZE"),
-                            &format!("{}", span.size),
-                        );
-                    }
-
-                    if ls.color != span.color || last_font.is_none() {
-                        new_font.set_attribute_value(
-                            mc,
-                            &XmlName::from_str("COLOR"),
-                            &format!(
-                                "#{:0>2X}{:0>2X}{:0>2X}",
-                                span.color.r, span.color.g, span.color.b
-                            ),
-                        );
-                    }
-
-                    if ls.letter_spacing != span.letter_spacing || last_font.is_none() {
-                        new_font.set_attribute_value(
-                            mc,
-                            &XmlName::from_str("LETTERSPACING"),
-                            &format!("{}", span.letter_spacing),
-                        );
-                    }
-
-                    if ls.kerning != span.kerning || last_font.is_none() {
-                        new_font.set_attribute_value(
-                            mc,
-                            &XmlName::from_str("KERNING"),
-                            if span.kerning { "1" } else { "0" },
-                        );
-                    }
-
-                    last_font
-                        .or(last_paragraph)
-                        .or(last_bullet)
-                        .or(last_text_format_element)
-                        .unwrap_or(root)
-                        .append_child(mc, new_font)
-                        .unwrap();
-
-                    last_font = Some(new_font);
-                    last_a = None;
-                    last_b = None;
-                    last_i = None;
-                    last_u = None;
+                if span.letter_spacing != self.span.letter_spacing {
+                    let _ = write!(self.result, " LETTERSPACING=\"{}\"", span.letter_spacing);
                 }
-
-                if !span.url.is_empty() && (ls.url != span.url || last_a.is_none()) {
-                    let new_a = XmlNode::new_element(mc, "A", document);
-
-                    new_a.set_attribute_value(mc, &XmlName::from_str("HREF"), &span.url);
-
-                    if !span.target.is_empty() {
-                        new_a.set_attribute_value(mc, &XmlName::from_str("TARGET"), &span.target);
-                    }
-
-                    last_font
-                        .or(last_paragraph)
-                        .or(last_bullet)
-                        .or(last_text_format_element)
-                        .unwrap_or(root)
-                        .append_child(mc, new_a)
-                        .unwrap();
-
-                    last_b = None;
-                    last_i = None;
-                    last_u = None;
-                } else if span.url.is_empty() && (ls.url != span.url || last_a.is_some()) {
-                    last_a = None;
-                    last_b = None;
-                    last_i = None;
-                    last_u = None;
+                if span.kerning != self.span.kerning {
+                    let _ = write!(
+                        self.result,
+                        " KERNING=\"{}\"",
+                        if span.kerning { "1" } else { "0" }
+                    );
                 }
-
-                if span.bold && last_b.is_none() {
-                    let new_b = XmlNode::new_element(mc, "B", document);
-
-                    last_a
-                        .or(last_font)
-                        .or(last_paragraph)
-                        .or(last_bullet)
-                        .or(last_text_format_element)
-                        .unwrap_or(root)
-                        .append_child(mc, new_b)
-                        .unwrap();
-
-                    last_b = Some(new_b);
-                    last_i = None;
-                    last_u = None;
-                } else if !span.bold && last_b.is_some() {
-                    last_b = None;
-                    last_i = None;
-                    last_u = None;
-                }
-
-                if span.italic && last_i.is_none() {
-                    let new_i = XmlNode::new_element(mc, "I", document);
-
-                    last_b
-                        .or(last_a)
-                        .or(last_font)
-                        .or(last_paragraph)
-                        .or(last_bullet)
-                        .or(last_text_format_element)
-                        .unwrap_or(root)
-                        .append_child(mc, new_i)
-                        .unwrap();
-
-                    last_i = Some(new_i);
-                    last_u = None;
-                } else if !span.italic && last_i.is_some() {
-                    last_i = None;
-                    last_u = None;
-                }
-
-                if span.underline && last_u.is_none() {
-                    let new_u = XmlNode::new_element(mc, "U", document);
-
-                    last_i
-                        .or(last_b)
-                        .or(last_a)
-                        .or(last_font)
-                        .or(last_paragraph)
-                        .or(last_bullet)
-                        .or(last_text_format_element)
-                        .unwrap_or(root)
-                        .append_child(mc, new_u)
-                        .unwrap();
-
-                    last_u = Some(new_u);
-                } else if !span.underline && last_u.is_some() {
-                    last_u = None;
-                }
-
-                let span_text = if last_bullet.is_some() {
-                    XmlNode::new_text(mc, line, document)
-                } else {
-                    let line_start = line.as_ptr() as usize - text.as_ptr() as usize;
-                    let line_with_newline = if line_start > 0 {
-                        // -1/+1 is ok here since it's referring to '\n'
-                        text.get(line_start - 1..line.len() + 1).unwrap_or(line)
-                    } else {
-                        line
-                    };
-
-                    XmlNode::new_text(mc, line_with_newline, document)
-                };
-
-                last_u
-                    .or(last_i)
-                    .or(last_b)
-                    .or(last_a)
-                    .or(last_font)
-                    .or(last_paragraph)
-                    .or(last_bullet)
-                    .or(last_text_format_element)
-                    .unwrap_or(root)
-                    .append_child(mc, span_text)
-                    .unwrap();
-
-                last_span = Some(span);
-                can_span_create_bullets = true;
+                self.result.push_byte(b'>');
+                self.font_stack.push_front(span);
             }
         }
 
-        document
+        if span.url != self.span.url && !span.url.is_empty() {
+            let _ = write!(
+                self.result,
+                "<A HREF=\"{}\" TARGET=\"{}\">",
+                span.url, span.target
+            );
+        }
+
+        if span.bold && !self.span.bold {
+            self.result.push_str(WStr::from_units(b"<B>"));
+        }
+
+        if span.italic && !self.span.italic {
+            self.result.push_str(WStr::from_units(b"<I>"));
+        }
+
+        if span.underline && !self.span.underline {
+            self.result.push_str(WStr::from_units(b"<U>"));
+        }
+
+        self.span = span;
+    }
+
+    fn push_text(&mut self, text: &WStr) {
+        for (i, text) in text.split(&[b'\n', b'\r'][..]).enumerate() {
+            self.open_tags();
+            if i > 0 {
+                self.close_tags();
+            }
+            let encoded = text.to_utf8_lossy();
+            let escaped = escape(encoded.as_bytes());
+            self.result.push_str(WStr::from_units(&*escaped));
+        }
     }
 }

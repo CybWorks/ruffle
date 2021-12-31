@@ -14,7 +14,7 @@ use crate::avm2::script::Script;
 use crate::avm2::value::Value;
 use crate::avm2::{value, Avm2, Error};
 use crate::context::UpdateContext;
-use crate::string::AvmString;
+use crate::string::{AvmString, WStr, WString};
 use crate::swf::extensions::ReadSwfExt;
 use gc_arena::{Gc, GcCell, MutationContext};
 use smallvec::SmallVec;
@@ -230,7 +230,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let outer_scope = self.outer;
 
         if let Some(obj) = self.scope_stack.find(name, outer_scope.is_empty())? {
-            Ok(Some(obj.get_property(obj, name, self)?))
+            Ok(Some(obj.get_property(name, self)?))
         } else if let Some(result) = outer_scope.resolve(name, self)? {
             Ok(Some(result))
         } else {
@@ -244,14 +244,14 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     /// typed named is not a class object.
     fn resolve_type(
         &mut self,
-        type_name: Multiname<'gc>,
+        type_name: &Multiname<'gc>,
     ) -> Result<Option<ClassObject<'gc>>, Error> {
         if type_name.is_any() {
             return Ok(None);
         }
 
         let class = self
-            .resolve_definition(&type_name)?
+            .resolve_definition(type_name)?
             .ok_or_else(|| format!("Could not resolve parameter type {:?}", type_name))?
             .coerce_to_object(self)?;
 
@@ -266,7 +266,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             let mut param_types = Vec::with_capacity(type_name.params().len());
 
             for param in type_name.params() {
-                param_types.push(match self.resolve_type(param.clone())? {
+                param_types.push(match self.resolve_type(param)? {
                     Some(o) => Value::Object(o.into()),
                     None => Value::Null,
                 });
@@ -305,8 +305,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             .into());
         };
 
-        let type_name = param_config.param_type_name.clone();
-        let param_type = self.resolve_type(type_name)?;
+        let param_type = self.resolve_type(&param_config.param_type_name)?;
 
         if let Some(param_type) = param_type {
             arg.coerce_to_type(self, param_type)
@@ -439,7 +438,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
                 .iter()
                 .enumerate()
             {
-                *write.get_mut(1 + i as u32).unwrap() = arg.clone();
+                *write.get_mut(1 + i as u32).unwrap() = *arg;
             }
         }
 
@@ -460,7 +459,6 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
             if method.method().needs_arguments_object {
                 args_object.set_property(
-                    args_object,
                     &QName::new(Namespace::public(), "callee").into(),
                     callee.into(),
                     &mut activation,
@@ -728,8 +726,10 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         method: Gc<'gc, BytecodeMethod<'gc>>,
         index: Index<AbcMethod>,
         is_function: bool,
-    ) -> Result<Gc<'gc, BytecodeMethod<'gc>>, Error> {
-        BytecodeMethod::from_method_index(method.translation_unit(), index, is_function, self)
+    ) -> Result<Method<'gc>, Error> {
+        method
+            .translation_unit()
+            .load_method(index, is_function, self)
     }
 
     /// Retrieve a class entry from the current ABC file's method table.
@@ -1121,19 +1121,31 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         Ok(FrameControl::Continue)
     }
 
+    #[allow(unused_variables)]
     fn op_call_method(
         &mut self,
         index: Index<AbcMethod>,
         arg_count: u32,
     ) -> Result<FrameControl<'gc>, Error> {
-        let args = self.context.avm2.pop_args(arg_count);
-        let receiver = self.context.avm2.pop().coerce_to_object(self)?;
+        // The entire implementation of VTable assumes that
+        // call_method is never encountered. (see the long comment there)
+        // This was also the conlusion from analysing avmplus behavior - they
+        // unconditionally VerifyError upon noticing it.
+        // If we ever reach here, let's immediately panic instead of erroring,
+        // so we get an issue report ASAP.
+        panic!("Call_method is not supported");
 
-        let value = receiver.call_method(index.0, &args, self)?;
+        #[allow(unreachable_code)]
+        {
+            let args = self.context.avm2.pop_args(arg_count);
+            let receiver = self.context.avm2.pop().coerce_to_object(self)?;
 
-        self.context.avm2.push(value);
+            let value = receiver.call_method(index.0, &args, self)?;
 
-        Ok(FrameControl::Continue)
+            self.context.avm2.push(value);
+
+            Ok(FrameControl::Continue)
+        }
     }
 
     fn op_call_property(
@@ -1163,7 +1175,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let multiname = self.pool_multiname(method, index)?;
         let receiver = self.context.avm2.pop().coerce_to_object(self)?;
         let function = receiver
-            .get_property(receiver, &multiname, self)?
+            .get_property(&multiname, self)?
             .coerce_to_object(self)?;
         let value = function.call(None, &args, self)?;
 
@@ -1198,7 +1210,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let method = self.table_method(method, index, false)?;
         // TODO: What scope should the function be executed with?
         let scope = self.create_scopechain();
-        let function = FunctionObject::from_method(self, method.into(), scope, None, None);
+        let function = FunctionObject::from_method(self, method, scope, None, None);
         let value = function.call(Some(receiver), &args, self)?;
 
         self.context.avm2.push(value);
@@ -1265,7 +1277,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     ) -> Result<FrameControl<'gc>, Error> {
         let txunit = method.translation_unit();
         let abc = txunit.abc();
-        let abc_multiname = Multiname::resolve_multiname_index(&abc, index.clone())?;
+        let abc_multiname = Multiname::resolve_multiname_index(&abc, index)?;
         let (multiname, object) = if matches!(
             abc_multiname,
             AbcMultiname::MultinameL { .. } | AbcMultiname::MultinameLA { .. }
@@ -1297,7 +1309,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             (multiname, object)
         };
 
-        let value = object.get_property(object, &multiname, self)?;
+        let value = object.get_property(&multiname, self)?;
         self.context.avm2.push(value);
 
         Ok(FrameControl::Continue)
@@ -1311,7 +1323,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let value = self.context.avm2.pop();
         let txunit = method.translation_unit();
         let abc = txunit.abc();
-        let abc_multiname = Multiname::resolve_multiname_index(&abc, index.clone())?;
+        let abc_multiname = Multiname::resolve_multiname_index(&abc, index)?;
         let (multiname, mut object) = if matches!(
             abc_multiname,
             AbcMultiname::MultinameL { .. } | AbcMultiname::MultinameLA { .. }
@@ -1345,7 +1357,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             (multiname, object)
         };
 
-        object.set_property(object, &multiname, value, self)?;
+        object.set_property(&multiname, value, self)?;
 
         Ok(FrameControl::Continue)
     }
@@ -1359,7 +1371,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let multiname = self.pool_multiname(method, index)?;
         let mut object = self.context.avm2.pop().coerce_to_object(self)?;
 
-        object.init_property(object, &multiname, value, self)?;
+        object.init_property(&multiname, value, self)?;
 
         Ok(FrameControl::Continue)
     }
@@ -1371,7 +1383,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     ) -> Result<FrameControl<'gc>, Error> {
         let txunit = method.translation_unit();
         let abc = txunit.abc();
-        let abc_multiname = Multiname::resolve_multiname_index(&abc, index.clone())?;
+        let abc_multiname = Multiname::resolve_multiname_index(&abc, index)?;
         let (multiname, object) = if matches!(
             abc_multiname,
             AbcMultiname::MultinameL { .. } | AbcMultiname::MultinameLA { .. }
@@ -1467,8 +1479,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         }
 
         let name = name_value.coerce_to_string(self)?;
-        let qname = QName::new(Namespace::public(), name);
-        let has_prop = obj.has_property_via_in(self, &qname)?;
+        let multiname = Multiname::public(name);
+        let has_prop = obj.has_property_via_in(self, &multiname)?;
 
         self.context.avm2.push(has_prop);
 
@@ -1677,7 +1689,6 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             let name = self.context.avm2.pop();
 
             object.set_property(
-                object,
                 &QName::dynamic_name(name.coerce_to_string(self)?).into(),
                 value,
                 self,
@@ -1697,7 +1708,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let method_entry = self.table_method(method, index, true)?;
         let scope = self.create_scopechain();
 
-        let new_fn = FunctionObject::from_function(self, method_entry.into(), scope)?;
+        let new_fn = FunctionObject::from_function(self, method_entry, scope)?;
 
         self.context.avm2.push(new_fn);
 
@@ -1819,27 +1830,15 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn op_convert_b(&mut self) -> Result<FrameControl<'gc>, Error> {
-        let value = self.context.avm2.pop().coerce_to_boolean();
-
-        self.context.avm2.push(value);
-
-        Ok(FrameControl::Continue)
+        self.op_coerce_b()
     }
 
     fn op_convert_i(&mut self) -> Result<FrameControl<'gc>, Error> {
-        let value = self.context.avm2.pop().coerce_to_i32(self)?;
-
-        self.context.avm2.push(Value::Number(value.into()));
-
-        Ok(FrameControl::Continue)
+        self.op_coerce_i()
     }
 
     fn op_convert_d(&mut self) -> Result<FrameControl<'gc>, Error> {
-        let value = self.context.avm2.pop().coerce_to_number(self)?;
-
-        self.context.avm2.push(Value::Number(value));
-
-        Ok(FrameControl::Continue)
+        self.op_coerce_d()
     }
 
     fn op_convert_o(&mut self) -> Result<FrameControl<'gc>, Error> {
@@ -1851,11 +1850,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn op_convert_u(&mut self) -> Result<FrameControl<'gc>, Error> {
-        let value = self.context.avm2.pop().coerce_to_u32(self)?;
-
-        self.context.avm2.push(Value::Number(value.into()));
-
-        Ok(FrameControl::Continue)
+        self.op_coerce_u()
     }
 
     fn op_convert_s(&mut self) -> Result<FrameControl<'gc>, Error> {
@@ -1873,35 +1868,31 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         // TODO: Special handling required for `Date` and ECMA-357/E4X `XML`
         let sum_value = match (value1, value2) {
             (Value::Number(n1), Value::Number(n2)) => Value::Number(n1 + n2),
-            (Value::String(s), value2) => {
-                let mut out_s = s.to_string();
-                out_s.push_str(&value2.coerce_to_string(self)?);
-
-                Value::String(AvmString::new(self.context.gc_context, out_s))
-            }
-            (value1, Value::String(s)) => {
-                let mut out_s = value1.coerce_to_string(self)?.to_string();
-                out_s.push_str(&s);
-
-                Value::String(AvmString::new(self.context.gc_context, out_s))
-            }
+            (Value::String(s), value2) => Value::String(AvmString::concat(
+                self.context.gc_context,
+                s,
+                value2.coerce_to_string(self)?,
+            )),
+            (value1, Value::String(s)) => Value::String(AvmString::concat(
+                self.context.gc_context,
+                value1.coerce_to_string(self)?,
+                s,
+            )),
             (value1, value2) => {
                 let prim_value1 = value1.coerce_to_primitive(None, self)?;
                 let prim_value2 = value2.coerce_to_primitive(None, self)?;
 
                 match (prim_value1, prim_value2) {
-                    (Value::String(s), value2) => {
-                        let mut out_s = s.to_string();
-                        out_s.push_str(&value2.coerce_to_string(self)?);
-
-                        Value::String(AvmString::new(self.context.gc_context, out_s))
-                    }
-                    (value1, Value::String(s)) => {
-                        let mut out_s = value1.coerce_to_string(self)?.to_string();
-                        out_s.push_str(&s);
-
-                        Value::String(AvmString::new(self.context.gc_context, out_s))
-                    }
+                    (Value::String(s), value2) => Value::String(AvmString::concat(
+                        self.context.gc_context,
+                        s,
+                        value2.coerce_to_string(self)?,
+                    )),
+                    (value1, Value::String(s)) => Value::String(AvmString::concat(
+                        self.context.gc_context,
+                        value1.coerce_to_string(self)?,
+                        s,
+                    )),
                     (value1, value2) => Value::Number(
                         value1.coerce_to_number(self)? + value2.coerce_to_number(self)?,
                     ),
@@ -2656,10 +2647,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             Value::String(_) => "string",
         };
 
-        self.context.avm2.push(Value::String(AvmString::new(
-            self.context.gc_context,
-            type_name,
-        )));
+        self.context.avm2.push(Value::String(type_name.into()));
 
         Ok(FrameControl::Continue)
     }
@@ -2669,17 +2657,22 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let s = self.context.avm2.pop().coerce_to_string(self)?;
 
         // Implementation of `EscapeAttributeValue` from ECMA-357(10.2.1.2)
-        let mut r = String::new();
-        for c in s.chars() {
-            match c {
-                '"' => r += "&quot;",
-                '<' => r += "&lt;",
-                '&' => r += "&amp;",
-                '\u{000A}' => r += "&#xA;",
-                '\u{000D}' => r += "&#xD;",
-                '\u{0009}' => r += "&#x9;",
-                _ => r.push(c),
-            }
+        let mut r = WString::with_capacity(s.len(), s.is_wide());
+        for c in &s {
+            let escape: &[u8] = match u8::try_from(c) {
+                Ok(b'"') => b"&quot;",
+                Ok(b'<') => b"&lt;",
+                Ok(b'&') => b"&amp;",
+                Ok(b'\x0A') => b"&#xA;",
+                Ok(b'\x0D') => b"&#xD;",
+                Ok(b'\x09') => b"&#x9;",
+                _ => {
+                    r.push(c);
+                    continue;
+                }
+            };
+
+            r.push_str(WStr::from_units(escape));
         }
         self.context
             .avm2
@@ -2694,14 +2687,19 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
         // contrary to the avmplus documentation, this escapes the value on the top of the stack using EscapeElementValue from ECMA-357 *NOT* EscapeAttributeValue.
         // Implementation of `EscapeElementValue` from ECMA-357(10.2.1.1)
-        let mut r = String::new();
-        for c in s.chars() {
-            match c {
-                '<' => r += "&lt;",
-                '>' => r += "&gt;",
-                '&' => r += "&amp;",
-                _ => r.push(c),
-            }
+        let mut r = WString::with_capacity(s.len(), s.is_wide());
+        for c in &s {
+            let escape: &[u8] = match u8::try_from(c) {
+                Ok(b'<') => b"&lt;",
+                Ok(b'>') => b"&gt;",
+                Ok(b'&') => b"&amp;",
+                _ => {
+                    r.push(c);
+                    continue;
+                }
+            };
+
+            r.push_str(WStr::from_units(escape));
         }
         self.context
             .avm2
@@ -2740,7 +2738,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     ) -> Result<FrameControl<'gc>, Error> {
         let val = self.context.avm2.pop();
         let type_name = self.pool_multiname_static_any(method, index)?;
-        let param_type = self.resolve_type(type_name)?;
+        let param_type = self.resolve_type(&type_name)?;
 
         let x = if let Some(param_type) = param_type {
             val.coerce_to_type(self, param_type)?

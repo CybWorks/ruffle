@@ -10,20 +10,19 @@ use crate::avm_warn;
 use crate::backend::navigator::{NavigationMethod, RequestOptions};
 use crate::string::AvmString;
 use gc_arena::MutationContext;
-use std::borrow::Cow;
 
 const PROTO_DECLS: &[Declaration] = declare_properties! {
-    "load" => method(load; DONT_ENUM | DONT_DELETE | READ_ONLY);
-    "send" => method(send; DONT_ENUM | DONT_DELETE | READ_ONLY);
-    "sendAndLoad" => method(send_and_load; DONT_ENUM | DONT_DELETE | READ_ONLY);
-    "decode" => method(decode; DONT_ENUM | DONT_DELETE | READ_ONLY);
-    "getBytesLoaded" => method(get_bytes_loaded; DONT_ENUM | DONT_DELETE | READ_ONLY);
-    "getBytesTotal" => method(get_bytes_total; DONT_ENUM | DONT_DELETE | READ_ONLY);
-    "toString" => method(to_string; DONT_ENUM | DONT_DELETE | READ_ONLY);
-    "contentType" => string("application/x-www-form-urlencoded"; DONT_ENUM | DONT_DELETE | READ_ONLY);
-    "onLoad" => method(on_load; DONT_ENUM | DONT_DELETE | READ_ONLY);
-    "onData" => method(on_data; DONT_ENUM | DONT_DELETE | READ_ONLY);
-    "addRequestHeader" => method(add_request_header; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "load" => method(load; DONT_ENUM | DONT_DELETE);
+    "send" => method(send; DONT_ENUM | DONT_DELETE);
+    "sendAndLoad" => method(send_and_load; DONT_ENUM | DONT_DELETE);
+    "decode" => method(decode; DONT_ENUM | DONT_DELETE);
+    "getBytesLoaded" => method(get_bytes_loaded; DONT_ENUM | DONT_DELETE);
+    "getBytesTotal" => method(get_bytes_total; DONT_ENUM | DONT_DELETE);
+    "toString" => method(to_string; DONT_ENUM | DONT_DELETE);
+    "contentType" => string("application/x-www-form-urlencoded"; DONT_ENUM | DONT_DELETE);
+    "onLoad" => method(on_load; DONT_ENUM | DONT_DELETE);
+    "onData" => method(on_data; DONT_ENUM | DONT_DELETE);
+    "addRequestHeader" => method(add_request_header; DONT_ENUM | DONT_DELETE);
 };
 
 /// Implements `LoadVars`
@@ -64,9 +63,9 @@ fn decode<'gc>(
     // Decode the query string into properties on this object.
     if let Some(data) = args.get(0) {
         let data = data.coerce_to_string(activation)?;
-        for (k, v) in url::form_urlencoded::parse(data.as_bytes()) {
-            let k = AvmString::new(activation.context.gc_context, k.into_owned());
-            let v = AvmString::new(activation.context.gc_context, v.into_owned());
+        for (k, v) in url::form_urlencoded::parse(data.to_utf8_lossy().as_bytes()) {
+            let k = AvmString::new_utf8(activation.context.gc_context, k);
+            let v = AvmString::new_utf8(activation.context.gc_context, v);
             this.set(k, v.into(), activation)?;
         }
     }
@@ -113,9 +112,9 @@ fn on_data<'gc>(
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     // Default implementation forwards to decode and onLoad.
-    let success = match args.get(0) {
-        None | Some(Value::Undefined) | Some(Value::Null) => false,
-        Some(val) => {
+    let success = match args.get(0).unwrap_or(&Value::Undefined) {
+        Value::Undefined | Value::Null => false,
+        val => {
             this.call_method("decode".into(), &[*val], activation)?;
             this.set("loaded", true.into(), activation)?;
             true
@@ -238,7 +237,7 @@ fn to_string<'gc>(
         .extend_pairs(form_values.iter())
         .finish();
 
-    Ok(crate::string::AvmString::new(activation.context.gc_context, query_string).into())
+    Ok(AvmString::new_utf8(activation.context.gc_context, query_string).into())
 }
 
 fn spawn_load_var_fetch<'gc>(
@@ -249,10 +248,10 @@ fn spawn_load_var_fetch<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let (url, request_options) = if let Some((send_object, method)) = send_object {
         // Send properties from `send_object`.
-        activation.object_into_request_options(send_object, Cow::Borrowed(url), Some(method))
+        activation.object_into_request_options(send_object, url, Some(method))
     } else {
         // Not sending any parameters.
-        (Cow::Borrowed(url.as_str()), RequestOptions::get())
+        (url.to_utf8_lossy(), RequestOptions::get())
     };
 
     let fetch = activation.context.navigator.fetch(&url, request_options);

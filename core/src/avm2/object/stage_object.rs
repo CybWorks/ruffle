@@ -1,7 +1,6 @@
 //! AVM2 object impl for the display hierarchy.
 
 use crate::avm2::activation::Activation;
-use crate::avm2::names::{Namespace, QName};
 use crate::avm2::object::script_object::ScriptObjectData;
 use crate::avm2::object::{ClassObject, Object, ObjectPtr, TObject};
 use crate::avm2::value::Value;
@@ -58,13 +57,7 @@ impl<'gc> StageObject<'gc> {
         display_object: DisplayObject<'gc>,
         class: ClassObject<'gc>,
     ) -> Result<Self, Error> {
-        let proto = class
-            .get_property(
-                class.into(),
-                &QName::new(Namespace::public(), "prototype").into(),
-                activation,
-            )?
-            .coerce_to_object(activation)?;
+        let proto = class.prototype();
 
         let mut instance = Self(GcCell::allocate(
             activation.context.gc_context,
@@ -73,7 +66,7 @@ impl<'gc> StageObject<'gc> {
                 display_object: Some(display_object),
             },
         ));
-        instance.install_instance_traits(activation, class)?;
+        instance.install_instance_slots(activation);
 
         Ok(instance)
     }
@@ -109,7 +102,7 @@ impl<'gc> StageObject<'gc> {
                 display_object: Some(display_object),
             },
         ));
-        this.install_instance_traits(activation, class)?;
+        this.install_instance_slots(activation);
 
         class.call_native_init(Some(this.into()), &[], activation)?;
 

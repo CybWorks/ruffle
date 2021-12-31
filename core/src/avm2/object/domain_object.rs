@@ -57,7 +57,7 @@ impl<'gc> DomainObject<'gc> {
             DomainObjectData { base, domain },
         ))
         .into();
-        this.install_instance_traits(activation, class)?;
+        this.install_instance_slots(activation);
 
         class.call_init(Some(this), &[], activation)?;
 
@@ -92,7 +92,6 @@ impl<'gc> TObject<'gc> for DomainObject<'gc> {
         let this: Object<'gc> = Object::DomainObject(*self);
         let constr = this
             .get_property(
-                this,
                 &QName::new(Namespace::public(), "constructor").into(),
                 activation,
             )?

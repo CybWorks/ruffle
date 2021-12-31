@@ -20,7 +20,7 @@ png = "0.17.2"
 wasm-bindgen = "=0.2.78"
 
 [dependencies.jpeg-decoder]
-version = "0.1.22"
+version = "0.2.1"
 default-features = false # can't use rayon on web
 
 [dependencies.ruffle_core]
@@ -30,6 +30,7 @@ default-features = false
 [dependencies.web-sys]
 version = "0.3.50"
 features = [
-    "CanvasRenderingContext2d", "CssStyleDeclaration", "Document", "Element", "HtmlCanvasElement", "HtmlElement", "HtmlImageElement",
-    "Navigator", "Node", "UiEvent", "Window", "Path2d", "CanvasGradient", "CanvasPattern", "SvgMatrix", "SvgsvgElement"
+    "CanvasGradient", "CanvasPattern", "CanvasRenderingContext2d", "CanvasWindingRule", "CssStyleDeclaration",
+    "Document", "Element", "HtmlCanvasElement", "HtmlElement", "HtmlImageElement", "ImageData", "Navigator",
+    "Node", "Path2d", "SvgMatrix", "SvgsvgElement", "UiEvent", "Window",
 ]

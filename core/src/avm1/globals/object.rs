@@ -30,9 +30,9 @@ pub fn constructor<'gc>(
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let this = match args.get(0) {
-        None | Some(Value::Null) | Some(Value::Undefined) => this,
-        Some(val) => val.coerce_to_object(activation),
+    let this = match args.get(0).unwrap_or(&Value::Undefined) {
+        Value::Undefined | Value::Null => this,
+        val => val.coerce_to_object(activation),
     };
     Ok(this.into())
 }
@@ -43,11 +43,11 @@ pub fn object_function<'gc>(
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let obj = match args.get(0) {
-        None | Some(Value::Null) | Some(Value::Undefined) => {
+    let obj = match args.get(0).unwrap_or(&Value::Undefined) {
+        Value::Undefined | Value::Null => {
             Object::from(ScriptObject::object(activation.context.gc_context, None))
         }
-        Some(val) => val.coerce_to_object(activation),
+        val => val.coerce_to_object(activation),
     };
     Ok(obj.into())
 }
@@ -110,10 +110,14 @@ pub fn has_own_property<'gc>(
 /// Implements `Object.prototype.toString`
 fn to_string<'gc>(
     _activation: &mut Activation<'_, 'gc, '_>,
-    _: Object<'gc>,
-    _: &[Value<'gc>],
+    this: Object<'gc>,
+    _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    Ok("[object Object]".into())
+    if this.as_executable().is_some() {
+        Ok("[type Function]".into())
+    } else {
+        Ok("[object Object]".into())
+    }
 }
 
 /// Implements `Object.prototype.isPropertyEnumerable`
@@ -294,8 +298,8 @@ pub fn as_set_prop_flags<'gc>(
         ),
         Some(v) => {
             let props = v.coerce_to_string(activation)?;
-            if props.contains(',') {
-                for prop_name in props.split(',') {
+            if props.contains(b',') {
+                for prop_name in props.split(b',') {
                     object.set_attributes(
                         activation.context.gc_context,
                         Some(AvmString::new(activation.context.gc_context, prop_name)),

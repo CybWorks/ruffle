@@ -13,21 +13,21 @@
         "build:cargo": "cross-env-shell \"cargo build --release --target wasm32-unknown-unknown --features \\\"$CARGO_FEATURES\\\"\"",
         "build:wasm-bindgen": "wasm-bindgen ../../../target/wasm32-unknown-unknown/release/ruffle_web.wasm --target web --out-dir ./pkg --out-name ruffle_web",
         "build:wasm-opt": "wasm-opt -o ./pkg/ruffle_web_bg.wasm -O -g ./pkg/ruffle_web_bg.wasm || npm run build:wasm-opt-failed",
-        "build:wasm-opt-failed": "echo 'NOTE: Since wasm-opt could not be found (or it failed), the resulting module might not perform that well, but it should still work.' && echo ; [ \"$GITHUB_ACTIONS\" != true ] # > nul",
+        "build:wasm-opt-failed": "echo 'NOTE: Since wasm-opt could not be found (or it failed), the resulting module might not perform that well, but it should still work.' && echo ; [ \"$CI\" != true ] # > nul",
         "build:ts": "tsc -d && node tools/set_version.js",
         "docs": "typedoc",
         "test": "cross-env TS_NODE_COMPILER_OPTIONS={\\\"module\\\":\\\"commonjs\\\"} mocha"
     },
     "devDependencies": {
         "@types/mocha": "^9.0.0",
-        "@typescript-eslint/eslint-plugin": "^4.33.0",
-        "@typescript-eslint/parser": "^4.32.0",
-        "eslint": "^7.32.0",
-        "eslint-plugin-jsdoc": "^37.0.3",
-        "mocha": "^9.1.2",
-        "replace-in-file": "^6.2.0",
+        "@typescript-eslint/eslint-plugin": "^5.5.0",
+        "@typescript-eslint/parser": "^5.5.0",
+        "eslint": "^8.4.0",
+        "eslint-plugin-jsdoc": "^37.1.0",
+        "mocha": "^9.1.3",
+        "replace-in-file": "^6.3.2",
         "ts-node": "^10.4.0",
-        "typedoc": "^0.22.7",
-        "typescript": "^4.4.3"
+        "typedoc": "^0.22.10",
+        "typescript": "^4.5.2"
     }
 }

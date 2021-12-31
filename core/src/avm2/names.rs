@@ -4,7 +4,7 @@ use crate::avm2::activation::Activation;
 use crate::avm2::script::TranslationUnit;
 use crate::avm2::value::Value;
 use crate::avm2::Error;
-use crate::string::AvmString;
+use crate::string::{AvmString, WStr, WString};
 use gc_arena::{Collect, MutationContext};
 use swf::avm2::types::{
     AbcFile, Index, Multiname as AbcMultiname, Namespace as AbcNamespace,
@@ -13,7 +13,7 @@ use swf::avm2::types::{
 
 /// Represents the name of a namespace.
 #[allow(clippy::enum_variant_names)]
-#[derive(Clone, Collect, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Collect, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[collect(no_drop)]
 pub enum Namespace<'gc> {
     Namespace(AvmString<'gc>),
@@ -86,7 +86,7 @@ impl<'gc> Namespace<'gc> {
     }
 
     pub fn is_public(&self) -> bool {
-        *self == Self::public()
+        matches!(self, Self::Package(name) if name.is_empty())
     }
 
     pub fn is_any(&self) -> bool {
@@ -95,10 +95,6 @@ impl<'gc> Namespace<'gc> {
 
     pub fn is_private(&self) -> bool {
         matches!(self, Self::Private(_))
-    }
-
-    pub fn is_dynamic(&self) -> bool {
-        self.is_public() || self.is_any()
     }
 
     pub fn is_package(&self, package_name: impl Into<AvmString<'gc>>) -> bool {
@@ -139,12 +135,21 @@ impl<'gc> Namespace<'gc> {
 /// `QName`. All other forms of names and multinames are either versions of
 /// `QName` with unspecified parameters, or multiple names to be checked in
 /// order.
-#[derive(Clone, Collect, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Collect, Debug, Hash)]
 #[collect(no_drop)]
 pub struct QName<'gc> {
     ns: Namespace<'gc>,
     name: AvmString<'gc>,
 }
+
+impl<'gc> PartialEq for QName<'gc> {
+    fn eq(&self, other: &Self) -> bool {
+        // Implemented by hand to enforce order of comparisons for perf
+        self.name == other.name && self.ns == other.ns
+    }
+}
+
+impl<'gc> Eq for QName<'gc> {}
 
 impl<'gc> QName<'gc> {
     pub fn new(ns: Namespace<'gc>, name: impl Into<AvmString<'gc>>) -> Self {
@@ -184,7 +189,7 @@ impl<'gc> QName<'gc> {
 
         Ok(match abc_multiname? {
             AbcMultiname::QName { namespace, name } => Self {
-                ns: Namespace::from_abc_namespace(translation_unit, namespace.clone(), mc)?,
+                ns: Namespace::from_abc_namespace(translation_unit, *namespace, mc)?,
                 name: translation_unit.pool_string(name.0, mc)?,
             },
             _ => return Err("Attempted to pull QName from non-QName multiname".into()),
@@ -197,69 +202,65 @@ impl<'gc> QName<'gc> {
     /// NAMESPACE::LOCAL_NAME
     /// NAMESPACE.LOCAL_NAME (Where the LAST dot is used to split the namespace & local_name)
     /// LOCAL_NAME (Use the public namespace)
-    pub fn from_qualified_name(name: &str, mc: MutationContext<'gc, '_>) -> Self {
-        if let Some((package_name, local_name)) = name.rsplit_once("::") {
+    pub fn from_qualified_name(name: AvmString<'gc>, mc: MutationContext<'gc, '_>) -> Self {
+        let parts = name
+            .rsplit_once(WStr::from_units(b"::"))
+            .or_else(|| name.rsplit_once(WStr::from_units(b".")));
+
+        if let Some((package_name, local_name)) = parts {
             Self {
-                ns: Namespace::Package(AvmString::new(mc, package_name.to_string())),
-                name: AvmString::new(mc, local_name.to_string()),
-            }
-        } else if let Some((package_name, local_name)) = name.rsplit_once('.') {
-            Self {
-                ns: Namespace::Package(AvmString::new(mc, package_name.to_string())),
-                name: AvmString::new(mc, local_name.to_string()),
+                ns: Namespace::Package(AvmString::new(mc, package_name)),
+                name: AvmString::new(mc, local_name),
             }
         } else {
             Self {
                 ns: Namespace::public(),
-                name: AvmString::new(mc, name.to_string()),
+                name,
             }
         }
     }
 
     /// Converts this `QName` to a fully qualified name.
-    pub fn to_qualified_name(&self) -> String {
+    pub fn to_qualified_name(self, mc: MutationContext<'gc, '_>) -> AvmString<'gc> {
         let uri = self.namespace().as_uri();
         let name = self.local_name();
-        uri.is_empty()
-            .then(|| name.to_string())
-            .unwrap_or_else(|| format!("{}::{}", uri, name))
+        uri.is_empty().then(|| name).unwrap_or_else(|| {
+            let mut buf = WString::from(uri.as_wstr());
+            buf.push_str(WStr::from_units(b"::"));
+            buf.push_str(&name);
+            AvmString::new(mc, buf)
+        })
     }
 
     pub fn local_name(&self) -> AvmString<'gc> {
         self.name
     }
 
-    pub fn namespace(&self) -> &Namespace<'gc> {
-        &self.ns
+    pub fn namespace(self) -> Namespace<'gc> {
+        self.ns
     }
 
     /// Get the string value of this QName, including the namespace URI.
     pub fn as_uri(&self, mc: MutationContext<'gc, '_>) -> AvmString<'gc> {
-        match self.ns {
-            Namespace::Namespace(s) if s != "" => {
-                AvmString::new(mc, format!("{}::{}", &*s, &*self.name))
-            }
-            Namespace::Package(s) if s != "" => {
-                AvmString::new(mc, format!("{}::{}", &*s, &*self.name))
-            }
-            Namespace::PackageInternal(s) if s != "" => {
-                AvmString::new(mc, format!("{}::{}", &*s, &*self.name))
-            }
-            Namespace::Protected(s) if s != "" => {
-                AvmString::new(mc, format!("{}::{}", &*s, &*self.name))
-            }
-            Namespace::Explicit(s) if s != "" => {
-                AvmString::new(mc, format!("{}::{}", &*s, &*self.name))
-            }
-            Namespace::StaticProtected(s) if s != "" => {
-                AvmString::new(mc, format!("{}::{}", &*s, &*self.name))
-            }
-            Namespace::Private(s) if s != "" => {
-                AvmString::new(mc, format!("{}::{}", &*s, &*self.name))
-            }
-            Namespace::Any => AvmString::new(mc, format!("*::{}", &*self.name)),
-            _ => self.name,
+        let ns = match &self.ns {
+            Namespace::Namespace(s) => s,
+            Namespace::Package(s) => s,
+            Namespace::PackageInternal(s) => s,
+            Namespace::Protected(s) => s,
+            Namespace::Explicit(s) => s,
+            Namespace::StaticProtected(s) => s,
+            Namespace::Private(s) => s,
+            Namespace::Any => WStr::from_units(b"*"),
+        };
+
+        if ns.is_empty() {
+            return self.name;
         }
+
+        let mut uri = WString::from(ns);
+        uri.push_str(WStr::from_units(b"::"));
+        uri.push_str(&self.name);
+        AvmString::new(mc, uri)
     }
 }
 
@@ -310,11 +311,7 @@ impl<'gc> Multiname<'gc> {
         let mut result = vec![];
 
         for ns in ns_set? {
-            result.push(Namespace::from_abc_namespace(
-                translation_unit,
-                ns.clone(),
-                mc,
-            )?)
+            result.push(Namespace::from_abc_namespace(translation_unit, *ns, mc)?)
         }
 
         Ok(result)
@@ -335,7 +332,7 @@ impl<'gc> Multiname<'gc> {
             | AbcMultiname::MultinameLA { namespace_set } => Ok(Self {
                 ns: Self::abc_namespace_set(
                     translation_unit,
-                    namespace_set.clone(),
+                    *namespace_set,
                     activation.context.gc_context,
                 )?,
                 name: Some(name.coerce_to_string(activation)?),
@@ -363,7 +360,7 @@ impl<'gc> Multiname<'gc> {
                 Self {
                     ns: vec![Namespace::from_abc_namespace(
                         translation_unit,
-                        namespace.clone(),
+                        *namespace,
                         activation.context.gc_context,
                     )?],
                     name: translation_unit
@@ -372,9 +369,10 @@ impl<'gc> Multiname<'gc> {
                 }
             }
             AbcMultiname::RTQName { name } | AbcMultiname::RTQNameA { name } => {
-                let ns = activation.avm2().pop().as_namespace()?.clone();
+                let ns_value = activation.avm2().pop();
+                let ns = ns_value.as_namespace()?;
                 Self {
-                    ns: vec![ns],
+                    ns: vec![*ns],
                     name: translation_unit
                         .pool_string_option(name.0, activation.context.gc_context)?,
                     params: Vec::new(),
@@ -382,9 +380,10 @@ impl<'gc> Multiname<'gc> {
             }
             AbcMultiname::RTQNameL | AbcMultiname::RTQNameLA => {
                 let name = activation.avm2().pop().coerce_to_string(activation)?;
-                let ns = activation.avm2().pop().as_namespace()?.clone();
+                let ns_value = activation.avm2().pop();
+                let ns = ns_value.as_namespace()?;
                 Self {
-                    ns: vec![ns],
+                    ns: vec![*ns],
                     name: Some(name),
                     params: Vec::new(),
                 }
@@ -399,7 +398,7 @@ impl<'gc> Multiname<'gc> {
             } => Self {
                 ns: Self::abc_namespace_set(
                     translation_unit,
-                    namespace_set.clone(),
+                    *namespace_set,
                     activation.context.gc_context,
                 )?,
                 name: translation_unit.pool_string_option(name.0, activation.context.gc_context)?,
@@ -449,7 +448,7 @@ impl<'gc> Multiname<'gc> {
                 base_type,
                 parameters,
             } => {
-                let base_multiname = Self::resolve_multiname_index(&abc, base_type.clone())?;
+                let base_multiname = Self::resolve_multiname_index(&abc, *base_type)?;
                 let mut base =
                     Self::resolve_multiname_params(translation_unit, base_multiname, activation)?;
 
@@ -463,7 +462,7 @@ impl<'gc> Multiname<'gc> {
 
                 for param_type in parameters {
                     let param_multiname =
-                        Self::from_abc_multiname(translation_unit, param_type.clone(), activation)?;
+                        Self::from_abc_multiname(translation_unit, *param_type, activation)?;
 
                     base.params.push(param_multiname);
                 }
@@ -505,7 +504,7 @@ impl<'gc> Multiname<'gc> {
                 Self {
                     ns: vec![Namespace::from_abc_namespace(
                         translation_unit,
-                        namespace.clone(),
+                        *namespace,
                         mc,
                     )?],
                     name: translation_unit.pool_string_option(name.0, mc)?,
@@ -520,7 +519,7 @@ impl<'gc> Multiname<'gc> {
                 namespace_set,
                 name,
             } => Self {
-                ns: Self::abc_namespace_set(translation_unit, namespace_set.clone(), mc)?,
+                ns: Self::abc_namespace_set(translation_unit, *namespace_set, mc)?,
                 name: translation_unit.pool_string_option(name.0, mc)?,
                 params: Vec::new(),
             },
@@ -528,8 +527,7 @@ impl<'gc> Multiname<'gc> {
                 base_type,
                 parameters,
             } => {
-                let mut base =
-                    Self::from_abc_multiname_static(translation_unit, base_type.clone(), mc)?;
+                let mut base = Self::from_abc_multiname_static(translation_unit, *base_type, mc)?;
 
                 if parameters.len() > 1 {
                     return Err(format!(
@@ -543,7 +541,7 @@ impl<'gc> Multiname<'gc> {
                     let param_multiname = if param_type.0 == 0 {
                         Self::any()
                     } else {
-                        Self::from_abc_multiname_static(translation_unit, param_type.clone(), mc)?
+                        Self::from_abc_multiname_static(translation_unit, *param_type, mc)?
                     };
 
                     base.params.push(param_multiname);
@@ -564,6 +562,14 @@ impl<'gc> Multiname<'gc> {
         }
     }
 
+    pub fn public(name: impl Into<AvmString<'gc>>) -> Self {
+        Self {
+            ns: vec![Namespace::public()],
+            name: Some(name.into()),
+            params: Vec::new(),
+        }
+    }
+
     pub fn namespace_set(&self) -> impl Iterator<Item = &Namespace<'gc>> {
         self.ns.iter()
     }
@@ -572,14 +578,8 @@ impl<'gc> Multiname<'gc> {
         self.name
     }
 
-    pub fn includes_dynamic_namespace(&self) -> bool {
-        for ns in self.ns.iter() {
-            if ns.is_dynamic() {
-                return true;
-            }
-        }
-
-        false
+    pub fn contains_public_namespace(&self) -> bool {
+        self.ns.iter().any(|ns| ns.is_public())
     }
 
     /// Indicates if this multiname matches any type in any namespace.
@@ -592,7 +592,7 @@ impl<'gc> Multiname<'gc> {
         let ns_match = self
             .ns
             .iter()
-            .any(|ns| ns == &Namespace::Any || ns == name.namespace());
+            .any(|ns| *ns == Namespace::Any || *ns == name.namespace());
         let name_match = self.name.map(|n| n == name.local_name()).unwrap_or(true);
 
         ns_match && name_match

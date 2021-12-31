@@ -69,12 +69,11 @@ pub fn class_init<'gc>(
         int_vector_class
             .inner_class_definition()
             .write(activation.context.gc_context)
-            .set_name(int_vector_name.clone());
+            .set_name(int_vector_name);
 
-        globals.install_const(
+        globals.install_const_late(
             activation.context.gc_context,
-            int_vector_name.clone(),
-            0,
+            int_vector_name,
             int_vector_class.into(),
         );
         domain.export_definition(int_vector_name, script, activation.context.gc_context)?;
@@ -85,12 +84,11 @@ pub fn class_init<'gc>(
         uint_vector_class
             .inner_class_definition()
             .write(activation.context.gc_context)
-            .set_name(uint_vector_name.clone());
+            .set_name(uint_vector_name);
 
-        globals.install_const(
+        globals.install_const_late(
             activation.context.gc_context,
-            uint_vector_name.clone(),
-            0,
+            uint_vector_name,
             uint_vector_class.into(),
         );
         domain.export_definition(uint_vector_name, script, activation.context.gc_context)?;
@@ -101,12 +99,11 @@ pub fn class_init<'gc>(
         number_vector_class
             .inner_class_definition()
             .write(activation.context.gc_context)
-            .set_name(number_vector_name.clone());
+            .set_name(number_vector_name);
 
-        globals.install_const(
+        globals.install_const_late(
             activation.context.gc_context,
-            number_vector_name.clone(),
-            0,
+            number_vector_name,
             number_vector_class.into(),
         );
         domain.export_definition(number_vector_name, script, activation.context.gc_context)?;
@@ -116,12 +113,11 @@ pub fn class_init<'gc>(
         object_vector_class
             .inner_class_definition()
             .write(activation.context.gc_context)
-            .set_name(object_vector_name.clone());
+            .set_name(object_vector_name);
 
-        globals.install_const(
+        globals.install_const_late(
             activation.context.gc_context,
-            object_vector_name.clone(),
-            0,
+            object_vector_name,
             object_vector_class.into(),
         );
         domain.export_definition(object_vector_name, script, activation.context.gc_context)?;
@@ -138,7 +134,7 @@ pub fn specialized_class_init<'gc>(
 ) -> Result<Value<'gc>, Error> {
     if let Some(this) = this {
         let mut proto = this
-            .get_property(this, &QName::dynamic_name("prototype").into(), activation)?
+            .get_property(&QName::dynamic_name("prototype").into(), activation)?
             .coerce_to_object(activation)?;
         let scope = activation.create_scopechain();
 
@@ -165,7 +161,6 @@ pub fn specialized_class_init<'gc>(
         ];
         for (pubname, func) in PUBLIC_PROTOTYPE_METHODS {
             proto.set_property(
-                this,
                 &QName::dynamic_name(*pubname).into(),
                 FunctionObject::from_function(
                     activation,
@@ -174,6 +169,11 @@ pub fn specialized_class_init<'gc>(
                 )?
                 .into(),
                 activation,
+            )?;
+            proto.set_local_property_is_enumerable(
+                activation.context.gc_context,
+                (*pubname).into(),
+                false,
             )?;
         }
     }
@@ -271,7 +271,7 @@ pub fn concat<'gc>(
             .ok_or("TypeError: Tried to concat into a bare object")?;
         let val_class = new_vector_storage.value_type();
 
-        for arg in args.iter().cloned() {
+        for arg in args {
             let arg_obj = arg.coerce_to_object(activation)?;
             let arg_class = arg_obj
                 .instance_of_class_definition()
@@ -341,17 +341,13 @@ where
                 if matches!(item, Value::Undefined) || matches!(item, Value::Null) {
                     accum.push("".into());
                 } else {
-                    accum.push(
-                        conv(item, activation)?
-                            .coerce_to_string(activation)?
-                            .to_string(),
-                    );
+                    accum.push(conv(item, activation)?.coerce_to_string(activation)?);
                 }
             }
 
             return Ok(AvmString::new(
                 activation.context.gc_context,
-                accum.join(&string_separator),
+                crate::string::join(&accum, &string_separator),
             )
             .into());
         }
@@ -505,7 +501,7 @@ pub fn filter<'gc>(
             let (i, item) = r?;
 
             let result = callback
-                .call(receiver, &[item.clone(), i.into(), this.into()], activation)?
+                .call(receiver, &[item, i.into(), this.into()], activation)?
                 .coerce_to_boolean();
 
             if result {
@@ -566,7 +562,6 @@ pub fn index_of<'gc>(
         let from_index = if from_index < 0 {
             let length = this
                 .get_property(
-                    this,
                     &QName::new(Namespace::public(), "length").into(),
                     activation,
                 )?
@@ -607,7 +602,6 @@ pub fn last_index_of<'gc>(
         let from_index = if from_index < 0 {
             let length = this
                 .get_property(
-                    this,
                     &QName::new(Namespace::public(), "length").into(),
                     activation,
                 )?
@@ -662,8 +656,7 @@ pub fn map<'gc>(
         while let Some(r) = iter.next(activation) {
             let (i, item) = r?;
 
-            let new_item =
-                callback.call(receiver, &[item.clone(), i.into(), this.into()], activation)?;
+            let new_item = callback.call(receiver, &[item, i.into(), this.into()], activation)?;
             let coerced_item = new_item.coerce_to_type(activation, value_type)?;
 
             new_storage.push(coerced_item)?;
@@ -910,7 +903,7 @@ pub fn sort<'gc>(
 
             let mut unique_sort_satisfied = true;
             let mut error_signal = Ok(());
-            values.sort_unstable_by(|a, b| match compare(activation, a.clone(), b.clone()) {
+            values.sort_unstable_by(|a, b| match compare(activation, *a, *b) {
                 Ok(Ordering::Equal) => {
                     unique_sort_satisfied = false;
                     Ordering::Equal

@@ -10,7 +10,7 @@ use crate::context::{RenderContext, UpdateContext};
 use crate::drawing::Drawing;
 use crate::player::NEWEST_PLAYER_VERSION;
 use crate::prelude::*;
-use crate::string::AvmString;
+use crate::string::{AvmString, WString};
 use crate::tag_utils::SwfMovie;
 use crate::transform::Transform;
 use crate::types::{Degrees, Percent};
@@ -789,34 +789,34 @@ pub trait TDisplayObject<'gc>:
     }
 
     /// Returns the dot-syntax path to this display object, e.g. `_level0.foo.clip`
-    fn path(&self) -> String {
+    fn path(&self) -> WString {
         if let Some(parent) = self.avm1_parent() {
             let mut path = parent.path();
-            path.push('.');
-            path.push_str(&*self.name());
+            path.push_byte(b'.');
+            path.push_str(&self.name());
             path
         } else {
-            format!("_level{}", self.depth())
+            WString::from_utf8_owned(format!("_level{}", self.depth()))
         }
     }
 
     /// Returns the Flash 4 slash-syntax path to this display object, e.g. `/foo/clip`.
     /// Returned by the `_target` property in AVM1.
-    fn slash_path(&self) -> String {
-        fn build_slash_path(object: DisplayObject<'_>) -> String {
+    fn slash_path(&self) -> WString {
+        fn build_slash_path(object: DisplayObject<'_>) -> WString {
             if let Some(parent) = object.avm1_parent() {
                 let mut path = build_slash_path(parent);
-                path.push('/');
-                path.push_str(&*object.name());
+                path.push_byte(b'/');
+                path.push_str(&object.name());
                 path
             } else {
                 let level = object.depth();
                 if level == 0 {
                     // _level0 does not append its name in slash syntax.
-                    String::new()
+                    WString::new()
                 } else {
                     // Other levels do append their name.
-                    format!("_level{}", level)
+                    WString::from_utf8_owned(format!("_level{}", level))
                 }
             }
         }
@@ -825,7 +825,7 @@ pub trait TDisplayObject<'gc>:
             build_slash_path((*self).into())
         } else {
             // _target of _level0 should just be '/'.
-            '/'.to_string()
+            WString::from_unit(b'/'.into())
         }
     }
 
@@ -1192,8 +1192,11 @@ pub trait TDisplayObject<'gc>:
             }
             if let Some(name) = &place_object.name {
                 let encoding = swf::SwfStr::encoding_for_version(self.swf_version());
-                let name = name.to_str_lossy(encoding).to_owned();
-                self.set_name(context.gc_context, AvmString::new(context.gc_context, name));
+                let name = name.to_str_lossy(encoding);
+                self.set_name(
+                    context.gc_context,
+                    AvmString::new_utf8(context.gc_context, name),
+                );
             }
             if let Some(clip_depth) = place_object.clip_depth {
                 self.set_clip_depth(context.gc_context, clip_depth.into());
@@ -1430,7 +1433,10 @@ pub trait TDisplayObject<'gc>:
     fn set_default_instance_name(&self, context: &mut UpdateContext<'_, 'gc, '_>) {
         if self.name().is_empty() {
             let name = format!("instance{}", *context.instance_counter);
-            self.set_name(context.gc_context, AvmString::new(context.gc_context, name));
+            self.set_name(
+                context.gc_context,
+                AvmString::new_utf8(context.gc_context, name),
+            );
             *context.instance_counter = context.instance_counter.wrapping_add(1);
         }
     }
@@ -1443,7 +1449,7 @@ pub trait TDisplayObject<'gc>:
         let vm_type = context.avm_type();
 
         if matches!(vm_type, AvmType::Avm2) {
-            let name = AvmString::new(context.gc_context, format!("root{}", self.depth() + 1));
+            let name = AvmString::new_utf8(context.gc_context, format!("root{}", self.depth() + 1));
             self.set_name(context.gc_context, name);
         } else if matches!(vm_type, AvmType::Avm1) {
             self.set_name(context.gc_context, Default::default());
@@ -1554,11 +1560,17 @@ impl SoundTransform {
 
     /// Applies another SoundTransform on top of this SoundTransform.
     pub fn concat(&mut self, other: &SoundTransform) {
+        const MAX_VOLUME: i64 = SoundTransform::MAX_VOLUME as i64;
+
+        // It seems like Flash masks the results below to 30-bit integers:
+        // * Negative values are equivalent to their absolute value (their sign bit is unset).
+        // * Specifically, 0x40000000, -0x40000000 and -0x80000000 are equivalent to zero.
+        const MASK: i32 = (1 << 30) - 1;
+
+        self.volume = (i64::from(self.volume) * i64::from(other.volume) / MAX_VOLUME) as i32 & MASK;
+
         // This is a 2x2 matrix multiply between the transforms.
         // Done with integer math to match Flash behavior.
-        const MAX_VOLUME: i64 = SoundTransform::MAX_VOLUME as i64;
-        self.volume = (i64::from(self.volume) * i64::from(other.volume) / MAX_VOLUME) as i32;
-
         let ll0: i64 = self.left_to_left.into();
         let lr0: i64 = self.left_to_right.into();
         let rl0: i64 = self.right_to_left.into();
@@ -1567,10 +1579,10 @@ impl SoundTransform {
         let lr1: i64 = other.left_to_right.into();
         let rl1: i64 = other.right_to_left.into();
         let rr1: i64 = other.right_to_right.into();
-        self.left_to_left = ((ll0 * ll1 + rl0 * lr1) / MAX_VOLUME) as i32;
-        self.left_to_right = ((lr0 * ll1 + rr0 * lr1) / MAX_VOLUME) as i32;
-        self.right_to_left = ((ll0 * rl1 + rl0 * rr1) / MAX_VOLUME) as i32;
-        self.right_to_right = ((lr0 * rl1 + rr0 * rr1) / MAX_VOLUME) as i32;
+        self.left_to_left = ((ll0 * ll1 + rl0 * lr1) / MAX_VOLUME) as i32 & MASK;
+        self.left_to_right = ((lr0 * ll1 + rr0 * lr1) / MAX_VOLUME) as i32 & MASK;
+        self.right_to_left = ((ll0 * rl1 + rl0 * rr1) / MAX_VOLUME) as i32 & MASK;
+        self.right_to_right = ((lr0 * rl1 + rr0 * rr1) / MAX_VOLUME) as i32 & MASK;
     }
 
     /// Returns the pan of this transform.
@@ -1608,7 +1620,6 @@ impl SoundTransform {
         Ok(SoundTransform {
             left_to_left: (as3_st
                 .get_property(
-                    as3_st,
                     &Avm2QName::new(Avm2Namespace::public(), "leftToLeft").into(),
                     activation,
                 )?
@@ -1616,7 +1627,6 @@ impl SoundTransform {
                 * 100.0) as i32,
             left_to_right: (as3_st
                 .get_property(
-                    as3_st,
                     &Avm2QName::new(Avm2Namespace::public(), "leftToRight").into(),
                     activation,
                 )?
@@ -1624,7 +1634,6 @@ impl SoundTransform {
                 * 100.0) as i32,
             right_to_left: (as3_st
                 .get_property(
-                    as3_st,
                     &Avm2QName::new(Avm2Namespace::public(), "rightToLeft").into(),
                     activation,
                 )?
@@ -1632,7 +1641,6 @@ impl SoundTransform {
                 * 100.0) as i32,
             right_to_right: (as3_st
                 .get_property(
-                    as3_st,
                     &Avm2QName::new(Avm2Namespace::public(), "rightToRight").into(),
                     activation,
                 )?
@@ -1640,7 +1648,6 @@ impl SoundTransform {
                 * 100.0) as i32,
             volume: (as3_st
                 .get_property(
-                    as3_st,
                     &Avm2QName::new(Avm2Namespace::public(), "volume").into(),
                     activation,
                 )?
@@ -1660,31 +1667,26 @@ impl SoundTransform {
             .construct(activation, &[])?;
 
         as3_st.set_property(
-            as3_st,
             &Avm2QName::new(Avm2Namespace::public(), "leftToLeft").into(),
             (self.left_to_left as f64 / 100.0).into(),
             activation,
         )?;
         as3_st.set_property(
-            as3_st,
             &Avm2QName::new(Avm2Namespace::public(), "leftToRight").into(),
             (self.left_to_right as f64 / 100.0).into(),
             activation,
         )?;
         as3_st.set_property(
-            as3_st,
             &Avm2QName::new(Avm2Namespace::public(), "rightToLeft").into(),
             (self.right_to_left as f64 / 100.0).into(),
             activation,
         )?;
         as3_st.set_property(
-            as3_st,
             &Avm2QName::new(Avm2Namespace::public(), "rightToRight").into(),
             (self.right_to_right as f64 / 100.0).into(),
             activation,
         )?;
         as3_st.set_property(
-            as3_st,
             &Avm2QName::new(Avm2Namespace::public(), "volume").into(),
             (self.volume as f64 / 100.0).into(),
             activation,

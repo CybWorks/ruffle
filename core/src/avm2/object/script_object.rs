@@ -1,18 +1,16 @@
 //! Default AVM2 object impl
 
 use crate::avm2::activation::Activation;
-use crate::avm2::names::{Namespace, QName};
-use crate::avm2::object::{ClassObject, Object, ObjectPtr, TObject};
-use crate::avm2::property::Property;
-use crate::avm2::property_map::PropertyMap;
-use crate::avm2::return_value::ReturnValue;
-use crate::avm2::slot::Slot;
+use crate::avm2::names::Multiname;
+use crate::avm2::object::{ClassObject, FunctionObject, Object, ObjectPtr, TObject};
 use crate::avm2::value::Value;
+use crate::avm2::vtable::VTable;
 use crate::avm2::Error;
 use crate::string::AvmString;
+use fnv::FnvHashMap;
 use gc_arena::{Collect, GcCell, MutationContext};
 use std::cell::{Ref, RefMut};
-use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fmt::Debug;
 
 /// A class instance allocator that allocates `ScriptObject`s.
@@ -39,24 +37,27 @@ pub struct ScriptObject<'gc>(GcCell<'gc, ScriptObjectData<'gc>>);
 #[derive(Clone, Collect, Debug)]
 #[collect(no_drop)]
 pub struct ScriptObjectData<'gc> {
-    /// Properties stored on this object.
-    values: PropertyMap<'gc, Property<'gc>>,
+    /// Values stored on this object.
+    values: FnvHashMap<AvmString<'gc>, Value<'gc>>,
 
     /// Slots stored on this object.
-    slots: Vec<Slot<'gc>>,
+    slots: Vec<Value<'gc>>,
 
     /// Methods stored on this object.
-    methods: Vec<Option<Object<'gc>>>,
+    bound_methods: Vec<Option<FunctionObject<'gc>>>,
 
     /// Implicit prototype of this script object.
     proto: Option<Object<'gc>>,
 
     /// The class object that this is an instance of.
-    /// If `None`, this is either a class itself, or not an ES4 object at all.
+    /// If `none`, this is not an ES4 object at all.
     instance_of: Option<ClassObject<'gc>>,
 
+    /// The table used for non-dynamic property lookups.
+    vtable: Option<VTable<'gc>>,
+
     /// Enumeratable property names.
-    enumerants: Vec<QName<'gc>>,
+    enumerants: Vec<AvmString<'gc>>,
 }
 
 impl<'gc> TObject<'gc> for ScriptObject<'gc> {
@@ -126,105 +127,109 @@ impl<'gc> ScriptObject<'gc> {
 impl<'gc> ScriptObjectData<'gc> {
     pub fn base_new(proto: Option<Object<'gc>>, instance_of: Option<ClassObject<'gc>>) -> Self {
         ScriptObjectData {
-            values: HashMap::new(),
+            values: Default::default(),
             slots: Vec::new(),
-            methods: Vec::new(),
+            bound_methods: Vec::new(),
             proto,
             instance_of,
+            vtable: instance_of.map(|cls| cls.instance_vtable()),
             enumerants: Vec::new(),
         }
     }
 
     pub fn get_property_local(
         &self,
-        receiver: Object<'gc>,
-        name: &QName<'gc>,
-        _activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Result<ReturnValue<'gc>, Error> {
-        let prop = self.values.get(name);
+        multiname: &Multiname<'gc>,
+        activation: &mut Activation<'_, 'gc, '_>,
+    ) -> Result<Value<'gc>, Error> {
+        if !multiname.contains_public_namespace() {
+            return Err("Non-public property not found on Object".into());
+        }
 
-        if let Some(prop) = prop {
-            prop.get(receiver)
+        let local_name = match multiname.local_name() {
+            None => return Err("Unnamed property not found on Object".into()),
+            Some(name) => name,
+        };
+
+        let value = self.values.get(&local_name);
+
+        if let Some(value) = value {
+            return Ok(*value);
+        } else if let Some(proto) = self.proto() {
+            return proto.get_property_local(multiname, activation);
+        }
+
+        // Special case: Unresolvable properties on dynamic classes are treated
+        // as dynamic properties that have not yet been set, and yield
+        // `undefined`
+        if self
+            .instance_of()
+            .map(|cls| cls.inner_class_definition().read().is_sealed())
+            .unwrap_or(false)
+        {
+            Err(format!("Cannot get undefined property {:?}", local_name).into())
         } else {
-            Ok(Value::Undefined.into())
+            Ok(Value::Undefined)
         }
     }
 
     pub fn set_property_local(
         &mut self,
-        receiver: Object<'gc>,
-        name: &QName<'gc>,
+        multiname: &Multiname<'gc>,
         value: Value<'gc>,
-        activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Result<ReturnValue<'gc>, Error> {
-        let slot_id = if let Some(prop) = self.values.get(name) {
-            if let Some(slot_id) = prop.slot_id() {
-                Some(slot_id)
-            } else {
-                None
-            }
-        } else {
-            None
+        _activation: &mut Activation<'_, 'gc, '_>,
+    ) -> Result<(), Error> {
+        if self
+            .instance_of()
+            .map(|cls| cls.inner_class_definition().read().is_sealed())
+            .unwrap_or(false)
+        {
+            return Err(
+                format!("Cannot set undefined property {:?}", multiname.local_name()).into(),
+            );
+        }
+
+        if !multiname.contains_public_namespace() {
+            return Err("Non-public property not found on Object".into());
+        }
+
+        let local_name = match multiname.local_name() {
+            None => return Err("Unnamed property not found on Object".into()),
+            Some(name) => name,
         };
 
-        if let Some(slot_id) = slot_id {
-            self.set_slot(slot_id, value, activation.context.gc_context)?;
-            Ok(Value::Undefined.into())
-        } else if self.values.contains_key(name) {
-            let prop = self.values.get_mut(name).unwrap();
-            prop.set(receiver, value)
-        } else {
-            //TODO: Not all classes are dynamic like this
-            self.enumerants.push(name.clone());
-            self.values
-                .insert(name.clone(), Property::new_dynamic_property(value));
-
-            Ok(Value::Undefined.into())
-        }
+        match self.values.entry(local_name) {
+            Entry::Occupied(mut o) => {
+                o.insert(value);
+            }
+            Entry::Vacant(v) => {
+                //TODO: Not all classes are dynamic like this
+                self.enumerants.push(local_name);
+                v.insert(value);
+            }
+        };
+        Ok(())
     }
 
     pub fn init_property_local(
         &mut self,
-        receiver: Object<'gc>,
-        name: &QName<'gc>,
+        multiname: &Multiname<'gc>,
         value: Value<'gc>,
         activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Result<ReturnValue<'gc>, Error> {
-        if let Some(prop) = self.values.get_mut(name) {
-            if let Some(slot_id) = prop.slot_id() {
-                self.init_slot(slot_id, value, activation.context.gc_context)?;
-                Ok(Value::Undefined.into())
-            } else {
-                prop.init(receiver, value)
-            }
-        } else {
-            //TODO: Not all classes are dynamic like this
-            self.values
-                .insert(name.clone(), Property::new_dynamic_property(value));
+    ) -> Result<(), Error> {
+        self.set_property_local(multiname, value, activation)
+    }
 
-            Ok(Value::Undefined.into())
+    pub fn delete_property_local(&mut self, multiname: &Multiname<'gc>) -> bool {
+        if !multiname.contains_public_namespace() {
+            return false;
         }
-    }
-
-    pub fn is_property_overwritable(&self, name: &QName<'gc>) -> bool {
-        self.values
-            .get(name)
-            .map(|p| p.is_overwritable())
-            .unwrap_or(true)
-    }
-
-    pub fn delete_property(&mut self, name: &QName<'gc>) -> bool {
-        let can_delete = if let Some(prop) = self.values.get(name) {
-            prop.can_delete()
+        if let Some(name) = multiname.local_name() {
+            self.values.remove(&name);
+            true
         } else {
             false
-        };
-
-        if can_delete {
-            self.values.remove(name);
         }
-
-        can_delete
     }
 
     pub fn get_slot(&self, id: u32) -> Result<Value<'gc>, Error> {
@@ -232,7 +237,6 @@ impl<'gc> ScriptObjectData<'gc> {
             .get(id as usize)
             .cloned()
             .ok_or_else(|| format!("Slot index {} out of bounds!", id).into())
-            .map(|slot| slot.get().unwrap_or(Value::Undefined))
     }
 
     /// Set a slot by its index.
@@ -243,7 +247,8 @@ impl<'gc> ScriptObjectData<'gc> {
         _mc: MutationContext<'gc, '_>,
     ) -> Result<(), Error> {
         if let Some(slot) = self.slots.get_mut(id as usize) {
-            slot.set(value)
+            *slot = value;
+            Ok(())
         } else {
             Err(format!("Slot index {} out of bounds!", id).into())
         }
@@ -257,124 +262,66 @@ impl<'gc> ScriptObjectData<'gc> {
         _mc: MutationContext<'gc, '_>,
     ) -> Result<(), Error> {
         if let Some(slot) = self.slots.get_mut(id as usize) {
-            slot.init(value)
+            *slot = value;
+            Ok(())
         } else {
             Err(format!("Slot index {} out of bounds!", id).into())
         }
     }
 
-    /// Retrieve a method from the method table.
-    pub fn get_method(&self, id: u32) -> Option<Object<'gc>> {
-        self.methods.get(id as usize).and_then(|v| *v)
+    pub fn install_instance_slots(&mut self) {
+        use std::ops::Deref;
+        let vtable = self.vtable.unwrap();
+        let default_slots = vtable.default_slots();
+        for value in default_slots.deref() {
+            if let Some(value) = value {
+                self.slots.push(*value);
+            } else {
+                self.slots.push(Value::Undefined)
+            }
+        }
     }
 
-    pub fn has_trait(&self, name: &QName<'gc>) -> Result<bool, Error> {
-        match self.instance_of {
+    /// Set a slot by its index. This does extend the array if needed.
+    /// This should only be used during AVM initialization, not at runtime.
+    pub fn install_const_slot_late(&mut self, id: u32, value: Value<'gc>) {
+        if self.slots.len() < id as usize + 1 {
+            self.slots.resize(id as usize + 1, Value::Undefined);
+        }
+        if let Some(slot) = self.slots.get_mut(id as usize) {
+            *slot = value;
+        }
+    }
+
+    /// Retrieve a bound method from the method table.
+    pub fn get_bound_method(&self, id: u32) -> Option<FunctionObject<'gc>> {
+        self.bound_methods.get(id as usize).and_then(|v| *v)
+    }
+
+    pub fn has_trait(&self, name: &Multiname<'gc>) -> bool {
+        match self.vtable {
             //Class instances have instance traits from any class in the base
             //class chain.
-            Some(class) => {
-                let mut cur_class = Some(class);
+            Some(vtable) => vtable.has_trait(name),
 
-                while let Some(class) = cur_class {
-                    let cur_static_class = class.inner_class_definition();
-                    if cur_static_class.read().has_instance_trait(name) {
-                        return Ok(true);
-                    }
-
-                    for interfaces in class.interfaces() {
-                        if interfaces
-                            .inner_class_definition()
-                            .read()
-                            .has_instance_trait(name)
-                        {
-                            return Ok(true);
-                        }
-                    }
-
-                    cur_class = class.superclass_object();
-                }
-
-                Ok(false)
-            }
-
-            // Bare objects, ES3 objects, and prototypes do not have traits.
-            None => Ok(false),
+            // bare objects do not have traits.
+            // TODO: should we have bare objects at all?
+            // Shouldn't every object have a vtable?
+            None => false,
         }
     }
 
-    pub fn resolve_any(&self, local_name: AvmString<'gc>) -> Result<Option<Namespace<'gc>>, Error> {
-        for (key, _value) in self.values.iter() {
-            if key.local_name() == local_name {
-                return Ok(Some(key.namespace().clone()));
+    pub fn has_own_dynamic_property(&self, name: &Multiname<'gc>) -> bool {
+        if name.contains_public_namespace() {
+            if let Some(name) = name.local_name() {
+                return self.values.get(&name).is_some();
             }
         }
-
-        let trait_ns = self.resolve_any_trait(local_name)?;
-
-        if trait_ns.is_none() {
-            if let Some(proto) = self.proto() {
-                proto.resolve_any(local_name)
-            } else {
-                Ok(None)
-            }
-        } else {
-            Ok(trait_ns)
-        }
+        false
     }
 
-    pub fn resolve_any_trait(
-        &self,
-        local_name: AvmString<'gc>,
-    ) -> Result<Option<Namespace<'gc>>, Error> {
-        if let Some(proto) = self.proto {
-            let proto_trait_name = proto.resolve_any_trait(local_name)?;
-            if let Some(ns) = proto_trait_name {
-                return Ok(Some(ns));
-            }
-        }
-
-        match &self.instance_of {
-            Some(class) => {
-                let mut cur_class = Some(*class);
-
-                while let Some(class) = cur_class {
-                    let cur_static_class = class.inner_class_definition();
-                    if let Some(ns) = cur_static_class
-                        .read()
-                        .resolve_any_instance_trait(local_name)
-                    {
-                        return Ok(Some(ns));
-                    }
-
-                    cur_class = class.superclass_object();
-                }
-
-                Ok(None)
-            }
-            None => Ok(None),
-        }
-    }
-
-    pub fn has_own_property(&self, name: &QName<'gc>) -> Result<bool, Error> {
-        Ok(self.has_own_instantiated_property(name) || self.has_trait(name)?)
-    }
-
-    pub fn has_own_instantiated_property(&self, name: &QName<'gc>) -> bool {
-        self.values.get(name).is_some()
-    }
-
-    pub fn has_own_virtual_getter(&self, name: &QName<'gc>) -> bool {
-        matches!(
-            self.values.get(name),
-            Some(Property::Virtual { get: Some(_), .. })
-        )
-    }
-
-    pub fn has_own_virtual_setter(&self, name: &QName<'gc>) -> bool {
-        matches!(
-            self.values.get(name),
-            Some(Property::Virtual { set: Some(_), .. })
-        )
+    pub fn has_own_property(&self, name: &Multiname<'gc>) -> bool {
+        self.has_trait(name) || self.has_own_dynamic_property(name)
     }
 
     pub fn proto(&self) -> Option<Object<'gc>> {
@@ -402,32 +349,24 @@ impl<'gc> ScriptObjectData<'gc> {
         // sentinel.
         let true_index = (index as usize).checked_sub(1)?;
 
-        self.enumerants
-            .get(true_index)
-            .cloned()
-            .map(|q| q.local_name().into())
+        self.enumerants.get(true_index).cloned().map(|q| q.into())
     }
 
-    pub fn property_is_enumerable(&self, name: &QName<'gc>) -> bool {
-        self.enumerants.contains(name)
+    pub fn property_is_enumerable(&self, name: AvmString<'gc>) -> bool {
+        self.enumerants.contains(&name)
     }
 
     pub fn set_local_property_is_enumerable(
         &mut self,
-        name: &QName<'gc>,
+        name: AvmString<'gc>,
         is_enumerable: bool,
     ) -> Result<(), Error> {
-        // Traits are never enumerable
-        if self.has_trait(name)? {
-            return Ok(());
-        }
-
-        if is_enumerable && self.values.contains_key(name) && !self.enumerants.contains(name) {
-            self.enumerants.push(name.clone());
-        } else if !is_enumerable && self.enumerants.contains(name) {
+        if is_enumerable && self.values.contains_key(&name) && !self.enumerants.contains(&name) {
+            self.enumerants.push(name);
+        } else if !is_enumerable && self.enumerants.contains(&name) {
             let mut index = None;
             for (i, other_name) in self.enumerants.iter().enumerate() {
-                if other_name == name {
+                if *other_name == name {
                     index = Some(i);
                 }
             }
@@ -449,147 +388,13 @@ impl<'gc> ScriptObjectData<'gc> {
     }
 
     /// Install a method into the object.
-    pub fn install_method(&mut self, name: QName<'gc>, disp_id: u32, function: Object<'gc>) {
-        if disp_id > 0 {
-            if self.methods.len() <= disp_id as usize {
-                self.methods
-                    .resize_with(disp_id as usize + 1, Default::default);
-            }
-
-            *self.methods.get_mut(disp_id as usize).unwrap() = Some(function);
+    pub fn install_bound_method(&mut self, disp_id: u32, function: FunctionObject<'gc>) {
+        if self.bound_methods.len() <= disp_id as usize {
+            self.bound_methods
+                .resize_with(disp_id as usize + 1, Default::default);
         }
 
-        self.values.insert(name, Property::new_method(function));
-    }
-
-    /// Install a getter into the object.
-    ///
-    /// This is a little more complicated than methods, since virtual property
-    /// slots can be installed in two parts. Thus, we need to support
-    /// installing them in either order.
-    pub fn install_getter(
-        &mut self,
-        name: QName<'gc>,
-        disp_id: u32,
-        function: Object<'gc>,
-    ) -> Result<(), Error> {
-        function
-            .as_executable()
-            .ok_or_else(|| Error::from("Attempted to install getter without a valid method"))?;
-
-        if disp_id > 0 {
-            if self.methods.len() <= disp_id as usize {
-                self.methods
-                    .resize_with(disp_id as usize + 1, Default::default);
-            }
-
-            *self.methods.get_mut(disp_id as usize).unwrap() = Some(function);
-        }
-
-        if !self.values.contains_key(&name) {
-            self.values.insert(name.clone(), Property::new_virtual());
-        }
-
-        self.values
-            .get_mut(&name)
-            .unwrap()
-            .install_virtual_getter(function)
-    }
-
-    /// Install a setter into the object.
-    ///
-    /// This is a little more complicated than methods, since virtual property
-    /// slots can be installed in two parts. Thus, we need to support
-    /// installing them in either order.
-    pub fn install_setter(
-        &mut self,
-        name: QName<'gc>,
-        disp_id: u32,
-        function: Object<'gc>,
-    ) -> Result<(), Error> {
-        function
-            .as_executable()
-            .ok_or_else(|| Error::from("Attempted to install setter without a valid method"))?;
-
-        if disp_id > 0 {
-            if self.methods.len() <= disp_id as usize {
-                self.methods
-                    .resize_with(disp_id as usize + 1, Default::default);
-            }
-
-            *self.methods.get_mut(disp_id as usize).unwrap() = Some(function);
-        }
-
-        if !self.values.contains_key(&name) {
-            self.values.insert(name.clone(), Property::new_virtual());
-        }
-
-        self.values
-            .get_mut(&name)
-            .unwrap()
-            .install_virtual_setter(function)
-    }
-
-    pub fn install_dynamic_property(
-        &mut self,
-        name: QName<'gc>,
-        value: Value<'gc>,
-    ) -> Result<(), Error> {
-        if let Some(class) = self.instance_of() {
-            let class = class.inner_class_definition();
-            if class.read().is_sealed() {
-                return Err(format!(
-                    "Objects of type {:?} are not dynamic",
-                    class.read().name().local_name()
-                )
-                .into());
-            }
-        }
-
-        self.values
-            .insert(name, Property::new_dynamic_property(value));
-
-        Ok(())
-    }
-
-    /// Install a slot onto the object.
-    ///
-    /// Slot number zero indicates a slot ID that is unknown and should be
-    /// allocated by the VM - as far as I know, there is no way to discover
-    /// slot IDs, so we don't allocate a slot for them at all.
-    pub fn install_slot(&mut self, name: QName<'gc>, id: u32, value: Value<'gc>) {
-        if id == 0 {
-            self.values.insert(name, Property::new_stored(value));
-        } else {
-            self.values.insert(name, Property::new_slot(id));
-            if self.slots.len() < id as usize + 1 {
-                self.slots.resize_with(id as usize + 1, Default::default);
-            }
-
-            if let Some(slot) = self.slots.get_mut(id as usize) {
-                *slot = Slot::new(value);
-            }
-        }
-    }
-
-    /// Install a const onto the object.
-    ///
-    /// Slot number zero indicates a slot ID that is unknown and should be
-    /// allocated by the VM - as far as I know, there is no way to discover
-    /// slot IDs, so we don't allocate a slot for them at all.
-    pub fn install_const(&mut self, name: QName<'gc>, id: u32, value: Value<'gc>) {
-        if id == 0 {
-            self.values.insert(name, Property::new_const(value));
-        } else {
-            self.values.insert(name, Property::new_slot(id));
-            if self.slots.len() < id as usize + 1 {
-                self.slots.resize_with(id as usize + 1, Default::default);
-            }
-
-            if let Some(slot) = self.slots.get_mut(id as usize) {
-                *slot = Slot::new_const(value);
-            }
-        }
+        *self.bound_methods.get_mut(disp_id as usize).unwrap() = Some(function);
     }
 
     /// Get the class object for this object, if it has one.
@@ -597,8 +402,18 @@ impl<'gc> ScriptObjectData<'gc> {
         self.instance_of
     }
 
+    /// Get the vtable for this object, if it has one.
+    pub fn vtable(&self) -> Option<VTable<'gc>> {
+        self.vtable
+    }
+
     /// Set the class object for this object.
-    pub fn set_instance_of(&mut self, instance_of: ClassObject<'gc>) {
+    pub fn set_instance_of(&mut self, instance_of: ClassObject<'gc>, vtable: VTable<'gc>) {
         self.instance_of = Some(instance_of);
+        self.vtable = Some(vtable);
+    }
+
+    pub fn set_vtable(&mut self, vtable: VTable<'gc>) {
+        self.vtable = Some(vtable);
     }
 }

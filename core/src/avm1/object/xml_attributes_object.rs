@@ -6,7 +6,7 @@ use crate::avm1::object::{ObjectPtr, TObject};
 use crate::avm1::property::Attribute;
 use crate::avm1::{Object, ScriptObject, Value};
 use crate::string::AvmString;
-use crate::xml::{XmlName, XmlNode};
+use crate::xml::XmlNode;
 use gc_arena::{Collect, MutationContext};
 use std::fmt;
 
@@ -59,11 +59,9 @@ impl<'gc> TObject<'gc> for XmlAttributesObject<'gc> {
     fn get_local_stored(
         &self,
         name: impl Into<AvmString<'gc>>,
-        activation: &mut Activation<'_, 'gc, '_>,
+        _activation: &mut Activation<'_, 'gc, '_>,
     ) -> Option<Value<'gc>> {
-        self.node()
-            .attribute_value(&XmlName::from_str(&name.into()))
-            .map(|s| AvmString::new(activation.context.gc_context, s).into())
+        self.node().attribute_value(&name.into()).map(|s| s.into())
     }
 
     fn set_local(
@@ -75,8 +73,8 @@ impl<'gc> TObject<'gc> for XmlAttributesObject<'gc> {
     ) -> Result<(), Error<'gc>> {
         self.node().set_attribute_value(
             activation.context.gc_context,
-            &XmlName::from_str(&name),
-            &value.coerce_to_string(activation)?,
+            name,
+            value.coerce_to_string(activation)?,
         );
         Ok(())
     }
@@ -119,7 +117,7 @@ impl<'gc> TObject<'gc> for XmlAttributesObject<'gc> {
 
     fn delete(&self, activation: &mut Activation<'_, 'gc, '_>, name: AvmString<'gc>) -> bool {
         self.node()
-            .delete_attribute(activation.context.gc_context, &XmlName::from_str(&name));
+            .delete_attribute(activation.context.gc_context, &name);
         self.base().delete(activation, name)
     }
 
@@ -206,9 +204,7 @@ impl<'gc> TObject<'gc> for XmlAttributesObject<'gc> {
         _activation: &mut Activation<'_, 'gc, '_>,
         name: AvmString<'gc>,
     ) -> bool {
-        self.node()
-            .attribute_value(&XmlName::from_str(&name))
-            .is_some()
+        self.node().attribute_value(&name).is_some()
     }
 
     fn has_own_virtual(
@@ -229,11 +225,7 @@ impl<'gc> TObject<'gc> for XmlAttributesObject<'gc> {
 
     fn get_keys(&self, activation: &mut Activation<'_, 'gc, '_>) -> Vec<AvmString<'gc>> {
         let mut base = self.base().get_keys(activation);
-        let attrs = self
-            .node()
-            .attribute_keys()
-            .into_iter()
-            .map(|a| AvmString::new(activation.context.gc_context, a));
+        let attrs = self.node().attribute_keys().into_iter();
         base.extend(attrs);
         base
     }

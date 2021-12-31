@@ -2,15 +2,15 @@
 
 use crate::avm2::activation::Activation;
 use crate::avm2::class::Class;
-use crate::avm2::method::Method;
-use crate::avm2::names::{Namespace, QName};
-use crate::avm2::object::{primitive_allocator, Object, TObject};
+use crate::avm2::method::{Method, NativeMethodImpl};
+use crate::avm2::names::{Multiname, Namespace, QName};
+use crate::avm2::object::{primitive_allocator, FunctionObject, Object, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
 use gc_arena::{GcCell, MutationContext};
 
 /// Implements `Boolean`'s instance initializer.
-pub fn instance_init<'gc>(
+fn instance_init<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
@@ -32,7 +32,7 @@ pub fn instance_init<'gc>(
 }
 
 /// Implements `Boolean`'s native instance initializer.
-pub fn native_instance_init<'gc>(
+fn native_instance_init<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
@@ -45,11 +45,79 @@ pub fn native_instance_init<'gc>(
 }
 
 /// Implements `Boolean`'s class initializer.
-pub fn class_init<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
-    _this: Option<Object<'gc>>,
+fn class_init<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error> {
+    if let Some(this) = this {
+        let scope = activation.create_scopechain();
+        let gc_context = activation.context.gc_context;
+        let this_class = this.as_class_object().unwrap();
+        let boolean_proto = this_class.prototype();
+
+        boolean_proto.set_property_local(
+            &Multiname::public("toString"),
+            FunctionObject::from_method(
+                activation,
+                Method::from_builtin(to_string, "toString", gc_context),
+                scope,
+                None,
+                Some(this_class),
+            )
+            .into(),
+            activation,
+        )?;
+        boolean_proto.set_property_local(
+            &Multiname::public("valueOf"),
+            FunctionObject::from_method(
+                activation,
+                Method::from_builtin(value_of, "valueOf", gc_context),
+                scope,
+                None,
+                Some(this_class),
+            )
+            .into(),
+            activation,
+        )?;
+        boolean_proto.set_local_property_is_enumerable(gc_context, "toString".into(), false)?;
+        boolean_proto.set_local_property_is_enumerable(gc_context, "valueOf".into(), false)?;
+    }
+
+    Ok(Value::Undefined)
+}
+
+/// Implements `Boolean.toString`
+fn to_string<'gc>(
+    _activation: &mut Activation<'_, 'gc, '_>,
+    this: Option<Object<'gc>>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error> {
+    if let Some(this) = this {
+        if let Some(this) = this.as_primitive() {
+            match *this {
+                Value::Bool(true) => return Ok("true".into()),
+                Value::Bool(false) => return Ok("false".into()),
+                _ => {}
+            };
+        }
+    }
+
+    Err("Boolean.prototype.toString has been called on an incompatible object".into())
+}
+
+/// Implements `Boolean.valueOf`
+fn value_of<'gc>(
+    _activation: &mut Activation<'_, 'gc, '_>,
+    this: Option<Object<'gc>>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error> {
+    if let Some(this) = this {
+        if let Some(this) = this.as_primitive() {
+            return Ok(*this);
+        }
+    }
+
     Ok(Value::Undefined)
 }
 
@@ -70,6 +138,10 @@ pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>
         "<Boolean native instance initializer>",
         mc,
     ));
+
+    const AS3_INSTANCE_METHODS: &[(&str, NativeMethodImpl)] =
+        &[("toString", to_string), ("valueOf", value_of)];
+    write.define_as3_builtin_instance_methods(mc, AS3_INSTANCE_METHODS);
 
     class
 }

@@ -1,7 +1,7 @@
 //! Object trait to expose objects to AVM
 
 use crate::avm1::error::Error;
-use crate::avm1::function::{Executable, ExecutionReason, FunctionObject};
+use crate::avm1::function::{Executable, ExecutionName, ExecutionReason, FunctionObject};
 use crate::avm1::object::shared_object::SharedObject;
 use crate::avm1::object::super_object::SuperObject;
 use crate::avm1::object::value_object::ValueObject;
@@ -25,10 +25,11 @@ use crate::avm1::object::text_format_object::TextFormatObject;
 use crate::avm1::object::transform_object::TransformObject;
 use crate::avm1::object::xml_attributes_object::XmlAttributesObject;
 use crate::avm1::object::xml_idmap_object::XmlIdMapObject;
+use crate::avm1::object::xml_node_object::XmlNodeObject;
 use crate::avm1::object::xml_object::XmlObject;
 use crate::avm1::{AvmString, ScriptObject, SoundObject, StageObject, Value};
 use crate::display_object::DisplayObject;
-use crate::xml::XmlNode;
+use crate::xml::{XmlDocument, XmlNode};
 use gc_arena::{Collect, MutationContext};
 use ruffle_macros::enum_trait_object;
 use std::fmt::Debug;
@@ -57,6 +58,7 @@ pub mod transform_object;
 pub mod value_object;
 pub mod xml_attributes_object;
 pub mod xml_idmap_object;
+pub mod xml_node_object;
 pub mod xml_object;
 
 /// Represents an object that can be directly interacted with by the AVM
@@ -72,6 +74,7 @@ pub mod xml_object;
         StageObject(StageObject<'gc>),
         SuperObject(SuperObject<'gc>),
         XmlObject(XmlObject<'gc>),
+        XmlNodeObject(XmlNodeObject<'gc>),
         XmlAttributesObject(XmlAttributesObject<'gc>),
         XmlIdMapObject(XmlIdMapObject<'gc>),
         ValueObject(ValueObject<'gc>),
@@ -185,7 +188,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
                     if let Some(setter) = this_proto.setter(name, activation) {
                         if let Some(exec) = setter.as_executable() {
                             let _ = exec.exec(
-                                "[Setter]",
+                                ExecutionName::Static("[Setter]"),
                                 activation,
                                 this,
                                 1,
@@ -264,7 +267,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
 
         match method.as_executable() {
             Some(exec) => exec.exec(
-                &name,
+                ExecutionName::Dynamic(name),
                 activation,
                 this,
                 depth,
@@ -531,6 +534,11 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         None
     }
 
+    /// Get the underlying XML document for this object, if it exists.
+    fn as_xml(&self) -> Option<XmlDocument<'gc>> {
+        None
+    }
+
     /// Get the underlying XML node for this object, if it exists.
     fn as_xml_node(&self) -> Option<XmlNode<'gc>> {
         None
@@ -697,7 +705,7 @@ pub fn search_prototype<'gc>(
         if let Some(getter) = p.getter(name, activation) {
             if let Some(exec) = getter.as_executable() {
                 let result = exec.exec(
-                    "[Getter]",
+                    ExecutionName::Static("[Getter]"),
                     activation,
                     this,
                     1,

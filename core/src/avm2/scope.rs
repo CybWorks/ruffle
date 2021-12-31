@@ -117,31 +117,33 @@ impl<'gc> ScopeChain<'gc> {
         self.domain
     }
 
+    #[allow(clippy::collapsible_if)]
     pub fn find(
         &self,
-        name: &Multiname<'gc>,
+        multiname: &Multiname<'gc>,
         activation: &mut Activation<'_, 'gc, '_>,
     ) -> Result<Option<Object<'gc>>, Error> {
         // First search our scopes
         if let Some(scopes) = self.scopes {
             for (depth, scope) in scopes.iter().enumerate().rev() {
                 let values = scope.values();
-                if let Some(qname) = values.resolve_multiname(name)? {
-                    // We search the dynamic properties if either conditions are met:
-                    // 1. Scope is a `with` scope
-                    // 2. We are at depth 0 (global scope)
-                    //
-                    // But no matter what, we always search traits first.
-                    if values.has_trait(&qname)?
-                        || ((scope.with() || depth == 0) && values.has_property(&qname)?)
-                    {
+
+                // We search the dynamic properties if either conditions are met:
+                // 1. Scope is a `with` scope
+                // 2. We are at depth 0 (global scope)
+                //
+                // But no matter what, we always search traits first.
+                if values.has_trait(multiname) {
+                    return Ok(Some(values));
+                } else if scope.with() || depth == 0 {
+                    if values.has_own_property(multiname) {
                         return Ok(Some(values));
                     }
                 }
             }
         }
         // That didn't work... let's try searching the domain now.
-        if let Some((_qname, mut script)) = self.domain.get_defining_script(name)? {
+        if let Some((_qname, mut script)) = self.domain.get_defining_script(multiname)? {
             return Ok(Some(script.globals(&mut activation.context)?));
         }
         Ok(None)
@@ -153,7 +155,7 @@ impl<'gc> ScopeChain<'gc> {
         activation: &mut Activation<'_, 'gc, '_>,
     ) -> Result<Option<Value<'gc>>, Error> {
         if let Some(object) = self.find(name, activation)? {
-            Ok(Some(object.get_property(object, name, activation)?))
+            Ok(Some(object.get_property(name, activation)?))
         } else {
             Ok(None)
         }
@@ -195,16 +197,22 @@ impl<'gc> ScopeStack<'gc> {
     /// The `global` parameter indicates whether we are on global$init (script initializer).
     /// When the `global` parameter is true, the scope at depth 0 is considered the global scope, and is
     /// searched for dynamic properties.
-    pub fn find(&self, name: &Multiname<'gc>, global: bool) -> Result<Option<Object<'gc>>, Error> {
+    #[allow(clippy::collapsible_if)]
+    pub fn find(
+        &self,
+        multiname: &Multiname<'gc>,
+        global: bool,
+    ) -> Result<Option<Object<'gc>>, Error> {
         for (depth, scope) in self.scopes.iter().enumerate().rev() {
             let values = scope.values();
-            if let Some(qname) = values.resolve_multiname(name)? {
+
+            if values.has_trait(multiname) {
+                return Ok(Some(values));
+            } else if scope.with() || (global && depth == 0) {
                 // We search the dynamic properties if either conditions are met:
                 // 1. Scope is a `with` scope
                 // 2. We are at depth 0 AND we are at global$init (script initializer).
-                if values.has_trait(&qname)?
-                    || ((scope.with() || (global && depth == 0)) && values.has_property(&qname)?)
-                {
+                if values.has_own_property(multiname) {
                     return Ok(Some(values));
                 }
             }

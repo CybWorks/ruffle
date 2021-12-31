@@ -12,7 +12,7 @@ use crate::backend::{
     navigator::{NavigatorBackend, RequestOptions},
     render::RenderBackend,
     storage::StorageBackend,
-    ui::{MouseCursor, UiBackend},
+    ui::{InputManager, MouseCursor, UiBackend},
     video::VideoBackend,
 };
 use crate::config::Letterbox;
@@ -203,6 +203,8 @@ pub struct Player {
     /// Faked time passage for fooling hand-written busy-loop FPS limiters.
     time_offset: u32,
 
+    input: InputManager,
+
     mouse_pos: (Twips, Twips),
     is_mouse_down: bool,
 
@@ -233,7 +235,6 @@ pub struct Player {
     current_frame: Option<u16>,
 }
 
-#[allow(clippy::too_many_arguments)]
 impl Player {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -295,6 +296,8 @@ impl Player {
             frame_accumulator: 0.0,
             recent_run_frame_timings: VecDeque::with_capacity(10),
             time_offset: 0,
+
+            input: Default::default(),
 
             mouse_pos: (Twips::ZERO, Twips::ZERO),
             is_mouse_down: false,
@@ -416,8 +419,8 @@ impl Player {
                 for (key, value) in context.swf.parameters().iter() {
                     object.define_value(
                         context.gc_context,
-                        AvmString::new(context.gc_context, key),
-                        AvmString::new(context.gc_context, value).into(),
+                        AvmString::new_utf8(context.gc_context, key),
+                        AvmString::new_utf8(context.gc_context, value).into(),
                         Attribute::empty(),
                     );
                 }
@@ -453,7 +456,7 @@ impl Player {
             object.define_value(
                 activation.context.gc_context,
                 "$version",
-                AvmString::new(activation.context.gc_context, version_string).into(),
+                AvmString::new_utf8(activation.context.gc_context, version_string).into(),
                 Attribute::empty(),
             );
 
@@ -839,12 +842,16 @@ impl Player {
     /// 9. Mouse state is updated. This triggers button rollovers, which are a
     ///    second wave of event processing.
     pub fn handle_event(&mut self, event: PlayerEvent) {
+        self.input.handle_event(&event);
+
         if cfg!(feature = "avm_debug") {
-            if let PlayerEvent::KeyDown {
-                key_code: KeyCode::V,
-            } = event
-            {
-                if self.ui.is_key_down(KeyCode::Control) && self.ui.is_key_down(KeyCode::Alt) {
+            match event {
+                PlayerEvent::KeyDown {
+                    key_code: KeyCode::V,
+                    ..
+                } if self.input.is_key_down(KeyCode::Control)
+                    && self.input.is_key_down(KeyCode::Alt) =>
+                {
                     self.mutate_with_update_context(|context| {
                         let mut dumper = VariableDumper::new("  ");
                         let levels: Vec<_> = context.stage.iter_depth_list().collect();
@@ -873,13 +880,12 @@ impl Player {
                         log::info!("Variable dump:\n{}", dumper.output());
                     });
                 }
-            }
-
-            if let PlayerEvent::KeyDown {
-                key_code: KeyCode::D,
-            } = event
-            {
-                if self.ui.is_key_down(KeyCode::Control) && self.ui.is_key_down(KeyCode::Alt) {
+                PlayerEvent::KeyDown {
+                    key_code: KeyCode::D,
+                    ..
+                } if self.input.is_key_down(KeyCode::Control)
+                    && self.input.is_key_down(KeyCode::Alt) =>
+                {
                     self.mutate_with_update_context(|context| {
                         if context.avm1.show_debug_output() {
                             log::info!(
@@ -896,6 +902,7 @@ impl Player {
                         }
                     });
                 }
+                _ => {}
             }
         }
 
@@ -909,9 +916,8 @@ impl Player {
                     key_code: ButtonKeyCode::from_u8(codepoint as u8).unwrap(),
                 })
             }
-
             // Special keys have custom values for keyPress.
-            PlayerEvent::KeyDown { key_code } => {
+            PlayerEvent::KeyDown { key_code, .. } => {
                 if let Some(key_code) = crate::events::key_code_to_button_key_code(key_code) {
                     Some(ClipEvent::KeyPress { key_code })
                 } else {
@@ -922,30 +928,28 @@ impl Player {
         };
 
         let mut key_press_handled = false;
-        if button_event.is_some() {
+        if let Some(button_event) = button_event {
             self.mutate_with_update_context(|context| {
                 let levels: Vec<_> = context.stage.iter_depth_list().collect();
                 for (_depth, level) in levels {
-                    if let Some(button_event) = button_event {
-                        let state = if let Some(interactive) = level.as_interactive() {
-                            interactive.handle_clip_event(context, button_event)
-                        } else {
-                            ClipEventResult::NotHandled
-                        };
+                    let state = if let Some(interactive) = level.as_interactive() {
+                        interactive.handle_clip_event(context, button_event)
+                    } else {
+                        ClipEventResult::NotHandled
+                    };
 
-                        if state == ClipEventResult::Handled {
+                    if state == ClipEventResult::Handled {
+                        key_press_handled = true;
+                        return;
+                    } else if let Some(text) =
+                        context.focus_tracker.get().and_then(|o| o.as_edit_text())
+                    {
+                        // Text fields listen for arrow key presses, etc.
+                        if text.handle_text_control_event(context, button_event)
+                            == ClipEventResult::Handled
+                        {
                             key_press_handled = true;
                             return;
-                        } else if let Some(text) =
-                            context.focus_tracker.get().and_then(|o| o.as_edit_text())
-                        {
-                            // Text fields listen for arrow key presses, etc.
-                            if text.handle_text_control_event(context, button_event)
-                                == ClipEventResult::Handled
-                            {
-                                key_press_handled = true;
-                                return;
-                            }
                         }
                     }
                 }
@@ -1518,6 +1522,7 @@ impl Player {
                 stage,
                 mouse_over_object: mouse_hovered_object,
                 mouse_down_object: mouse_pressed_object,
+                input: &self.input,
                 mouse_position: &self.mouse_pos,
                 drag_object,
                 player: self.self_reference.clone(),
@@ -1585,7 +1590,7 @@ impl Player {
         let device_font = crate::font::Font::from_swf_tag(
             gc_context,
             renderer,
-            &reader.read_define_font_2(3)?,
+            reader.read_define_font_2(3)?,
             reader.encoding(),
         )?;
         Ok(device_font)

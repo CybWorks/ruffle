@@ -8,7 +8,6 @@ use crate::avm2::script::TranslationUnit;
 use crate::avm2::traits::{Trait, TraitKind};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
-use crate::string::AvmString;
 use bitflags::bitflags;
 use gc_arena::{Collect, GcCell, MutationContext};
 use std::fmt;
@@ -152,64 +151,6 @@ pub struct Class<'gc> {
     is_system: bool,
 }
 
-/// Find traits in a list of traits matching a name.
-///
-/// This function also enforces final/override bits on the traits, and will
-/// raise `VerifyError`s as needed.
-///
-/// TODO: This is an O(n^2) algorithm, it sucks.
-fn do_trait_lookup<'gc>(
-    name: &QName<'gc>,
-    known_traits: &mut Vec<Trait<'gc>>,
-    all_traits: &[Trait<'gc>],
-) -> Result<(), Error> {
-    for trait_entry in all_traits {
-        if name == trait_entry.name() {
-            for known_trait in known_traits.iter() {
-                match (&trait_entry.kind(), &known_trait.kind()) {
-                    (TraitKind::Getter { .. }, TraitKind::Setter { .. }) => continue,
-                    (TraitKind::Setter { .. }, TraitKind::Getter { .. }) => continue,
-                    _ => {}
-                };
-
-                if known_trait.is_final() {
-                    return Err("Attempting to override a final definition".into());
-                }
-
-                if !trait_entry.is_override() {
-                    return Err("Definition override is not marked as override".into());
-                }
-            }
-
-            known_traits.push(trait_entry.clone());
-        }
-    }
-
-    Ok(())
-}
-
-/// Find traits in a list of traits matching a slot ID.
-fn do_trait_lookup_by_slot<'gc>(
-    id: u32,
-    all_traits: &[Trait<'gc>],
-) -> Result<Option<Trait<'gc>>, Error> {
-    for trait_entry in all_traits {
-        let trait_id = match trait_entry.kind() {
-            TraitKind::Slot { slot_id, .. } => slot_id,
-            TraitKind::Const { slot_id, .. } => slot_id,
-            TraitKind::Class { slot_id, .. } => slot_id,
-            TraitKind::Function { slot_id, .. } => slot_id,
-            _ => continue,
-        };
-
-        if id == *trait_id {
-            return Ok(Some(trait_entry.clone()));
-        }
-    }
-
-    Ok(None)
-}
-
 impl<'gc> Class<'gc> {
     /// Create a new class.
     ///
@@ -279,11 +220,6 @@ impl<'gc> Class<'gc> {
         self.attributes = attributes;
     }
 
-    /// Add a protected namespace to this class.
-    pub fn set_protected_namespace(&mut self, ns: Namespace<'gc>) {
-        self.protected_namespace = Some(ns)
-    }
-
     /// Construct a class from a `TranslationUnit` and its class index.
     ///
     /// The returned class will be allocated, but no traits will be loaded. The
@@ -307,17 +243,14 @@ impl<'gc> Class<'gc> {
             .ok_or_else(|| "LoadError: Instance index not valid".into());
         let abc_instance = abc_instance?;
 
-        let name = QName::from_abc_multiname(
-            unit,
-            abc_instance.name.clone(),
-            activation.context.gc_context,
-        )?;
+        let name =
+            QName::from_abc_multiname(unit, abc_instance.name, activation.context.gc_context)?;
         let super_class = if abc_instance.super_name.0 == 0 {
             None
         } else {
             Some(Multiname::from_abc_multiname_static(
                 unit,
-                abc_instance.super_name.clone(),
+                abc_instance.super_name,
                 activation.context.gc_context,
             )?)
         };
@@ -325,7 +258,7 @@ impl<'gc> Class<'gc> {
         let protected_namespace = if let Some(ns) = &abc_instance.protected_namespace {
             Some(Namespace::from_abc_namespace(
                 unit,
-                ns.clone(),
+                *ns,
                 activation.context.gc_context,
             )?)
         } else {
@@ -336,14 +269,14 @@ impl<'gc> Class<'gc> {
         for interface_name in &abc_instance.interfaces {
             interfaces.push(Multiname::from_abc_multiname_static(
                 unit,
-                interface_name.clone(),
+                *interface_name,
                 activation.context.gc_context,
             )?);
         }
 
-        let instance_init = unit.load_method(abc_instance.init_method.0, false, activation)?;
+        let instance_init = unit.load_method(abc_instance.init_method, false, activation)?;
         let native_instance_init = instance_init.clone();
-        let class_init = unit.load_method(abc_class.init_method.0, false, activation)?;
+        let class_init = unit.load_method(abc_class.init_method, false, activation)?;
 
         let mut attributes = ClassAttributes::empty();
         attributes.set(ClassAttributes::SEALED, abc_instance.is_sealed);
@@ -434,6 +367,9 @@ impl<'gc> Class<'gc> {
 
         if let Some(superclass) = superclass {
             for instance_trait in self.instance_traits.iter() {
+                let is_protected =
+                    self.protected_namespace() == Some(instance_trait.name().namespace());
+
                 let mut current_superclass = Some(superclass);
                 let mut did_override = false;
 
@@ -442,7 +378,14 @@ impl<'gc> Class<'gc> {
                     let read = superclass_def.read();
 
                     for supertrait in read.instance_traits.iter() {
-                        if supertrait.name() == instance_trait.name() {
+                        let super_name = supertrait.name();
+                        let my_name = instance_trait.name();
+
+                        let names_match = super_name.local_name() == my_name.local_name()
+                            && (super_name.namespace() == my_name.namespace()
+                                || (is_protected
+                                    && read.protected_namespace() == Some(super_name.namespace())));
+                        if names_match {
                             match (supertrait.kind(), instance_trait.kind()) {
                                 //Getter/setter pairs do NOT override one another
                                 (TraitKind::Getter { .. }, TraitKind::Setter { .. }) => continue,
@@ -537,8 +480,8 @@ impl<'gc> Class<'gc> {
         ))
     }
 
-    pub fn name(&self) -> &QName<'gc> {
-        &self.name
+    pub fn name(&self) -> QName<'gc> {
+        self.name
     }
 
     pub fn set_name(&mut self, name: QName<'gc>) {
@@ -547,6 +490,10 @@ impl<'gc> Class<'gc> {
 
     pub fn super_class_name(&self) -> &Option<Multiname<'gc>> {
         &self.super_class
+    }
+
+    pub fn protected_namespace(&self) -> Option<Namespace<'gc>> {
+        self.protected_namespace
     }
 
     #[inline(never)]
@@ -578,6 +525,16 @@ impl<'gc> Class<'gc> {
             self.define_class_trait(Trait::from_const(
                 QName::new(Namespace::public(), name),
                 QName::new(Namespace::public(), "uint").into(),
+                Some(value.into()),
+            ));
+        }
+    }
+    #[inline(never)]
+    pub fn define_public_constant_int_class_traits(&mut self, items: &[(&'static str, i32)]) {
+        for &(name, value) in items {
+            self.define_class_trait(Trait::from_const(
+                QName::new(Namespace::public(), name),
+                QName::new(Namespace::public(), "int").into(),
                 Some(value.into()),
             ));
         }
@@ -732,67 +689,9 @@ impl<'gc> Class<'gc> {
         self.class_traits.push(my_trait);
     }
 
-    /// Given a name, append class traits matching the name to a list of known
-    /// traits.
-    ///
-    /// This function adds its result onto the list of known traits, with the
-    /// caveat that duplicate entries will be replaced (if allowed). As such, this
-    /// function should be run on the class hierarchy from top to bottom.
-    ///
-    /// If a given trait has an invalid name, attempts to override a final trait,
-    /// or overlaps an existing trait without being an override, then this function
-    /// returns an error.
-    pub fn lookup_class_traits(
-        &self,
-        name: &QName<'gc>,
-        known_traits: &mut Vec<Trait<'gc>>,
-    ) -> Result<(), Error> {
-        do_trait_lookup(name, known_traits, &self.class_traits)
-    }
-
-    /// Given a slot ID, append class traits matching the slot to a list of
-    /// known traits.
-    ///
-    /// This function adds its result onto the list of known traits, with the
-    /// caveat that duplicate entries will be replaced (if allowed). As such, this
-    /// function should be run on the class hierarchy from top to bottom.
-    ///
-    /// If a given trait has an invalid name, attempts to override a final trait,
-    /// or overlaps an existing trait without being an override, then this function
-    /// returns an error.
-    pub fn lookup_class_traits_by_slot(&self, id: u32) -> Result<Option<Trait<'gc>>, Error> {
-        do_trait_lookup_by_slot(id, &self.class_traits)
-    }
-
-    /// Determines if this class provides a given trait on itself.
-    pub fn has_class_trait(&self, name: &QName<'gc>) -> bool {
-        for trait_entry in self.class_traits.iter() {
-            if name == trait_entry.name() {
-                return true;
-            }
-        }
-
-        false
-    }
-
     /// Return class traits provided by this class.
     pub fn class_traits(&self) -> &[Trait<'gc>] {
         &self.class_traits[..]
-    }
-
-    /// Look for a class trait with a given local name, and return its
-    /// namespace.
-    ///
-    /// TODO: Matching multiple namespaces with the same local name is at least
-    /// claimed by the AVM2 specification to be a `VerifyError`.
-    pub fn resolve_any_class_trait(&self, local_name: AvmString<'gc>) -> Option<Namespace<'gc>> {
-        for trait_entry in self.class_traits.iter() {
-            if local_name == trait_entry.name().local_name() {
-                return Some(trait_entry.name().namespace().clone());
-            }
-        }
-
-        None
     }
 
     /// Define a trait on instances of the class.
@@ -804,79 +703,9 @@ impl<'gc> Class<'gc> {
         self.instance_traits.push(my_trait);
     }
 
-    /// Given a name, append instance traits matching the name to a list of
-    /// known traits.
-    ///
-    /// This function adds its result onto the list of known traits, with the
-    /// caveat that duplicate entries will be replaced (if allowed). As such, this
-    /// function should be run on the class hierarchy from top to bottom.
-    ///
-    /// If a given trait has an invalid name, attempts to override a final trait,
-    /// or overlaps an existing trait without being an override, then this function
-    /// returns an error.
-    pub fn lookup_instance_traits(
-        &self,
-        name: &QName<'gc>,
-        known_traits: &mut Vec<Trait<'gc>>,
-    ) -> Result<(), Error> {
-        do_trait_lookup(name, known_traits, &self.instance_traits)
-    }
-
-    /// Given a slot ID, append instance traits matching the slot to a list of
-    /// known traits.
-    ///
-    /// This function adds its result onto the list of known traits, with the
-    /// caveat that duplicate entries will be replaced (if allowed). As such, this
-    /// function should be run on the class hierarchy from top to bottom.
-    ///
-    /// If a given trait has an invalid name, attempts to override a final trait,
-    /// or overlaps an existing trait without being an override, then this function
-    /// returns an error.
-    pub fn lookup_instance_traits_by_slot(&self, id: u32) -> Result<Option<Trait<'gc>>, Error> {
-        do_trait_lookup_by_slot(id, &self.instance_traits)
-    }
-
-    /// Determines if this class provides a given trait on its instances.
-    pub fn has_instance_trait(&self, name: &QName<'gc>) -> bool {
-        for trait_entry in self.instance_traits.iter() {
-            if name == trait_entry.name() {
-                return true;
-            }
-        }
-
-        false
-    }
-
-    /// Determines if this class provides a given trait with a particular
-    /// dispatch ID on its instances.
-    pub fn has_instance_trait_by_disp_id(&self, id: u32) -> bool {
-        for trait_entry in self.instance_traits.iter() {
-            if Some(id) == trait_entry.disp_id() {
-                return true;
-            }
-        }
-
-        false
-    }
-
     /// Return instance traits provided by this class.
     pub fn instance_traits(&self) -> &[Trait<'gc>] {
         &self.instance_traits[..]
-    }
-
-    /// Look for an instance trait with a given local name, and return its
-    /// namespace.
-    ///
-    /// TODO: Matching multiple namespaces with the same local name is at least
-    /// claimed by the AVM2 specification to be a `VerifyError`.
-    pub fn resolve_any_instance_trait(&self, local_name: AvmString<'gc>) -> Option<Namespace<'gc>> {
-        for trait_entry in self.instance_traits.iter() {
-            if local_name == trait_entry.name().local_name() {
-                return Some(trait_entry.name().namespace().clone());
-            }
-        }
-
-        None
     }
 
     /// Get this class's instance allocator.

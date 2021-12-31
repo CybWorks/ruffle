@@ -31,26 +31,26 @@ type CompareFn<'a, 'gc> =
     Box<dyn 'a + FnMut(&mut Activation<'_, 'gc, '_>, &Value<'gc>, &Value<'gc>) -> Ordering>;
 
 const PROTO_DECLS: &[Declaration] = declare_properties! {
-    "push" => method(push; DONT_ENUM);
-    "unshift" => method(unshift; DONT_ENUM);
-    "shift" => method(shift; DONT_ENUM);
-    "pop" => method(pop; DONT_ENUM);
-    "reverse" => method(reverse; DONT_ENUM);
-    "join" => method(join; DONT_ENUM);
-    "slice" => method(slice; DONT_ENUM);
-    "splice" => method(splice; DONT_ENUM);
-    "concat" => method(concat; DONT_ENUM);
-    "toString" => method(to_string; DONT_ENUM);
-    "sort" => method(sort; DONT_ENUM);
-    "sortOn" => method(sort_on; DONT_ENUM);
+    "push" => method(push; DONT_ENUM | DONT_DELETE);
+    "unshift" => method(unshift; DONT_ENUM | DONT_DELETE);
+    "shift" => method(shift; DONT_ENUM | DONT_DELETE);
+    "pop" => method(pop; DONT_ENUM | DONT_DELETE);
+    "reverse" => method(reverse; DONT_ENUM | DONT_DELETE);
+    "join" => method(join; DONT_ENUM | DONT_DELETE);
+    "slice" => method(slice; DONT_ENUM | DONT_DELETE);
+    "splice" => method(splice; DONT_ENUM | DONT_DELETE);
+    "concat" => method(concat; DONT_ENUM | DONT_DELETE);
+    "toString" => method(to_string; DONT_ENUM | DONT_DELETE);
+    "sort" => method(sort; DONT_ENUM | DONT_DELETE);
+    "sortOn" => method(sort_on; DONT_ENUM | DONT_DELETE);
 };
 
 const OBJECT_DECLS: &[Declaration] = declare_properties! {
-    "CASEINSENSITIVE" => int(SortFlags::CASE_INSENSITIVE.bits(); DONT_ENUM | DONT_DELETE | READ_ONLY);
-    "DESCENDING" => int(SortFlags::DESCENDING.bits(); DONT_ENUM | DONT_DELETE | READ_ONLY);
-    "UNIQUESORT" => int(SortFlags::UNIQUE_SORT.bits(); DONT_ENUM | DONT_DELETE | READ_ONLY);
-    "RETURNINDEXEDARRAY" => int(SortFlags::RETURN_INDEXED_ARRAY.bits(); DONT_ENUM | DONT_DELETE | READ_ONLY);
-    "NUMERIC" => int(SortFlags::NUMERIC.bits(); DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "CASEINSENSITIVE" => int(SortFlags::CASE_INSENSITIVE.bits());
+    "DESCENDING" => int(SortFlags::DESCENDING.bits());
+    "UNIQUESORT" => int(SortFlags::UNIQUE_SORT.bits());
+    "RETURNINDEXEDARRAY" => int(SortFlags::RETURN_INDEXED_ARRAY.bits());
+    "NUMERIC" => int(SortFlags::NUMERIC.bits());
 };
 
 pub fn create_array_object<'gc>(
@@ -258,14 +258,15 @@ pub fn join<'gc>(
         return Ok("".into());
     }
 
-    let parts: Result<Vec<_>, Error<'gc>> = (0..length)
+    let parts = (0..length)
         .map(|i| {
             let element = this.get_element(activation, i);
-            Ok(element.coerce_to_string(activation)?.to_string())
+            element.coerce_to_string(activation)
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(AvmString::new(activation.context.gc_context, parts?.join(&separator)).into())
+    let joined = crate::string::join(&parts, &separator);
+    Ok(AvmString::new(activation.context.gc_context, joined).into())
 }
 
 /// Handles an index parameter that may be positive (starting from beginning) or negaitve (starting from end).
@@ -598,7 +599,7 @@ pub fn create_proto<'gc>(
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let array = ArrayObject::empty_with_proto(gc_context, Some(proto));
+    let array = ArrayObject::empty_with_proto(gc_context, proto);
     let object = array.as_script_object().unwrap();
     define_properties_on(PROTO_DECLS, gc_context, object, fn_proto);
     object.into()
@@ -628,7 +629,7 @@ fn sort_compare_string_ignore_case<'gc>(
     let b_str = b.coerce_to_string(activation);
     // TODO: Handle errors.
     if let (Ok(a_str), Ok(b_str)) = (a_str, b_str) {
-        crate::string::utils::swf_string_cmp_ignore_case(&a_str, &b_str)
+        a_str.cmp_ignore_case(&b_str)
     } else {
         DEFAULT_ORDERING
     }

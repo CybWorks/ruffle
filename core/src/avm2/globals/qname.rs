@@ -22,9 +22,7 @@ pub fn instance_init<'gc>(
                 let local_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
 
                 let namespace = match ns_arg {
-                    Value::Object(o) if o.as_namespace().is_some() => {
-                        o.as_namespace().unwrap().clone()
-                    }
+                    Value::Object(o) if o.as_namespace().is_some() => *o.as_namespace().unwrap(),
                     Value::Undefined | Value::Null => Namespace::Any,
                     v => Namespace::Namespace(v.coerce_to_string(activation)?),
                 };
@@ -33,13 +31,9 @@ pub fn instance_init<'gc>(
             } else {
                 let qname_arg = args.get(0).cloned().unwrap_or(Value::Undefined);
                 let namespace = match qname_arg {
-                    Value::Object(o) if o.as_qname_object().is_some() => o
-                        .as_qname_object()
-                        .unwrap()
-                        .qname()
-                        .unwrap()
-                        .namespace()
-                        .clone(),
+                    Value::Object(o) if o.as_qname_object().is_some() => {
+                        o.as_qname_object().unwrap().qname().unwrap().namespace()
+                    }
                     _ => Namespace::Namespace("".into()),
                 };
 
@@ -71,13 +65,10 @@ pub fn class_init<'gc>(
 ) -> Result<Value<'gc>, Error> {
     let this = this.unwrap();
     let scope = activation.create_scopechain();
-    let mut qname_proto = this
-        .get_property(this, &QName::dynamic_name("prototype").into(), activation)?
-        .coerce_to_object(activation)?;
     let this_class = this.as_class_object().unwrap();
+    let mut qname_proto = this_class.prototype();
 
     qname_proto.set_property(
-        qname_proto,
         &QName::dynamic_name("toString").into(),
         FunctionObject::from_method(
             activation,
@@ -91,7 +82,6 @@ pub fn class_init<'gc>(
     )?;
 
     qname_proto.set_property(
-        qname_proto,
         &QName::dynamic_name("valueOf").into(),
         FunctionObject::from_method(
             activation,
@@ -102,6 +92,17 @@ pub fn class_init<'gc>(
         )
         .into(),
         activation,
+    )?;
+
+    qname_proto.set_local_property_is_enumerable(
+        activation.context.gc_context,
+        "toString".into(),
+        false,
+    )?;
+    qname_proto.set_local_property_is_enumerable(
+        activation.context.gc_context,
+        "valueOf".into(),
+        false,
     )?;
 
     Ok(Value::Undefined)

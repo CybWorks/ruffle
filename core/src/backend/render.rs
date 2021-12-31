@@ -26,7 +26,7 @@ pub trait RenderBackend: Downcast {
         jpeg_tables: Option<&[u8]>,
     ) -> Result<BitmapInfo, Error>;
     fn register_bitmap_jpeg_2(&mut self, data: &[u8]) -> Result<BitmapInfo, Error>;
-    fn register_bitmap_jpeg_3(
+    fn register_bitmap_jpeg_3_or_4(
         &mut self,
         jpeg_data: &[u8],
         alpha_data: &[u8],
@@ -146,7 +146,7 @@ impl RenderBackend for NullRenderer {
             height: 0,
         })
     }
-    fn register_bitmap_jpeg_3(
+    fn register_bitmap_jpeg_3_or_4(
         &mut self,
         _data: &[u8],
         _alpha_data: &[u8],
@@ -357,6 +357,10 @@ pub fn decode_jpeg(
                 rgb.push(elem);
             }
             rgb
+        }
+        jpeg_decoder::PixelFormat::L16 => {
+            log::warn!("Unimplemented L16 JPEG pixel format");
+            decoded_data
         }
     };
 
