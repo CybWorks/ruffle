@@ -3568,9 +3568,9 @@ dependencies = [
 
 [[package]]
 name = "tinyfiledialogs"
-version = "3.8.3"
+version = "3.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9545b2375cbcb7a7d70cca5e92fbaa096fd89bebd2fbc54a3da7f37d15a54e6b"
+checksum = "e25fa0bc43a6566e2cc6d7ac96df3fa5a57beba34445bead1b368ba8fe9ca568"
 dependencies = [
  "cc",
  "libc",
