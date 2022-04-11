@@ -35,7 +35,7 @@ mod vector;
 mod xml;
 mod xml_list;
 
-const NS_RUFFLE_INTERNAL: &str = "https://ruffle.rs/AS3/impl/";
+pub(crate) const NS_RUFFLE_INTERNAL: &str = "https://ruffle.rs/AS3/impl/";
 const NS_VECTOR: &str = "__AS3__.vec";
 
 pub use flash::utils::NS_FLASH_PROXY;
@@ -87,6 +87,7 @@ pub struct SystemPrototypes<'gc> {
     pub sharedobject: Object<'gc>,
     pub nativemenu: Object<'gc>,
     pub contextmenu: Object<'gc>,
+    pub mouseevent: Object<'gc>,
 }
 
 impl<'gc> SystemPrototypes<'gc> {
@@ -148,6 +149,7 @@ impl<'gc> SystemPrototypes<'gc> {
             sharedobject: empty,
             nativemenu: empty,
             contextmenu: empty,
+            mouseevent: empty,
         }
     }
 }
@@ -199,6 +201,7 @@ pub struct SystemClasses<'gc> {
     pub sharedobject: ClassObject<'gc>,
     pub nativemenu: ClassObject<'gc>,
     pub contextmenu: ClassObject<'gc>,
+    pub mouseevent: ClassObject<'gc>,
 }
 
 impl<'gc> SystemClasses<'gc> {
@@ -260,6 +263,7 @@ impl<'gc> SystemClasses<'gc> {
             sharedobject: object,
             nativemenu: object,
             contextmenu: object,
+            mouseevent: object,
         }
     }
 }
@@ -563,9 +567,20 @@ pub fn load_player_globals<'gc>(
         flash::events::eventdispatcher::create_class(mc),
         script,
     )?;
-    class(
+    avm2_system_class!(
+        mouseevent,
         activation,
         flash::events::mouseevent::create_class(mc),
+        script
+    );
+    class(
+        activation,
+        flash::events::ioerrorevent::create_class(mc),
+        script,
+    )?;
+    class(
+        activation,
+        flash::events::contextmenuevent::create_class(mc),
         script,
     )?;
     class(
@@ -589,6 +604,12 @@ pub fn load_player_globals<'gc>(
         flash::events::fullscreenevent::create_class(mc),
         script
     );
+    class(
+        activation,
+        flash::events::eventphase::create_class(mc),
+        script,
+    )?;
+
     // package `flash.utils`
     avm2_system_class!(
         bytearray,
@@ -612,6 +633,8 @@ pub fn load_player_globals<'gc>(
         flash::utils::dictionary::create_class(mc),
         script,
     )?;
+
+    class(activation, flash::utils::timer::create_class(mc), script)?;
 
     namespace(
         activation,
@@ -733,6 +756,7 @@ pub fn load_player_globals<'gc>(
         flash::display::capsstyle::create_class(mc),
         script,
     )?;
+    class(activation, flash::display::loader::create_class(mc), script)?;
     avm2_system_class!(
         loaderinfo,
         activation,
@@ -798,8 +822,26 @@ pub fn load_player_globals<'gc>(
         flash::display::nativemenu::create_class(mc),
         script
     );
+    class(
+        activation,
+        flash::display::nativemenuitem::create_class(mc),
+        script,
+    )?;
+
+    // package `flash.filters`
+    class(
+        activation,
+        flash::filters::bitmapfilter::create_class(mc),
+        script,
+    )?;
+    class(
+        activation,
+        flash::filters::glowfilter::create_class(mc),
+        script,
+    )?;
 
     // package `flash.geom`
+    class(activation, flash::geom::matrix::create_class(mc), script)?;
     avm2_system_class!(
         point,
         activation,
@@ -846,7 +888,13 @@ pub fn load_player_globals<'gc>(
         flash::ui::contextmenu::create_class(mc),
         script
     );
+    class(
+        activation,
+        flash::ui::contextmenuitem::create_class(mc),
+        script,
+    )?;
     class(activation, flash::ui::mouse::create_class(mc), script)?;
+    class(activation, flash::ui::keyboard::create_class(mc), script)?;
 
     // package `flash.net`
     avm2_system_class!(
@@ -859,6 +907,11 @@ pub fn load_player_globals<'gc>(
     class(
         activation,
         flash::net::object_encoding::create_class(mc),
+        script,
+    )?;
+    class(
+        activation,
+        flash::net::url_request::create_class(mc),
         script,
     )?;
 
@@ -898,6 +951,13 @@ pub fn load_player_globals<'gc>(
         "flash.crypto",
         "generateRandomBytes",
         flash::crypto::generate_random_bytes,
+        script,
+    )?;
+
+    // package `flash.external`
+    class(
+        activation,
+        flash::external::externalinterface::create_class(mc),
         script,
     )?;
 

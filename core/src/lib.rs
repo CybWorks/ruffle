@@ -1,14 +1,3 @@
-#![allow(
-    renamed_and_removed_lints,
-    unknown_lints,
-    clippy::unknown_clippy_lints,
-    clippy::inconsistent_struct_constructor,
-    clippy::manual_map,
-    clippy::manual_range_contains,
-    clippy::same_item_push,
-    clippy::unnecessary_wraps
-)]
-
 #[macro_use]
 mod display_object;
 pub use display_object::StageDisplayState;
@@ -40,6 +29,7 @@ mod font;
 mod html;
 mod library;
 pub mod loader;
+mod locale;
 pub mod matrix;
 mod player;
 mod prelude;
@@ -55,7 +45,6 @@ pub mod backend;
 pub mod config;
 pub mod external;
 
-pub use chrono;
 pub use context_menu::ContextMenuItem;
 pub use events::PlayerEvent;
 pub use indexmap;

@@ -11,7 +11,6 @@ use std::borrow::Cow;
 use std::fs;
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
-use std::time::{Duration, Instant};
 use url::Url;
 use winit::event_loop::EventLoopProxy;
 
@@ -27,9 +26,6 @@ pub struct ExternalNavigatorBackend {
     /// The url to use for all relative fetches.
     movie_url: Url,
 
-    /// The time that the SWF was launched.
-    start_time: Instant,
-
     // Client to use for network requests
     client: Option<Rc<HttpClient>>,
 
@@ -37,7 +33,6 @@ pub struct ExternalNavigatorBackend {
 }
 
 impl ExternalNavigatorBackend {
-    #[allow(dead_code)]
     /// Construct a navigator backend with fetch and async capability.
     pub fn new(
         movie_url: Url,
@@ -58,7 +53,6 @@ impl ExternalNavigatorBackend {
             event_loop,
             client,
             movie_url,
-            start_time: Instant::now(),
             upgrade_to_https,
         }
     }
@@ -127,11 +121,34 @@ impl NavigatorBackend for ExternalNavigatorBackend {
 
         match processed_url.scheme() {
             "file" => Box::pin(async move {
-                fs::read(processed_url.to_file_path().unwrap_or_default())
-                    .map_err(Error::NetworkError)
+                let path = processed_url.to_file_path().unwrap_or_default();
+
+                fs::read(&path).or_else(|e| {
+                    if cfg!(feature = "sandbox") {
+                        use rfd::{FileDialog, MessageButtons, MessageDialog, MessageLevel};
+                        use std::io::ErrorKind;
+
+                        if e.kind() == ErrorKind::PermissionDenied {
+                            let attempt_sandbox_open = MessageDialog::new()
+                                .set_level(MessageLevel::Warning)
+                                .set_description(&format!("The current movie is attempting to read files stored in {}.\n\nTo allow it to do so, click Yes, and then Open to grant read access to that directory.\n\nOtherwise, click No to deny access.", path.parent().unwrap().to_string_lossy()))
+                                .set_buttons(MessageButtons::YesNo)
+                                .show();
+
+                            if attempt_sandbox_open {
+                                FileDialog::new().set_directory(&path).pick_folder();
+
+                                return fs::read(&path);
+                            }
+                        }
+                    }
+
+                    Err(e)
+                }).map_err(|e| Error::FetchError(e.to_string()))
             }),
             _ => Box::pin(async move {
-                let client = client.ok_or(Error::NetworkUnavailable)?;
+                let client =
+                    client.ok_or_else(|| Error::FetchError("Network unavailable".to_string()))?;
 
                 let request = match options.method() {
                     NavigationMethod::Get => Request::get(processed_url.to_string()),
@@ -163,10 +180,6 @@ impl NavigatorBackend for ExternalNavigatorBackend {
                 Ok(buffer)
             }),
         }
-    }
-
-    fn time_since_launch(&mut self) -> Duration {
-        Instant::now().duration_since(self.start_time)
     }
 
     fn spawn_future(&mut self, future: OwnedFuture<(), Error>) {

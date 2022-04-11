@@ -602,10 +602,32 @@ pub struct PlaceObject<'a> {
     pub background_color: Option<Color>,
     pub blend_mode: Option<BlendMode>,
     pub clip_actions: Option<Vec<ClipAction<'a>>>,
-    pub is_image: bool,
+    pub has_image: bool,
     pub is_bitmap_cached: Option<bool>,
     pub is_visible: Option<bool>,
     pub amf_data: Option<&'a [u8]>,
+}
+
+bitflags! {
+    pub struct PlaceFlag: u16 {
+        const MOVE = 1 << 0;
+        const HAS_CHARACTER = 1 << 1;
+        const HAS_MATRIX = 1 << 2;
+        const HAS_COLOR_TRANSFORM = 1 << 3;
+        const HAS_RATIO = 1 << 4;
+        const HAS_NAME = 1 << 5;
+        const HAS_CLIP_DEPTH = 1 << 6;
+        const HAS_CLIP_ACTIONS = 1 << 7;
+
+        // PlaceObject3
+        const HAS_FILTER_LIST = 1 << 8;
+        const HAS_BLEND_MODE = 1 << 9;
+        const HAS_CACHE_AS_BITMAP = 1 << 10;
+        const HAS_CLASS_NAME = 1 << 11;
+        const HAS_IMAGE = 1 << 12;
+        const HAS_VISIBLE = 1 << 13;
+        const OPAQUE_BACKGROUND = 1 << 14;
+    }
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -1123,6 +1145,27 @@ impl LineStyle {
     }
 }
 
+bitflags! {
+    pub struct LineStyleFlag: u16 {
+        // First byte.
+        const PIXEL_HINTING = 1 << 0;
+        const NO_V_SCALE = 1 << 1;
+        const NO_H_SCALE = 1 << 2;
+        const HAS_FILL = 1 << 3;
+        const JOIN_STYLE = 0b11 << 4;
+        const START_CAP_STYLE = 0b11 << 6;
+
+        // Second byte.
+        const END_CAP_STYLE = 0b11 << 8;
+        const ALLOW_CLOSE = 1 << 10;
+
+        // JOIN_STYLE mask values.
+        const ROUND = 0b00 << 4;
+        const BEVEL = 0b01 << 4;
+        const MITER = 0b10 << 4;
+    }
+}
+
 #[derive(Debug, PartialEq, Clone, Copy, FromPrimitive)]
 pub enum LineCapStyle {
     Round = 0,
@@ -1279,11 +1322,20 @@ pub struct Font<'a> {
     pub language: Language,
     pub layout: Option<FontLayout>,
     pub glyphs: Vec<Glyph>,
-    pub is_small_text: bool,
-    pub is_shift_jis: bool, // TODO(Herschel): Use enum for Shift-JIS/ANSI/UCS-2
-    pub is_ansi: bool,
-    pub is_bold: bool,
-    pub is_italic: bool,
+    pub flags: FontFlag,
+}
+
+bitflags! {
+    pub struct FontFlag: u8 {
+        const IS_BOLD = 1 << 0;
+        const IS_ITALIC = 1 << 1;
+        const HAS_WIDE_CODES = 1 << 2;
+        const HAS_WIDE_OFFSETS = 1 << 3;
+        const IS_ANSI = 1 << 4;
+        const IS_SMALL_TEXT = 1 << 5;
+        const IS_SHIFT_JIS = 1 << 6;
+        const HAS_LAYOUT = 1 << 7;
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1299,7 +1351,7 @@ pub struct Font4<'a> {
 pub struct Glyph {
     pub shape_records: Vec<ShapeRecord>,
     pub code: u16,
-    pub advance: Option<i16>,
+    pub advance: i16,
     pub bounds: Option<Rectangle>,
 }
 
@@ -1323,13 +1375,20 @@ pub struct FontInfo<'a> {
     pub id: CharacterId,
     pub version: u8,
     pub name: &'a SwfStr,
-    pub is_small_text: bool,
-    pub is_shift_jis: bool,
-    pub is_ansi: bool,
-    pub is_bold: bool,
-    pub is_italic: bool,
+    pub flags: FontInfoFlag,
     pub language: Language,
     pub code_table: Vec<u16>,
+}
+
+bitflags! {
+    pub struct FontInfoFlag: u8 {
+        const HAS_WIDE_CODES = 1 << 0;
+        const IS_BOLD = 1 << 1;
+        const IS_ITALIC = 1 << 2;
+        const IS_SHIFT_JIS = 1 << 3;
+        const IS_ANSI = 1 << 4;
+        const IS_SMALL_TEXT = 1 << 5;
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

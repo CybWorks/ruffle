@@ -145,7 +145,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
                 self.base().get_slot(slot_id)
             }
             Some(Property::Method { disp_id }) => {
-                if let Some(bound_method) = self.base().get_bound_method(disp_id) {
+                if let Some(bound_method) = self.get_bound_method(disp_id) {
                     return Ok(bound_method.into());
                 }
                 let vtable = self.vtable().unwrap();
@@ -310,7 +310,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
                             superclass.unwrap().into(), //Deliberately invalid.
                         )
                     } else {
-                        if let Some(bound_method) = self.base().get_bound_method(disp_id) {
+                        if let Some(bound_method) = self.get_bound_method(disp_id) {
                             return bound_method.call(Some(self.into()), arguments, activation);
                         }
                         let bound_method = vtable
@@ -381,7 +381,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         arguments: &[Value<'gc>],
         activation: &mut Activation<'_, 'gc, '_>,
     ) -> Result<Value<'gc>, Error> {
-        if self.base().get_bound_method(id).is_none() {
+        if self.get_bound_method(id).is_none() {
             if let Some(vtable) = self.vtable() {
                 if let Some(bound_method) = vtable.make_bound_method(activation, self.into(), id) {
                     self.install_bound_method(activation.context.gc_context, id, bound_method);
@@ -389,7 +389,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
             }
         }
 
-        let bound_method = self.base().get_bound_method(id);
+        let bound_method = self.get_bound_method(id);
         if let Some(method_object) = bound_method {
             return method_object.call(Some(self.into()), arguments, activation);
         }
@@ -649,12 +649,6 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         ctor.construct(activation, args)
     }
 
-    /// Construct a host object prototype of some kind and return it.
-    ///
-    /// This is called specifically to allocate old-style ES3 instances. The
-    /// returned object should have no properties upon it.
-    fn derive(&self, activation: &mut Activation<'_, 'gc, '_>) -> Result<Object<'gc>, Error>;
-
     /// Construct a parameterization of this particular type and return it.
     ///
     /// This is called specifically to parameterize generic types, of which
@@ -811,6 +805,11 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         base.vtable()
     }
 
+    fn get_bound_method(&self, id: u32) -> Option<FunctionObject<'gc>> {
+        let base = self.base();
+        base.get_bound_method(id)
+    }
+
     /// Get this object's class's `Class`, if it has one.
     fn instance_of_class_definition(&self) -> Option<GcCell<'gc, Class<'gc>>> {
         self.instance_of().map(|cls| cls.inner_class_definition())
@@ -951,6 +950,11 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
 
     /// Unwrap this object as a mutable primitive value.
     fn as_primitive_mut(&self, _mc: MutationContext<'gc, '_>) -> Option<RefMut<Value<'gc>>> {
+        None
+    }
+
+    /// Unwrap this object as a regexp.
+    fn as_regexp_object(&self) -> Option<RegExpObject<'gc>> {
         None
     }
 

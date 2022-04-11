@@ -6,17 +6,12 @@ use ruffle_core::backend::navigator::{
 use ruffle_core::indexmap::IndexMap;
 use ruffle_core::loader::Error;
 use std::borrow::Cow;
-use std::time::Duration;
 use url::Url;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::{spawn_local, JsFuture};
-use web_sys::{
-    window, Blob, BlobPropertyBag, Document, Performance, Request, RequestInit, Response,
-};
+use web_sys::{window, Blob, BlobPropertyBag, Document, Request, RequestInit, Response};
 
 pub struct WebNavigatorBackend {
-    performance: Performance,
-    start_time: f64,
     allow_script_access: bool,
     upgrade_to_https: bool,
     base_url: Option<String>,
@@ -29,7 +24,6 @@ impl WebNavigatorBackend {
         mut base_url: Option<String>,
     ) -> Self {
         let window = web_sys::window().expect("window()");
-        let performance = window.performance().expect("window.performance()");
 
         // Upgrade to HTTPS takes effect if the current page is hosted on HTTPS.
         let upgrade_to_https =
@@ -60,9 +54,7 @@ impl WebNavigatorBackend {
             }
         }
 
-        WebNavigatorBackend {
-            start_time: performance.now(),
-            performance,
+        Self {
             allow_script_access,
             upgrade_to_https,
             base_url,
@@ -165,11 +157,6 @@ impl NavigatorBackend for WebNavigatorBackend {
         }
     }
 
-    fn time_since_launch(&mut self) -> Duration {
-        let dt = self.performance.now() - self.start_time;
-        Duration::from_millis(dt as u64)
-    }
-
     fn fetch(&self, url: &str, options: RequestOptions) -> OwnedFuture<Vec<u8>, Error> {
         let url = if let Ok(parsed_url) = Url::parse(url) {
             self.pre_process_url(parsed_url).to_string()
@@ -212,16 +199,11 @@ impl NavigatorBackend for WebNavigatorBackend {
                 .map_err(|_| Error::FetchError(format!("Unable to create request for {}", url)))?;
 
             let window = web_sys::window().unwrap();
-            let fetchval = JsFuture::from(window.fetch_with_request(&request)).await;
-            if fetchval.is_err() {
-                return Err(Error::NetworkError(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "Could not fetch, got JS Error",
-                )));
-            }
+            let fetchval = JsFuture::from(window.fetch_with_request(&request))
+                .await
+                .map_err(|_| Error::FetchError("Got JS error".to_string()))?;
 
-            let resp: Response = fetchval.unwrap().dyn_into().unwrap();
-
+            let resp: Response = fetchval.dyn_into().unwrap();
             if !resp.ok() {
                 return Err(Error::FetchError(format!(
                     "HTTP status is not ok, got {}",
@@ -237,11 +219,7 @@ impl NavigatorBackend for WebNavigatorBackend {
                 .dyn_into()
                 .unwrap();
 
-            let jsarray = Uint8Array::new(&data);
-            let mut rust_array = vec![0; jsarray.length() as usize];
-            jsarray.copy_to(&mut rust_array);
-
-            Ok(rust_array)
+            Ok(Uint8Array::new(&data).to_vec())
         })
     }
 

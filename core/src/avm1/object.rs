@@ -24,12 +24,11 @@ use crate::avm1::object::gradient_glow_filter::GradientGlowFilterObject;
 use crate::avm1::object::text_format_object::TextFormatObject;
 use crate::avm1::object::transform_object::TransformObject;
 use crate::avm1::object::xml_attributes_object::XmlAttributesObject;
-use crate::avm1::object::xml_idmap_object::XmlIdMapObject;
 use crate::avm1::object::xml_node_object::XmlNodeObject;
 use crate::avm1::object::xml_object::XmlObject;
 use crate::avm1::{AvmString, ScriptObject, SoundObject, StageObject, Value};
 use crate::display_object::DisplayObject;
-use crate::xml::{XmlDocument, XmlNode};
+use crate::xml::XmlNode;
 use gc_arena::{Collect, MutationContext};
 use ruffle_macros::enum_trait_object;
 use std::fmt::Debug;
@@ -57,7 +56,6 @@ pub mod text_format_object;
 pub mod transform_object;
 pub mod value_object;
 pub mod xml_attributes_object;
-pub mod xml_idmap_object;
 pub mod xml_node_object;
 pub mod xml_object;
 
@@ -76,7 +74,6 @@ pub mod xml_object;
         XmlObject(XmlObject<'gc>),
         XmlNodeObject(XmlNodeObject<'gc>),
         XmlAttributesObject(XmlAttributesObject<'gc>),
-        XmlIdMapObject(XmlIdMapObject<'gc>),
         ValueObject(ValueObject<'gc>),
         FunctionObject(FunctionObject<'gc>),
         SharedObject(SharedObject<'gc>),
@@ -190,7 +187,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
                             let _ = exec.exec(
                                 ExecutionName::Static("[Setter]"),
                                 activation,
-                                this,
+                                this.into(),
                                 1,
                                 &[value],
                                 ExecutionReason::Special,
@@ -218,7 +215,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         &self,
         name: AvmString<'gc>,
         activation: &mut Activation<'_, 'gc, '_>,
-        this: Object<'gc>,
+        this: Value<'gc>,
         args: &[Value<'gc>],
     ) -> Result<Value<'gc>, Error<'gc>>;
 
@@ -269,13 +266,13 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
             Some(exec) => exec.exec(
                 ExecutionName::Dynamic(name),
                 activation,
-                this,
+                this.into(),
                 depth,
                 args,
                 ExecutionReason::FunctionCall,
                 method,
             ),
-            None => method.call(name, activation, this, args),
+            None => method.call(name, activation, this.into(), args),
         }
     }
 
@@ -535,7 +532,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     }
 
     /// Get the underlying XML document for this object, if it exists.
-    fn as_xml(&self) -> Option<XmlDocument<'gc>> {
+    fn as_xml(&self) -> Option<XmlObject<'gc>> {
         None
     }
 
@@ -707,7 +704,7 @@ pub fn search_prototype<'gc>(
                 let result = exec.exec(
                     ExecutionName::Static("[Getter]"),
                     activation,
-                    this,
+                    this.into(),
                     1,
                     &[],
                     ExecutionReason::Special,

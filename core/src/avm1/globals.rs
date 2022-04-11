@@ -7,7 +7,6 @@ use crate::avm1::{Object, ScriptObject, TObject, Value};
 use crate::string::{AvmString, WStr, WString};
 use gc_arena::Collect;
 use gc_arena::MutationContext;
-use rand::Rng;
 use std::str;
 
 mod array;
@@ -62,11 +61,11 @@ mod xml;
 mod xml_node;
 
 const GLOBAL_DECLS: &[Declaration] = declare_properties! {
+    "trace" => method(trace; DONT_ENUM);
     "isFinite" => method(is_finite; DONT_ENUM);
     "isNaN" => method(is_nan; DONT_ENUM);
     "parseInt" => method(parse_int; DONT_ENUM);
     "parseFloat" => method(parse_float; DONT_ENUM);
-    "random" => method(random; DONT_ENUM);
     "ASSetPropFlags" => method(object::as_set_prop_flags; DONT_ENUM);
     "clearInterval" => method(clear_interval; DONT_ENUM);
     "setInterval" => method(set_interval; DONT_ENUM);
@@ -79,15 +78,20 @@ const GLOBAL_DECLS: &[Declaration] = declare_properties! {
     "Infinity" => property(get_infinity; DONT_ENUM);
 };
 
-pub fn random<'gc>(
+pub fn trace<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    match args.get(0) {
-        Some(&Value::Number(max)) => Ok(activation.context.rng.gen_range(0.0..max).floor().into()),
-        _ => Ok(Value::Undefined), //TODO: Shouldn't this be an error condition?
-    }
+    // Unlike `Action::Trace`, `_global.trace` always coerces
+    // undefined to "" in SWF6 and below. It also doesn't log
+    // anything outside of the Flash editor's trace window.
+    let out = args
+        .get(0)
+        .unwrap_or(&Value::Undefined)
+        .coerce_to_string(activation)?;
+    activation.context.avm_trace(&out.to_utf8_lossy());
+    Ok(Value::Undefined)
 }
 
 pub fn is_finite<'gc>(
@@ -95,12 +99,11 @@ pub fn is_finite<'gc>(
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let ret = args
-        .get(0)
-        .unwrap_or(&Value::Undefined)
-        .coerce_to_f64(activation)?
-        .is_finite();
-    Ok(ret.into())
+    if let Some(val) = args.get(0) {
+        Ok(val.coerce_to_f64(activation)?.is_finite().into())
+    } else {
+        Ok(false.into())
+    }
 }
 
 pub fn is_nan<'gc>(

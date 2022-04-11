@@ -212,6 +212,7 @@ struct GradientUniforms {
     repeat_mode: i32,
     interpolation: i32,
     focal_point: f32,
+    _padding: [f32; 3],
 }
 
 impl From<TessGradient> for GradientUniforms {
@@ -237,6 +238,7 @@ impl From<TessGradient> for GradientUniforms {
             },
             interpolation: (gradient.interpolation == swf::GradientInterpolation::LinearRgb) as i32,
             focal_point: gradient.focal_point.to_f32(),
+            _padding: Default::default(),
         }
     }
 }
@@ -447,16 +449,9 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
             )
             .await?;
         let info = adapter.get_info();
-        // Prefer a linear surface format, when available.
-        let surface_format = if info.backend == wgpu::Backend::Gl {
-            // GL often only supports sRGB, so use the adapter's preferred format.
-            surface
-                .and_then(|surface| surface.get_preferred_format(&adapter))
-                .unwrap_or(wgpu::TextureFormat::Bgra8Unorm)
-        } else {
-            wgpu::TextureFormat::Bgra8Unorm
-        };
-
+        let surface_format = surface
+            .and_then(|surface| surface.get_preferred_format(&adapter))
+            .unwrap_or(wgpu::TextureFormat::Rgba8Unorm);
         Descriptors::new(device, queue, info, surface_format)
     }
 

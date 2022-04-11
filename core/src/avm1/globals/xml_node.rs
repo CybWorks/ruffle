@@ -2,29 +2,26 @@
 
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
-use crate::avm1::object::xml_node_object::XmlNodeObject;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
-use crate::avm1::{ArrayObject, Object, TObject, Value};
-use crate::avm_warn;
+use crate::avm1::{ArrayObject, Object, ScriptObject, TObject, Value};
 use crate::string::AvmString;
-use crate::xml;
-use crate::xml::{XmlDocument, XmlNode};
+use crate::xml::XmlNode;
 use gc_arena::MutationContext;
 
 const PROTO_DECLS: &[Declaration] = declare_properties! {
-    "localName" => property(local_name; READ_ONLY);
-    "nodeName" => property(node_name; READ_ONLY);
-    "nodeType" => property(node_type; READ_ONLY);
-    "nodeValue" => property(node_value; READ_ONLY);
-    "prefix" => property(prefix; READ_ONLY);
-    "childNodes" => property(child_nodes; READ_ONLY);
-    "firstChild" => property(first_child; READ_ONLY);
-    "lastChild" => property(last_child; READ_ONLY);
-    "parentNode" => property(parent_node; READ_ONLY);
-    "previousSibling" => property(previous_sibling; READ_ONLY);
-    "nextSibling" => property(next_sibling; READ_ONLY);
-    "attributes" => property(attributes; READ_ONLY);
-    "namespaceURI" => property(namespace_uri; READ_ONLY);
+    "localName" => property(local_name);
+    "nodeName" => property(node_name, set_node_value);
+    "nodeType" => property(node_type);
+    "nodeValue" => property(node_value, set_node_value);
+    "prefix" => property(prefix);
+    "childNodes" => property(child_nodes);
+    "firstChild" => property(first_child);
+    "lastChild" => property(last_child);
+    "parentNode" => property(parent_node);
+    "previousSibling" => property(previous_sibling);
+    "nextSibling" => property(next_sibling);
+    "attributes" => property(attributes);
+    "namespaceURI" => property(namespace_uri);
     "appendChild" => method(append_child);
     "insertBefore" => method(insert_before);
     "cloneNode" => method(clone_node);
@@ -41,29 +38,12 @@ pub fn constructor<'gc>(
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let blank_document = XmlDocument::new(activation.context.gc_context);
-
-    match (
-        args.get(0)
-            .map(|v| v.coerce_to_f64(activation).map(|v| v as u32)),
-        args.get(1).map(|v| v.coerce_to_string(activation)),
-        this.as_xml_node(),
-    ) {
-        (Some(Ok(1)), Some(Ok(ref strval)), Some(ref mut this_node)) => {
-            let mut xmlelement =
-                XmlNode::new_element(activation.context.gc_context, *strval, blank_document);
-            xmlelement.introduce_script_object(activation.context.gc_context, this);
-            this_node.swap(activation.context.gc_context, xmlelement);
-        }
-        (Some(Ok(3)), Some(Ok(ref strval)), Some(ref mut this_node)) => {
-            let mut xmlelement =
-                XmlNode::new_text(activation.context.gc_context, *strval, blank_document);
-            xmlelement.introduce_script_object(activation.context.gc_context, this);
-            this_node.swap(activation.context.gc_context, xmlelement);
-        }
-        //Invalid nodetype ID, string value missing, or not an XMLElement
-        _ => {}
-    };
+    if let [node_type, value, ..] = args {
+        let node_type = node_type.coerce_to_u8(activation)?;
+        let node_value = value.coerce_to_string(activation)?;
+        let mut node = XmlNode::new(activation.context.gc_context, node_type, Some(node_value));
+        return Ok(node.script_object(activation).into());
+    }
 
     Ok(this.into())
 }
@@ -80,15 +60,7 @@ fn append_child<'gc>(
     ) {
         if !xmlnode.has_child(child_xmlnode) {
             let position = xmlnode.children_len();
-            if let Err(e) =
-                xmlnode.insert_child(activation.context.gc_context, position, child_xmlnode)
-            {
-                avm_warn!(
-                    activation,
-                    "Couldn't insert_child inside of XMLNode.appendChild: {}",
-                    e
-                );
-            }
+            xmlnode.insert_child(activation.context.gc_context, position, child_xmlnode);
         }
     }
 
@@ -109,15 +81,7 @@ fn insert_before<'gc>(
     ) {
         if !xmlnode.has_child(child_xmlnode) {
             if let Some(position) = xmlnode.child_position(insertpoint_xmlnode) {
-                if let Err(e) =
-                    xmlnode.insert_child(activation.context.gc_context, position, child_xmlnode)
-                {
-                    avm_warn!(
-                        activation,
-                        "Couldn't insert_child inside of XMLNode.insertBefore: {}",
-                        e
-                    );
-                }
+                xmlnode.insert_child(activation.context.gc_context, position, child_xmlnode);
             }
         }
     }
@@ -137,13 +101,7 @@ fn clone_node<'gc>(
             .unwrap_or(false),
     ) {
         let mut clone_node = xmlnode.duplicate(activation.context.gc_context, deep);
-
-        return Ok(clone_node
-            .script_object(
-                activation.context.gc_context,
-                Some(activation.context.avm1.prototypes.xml_node),
-            )
-            .into());
+        return Ok(clone_node.script_object(activation).into());
     }
 
     Ok(Value::Undefined)
@@ -204,12 +162,8 @@ fn remove_node<'gc>(
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(node) = this.as_xml_node() {
-        if let Some(mut parent) = node.parent() {
-            if let Err(e) = parent.remove_child(activation.context.gc_context, node) {
-                avm_warn!(activation, "Error in XML.removeNode: {}", e);
-            }
-        }
+    if let Some(mut node) = this.as_xml_node() {
+        node.remove_node(activation.context.gc_context);
     }
 
     Ok(Value::Undefined)
@@ -221,16 +175,7 @@ fn to_string<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(node) = this.as_xml_node() {
-        let result = node.into_string(&XmlNode::is_as2_compatible);
-
-        return Ok(AvmString::new_utf8(
-            activation.context.gc_context,
-            result.unwrap_or_else(|e| {
-                avm_warn!(activation, "XMLNode toString failed: {}", e);
-                "".to_string()
-            }),
-        )
-        .into());
+        return Ok(AvmString::new(activation.context.gc_context, node.into_string()).into());
     }
 
     Ok("".into())
@@ -254,8 +199,29 @@ fn node_name<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     Ok(this
         .as_xml_node()
-        .and_then(|n| n.tag_name())
+        .and_then(|n| n.node_name())
         .map_or(Value::Null, Value::from))
+}
+
+/// This functions acts as a setter for both `nodeName` and `nodeValue`.
+fn set_node_value<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    this: Object<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    if let [name, ..] = args {
+        if name == &Value::Undefined {
+            return Ok(Value::Undefined);
+        }
+
+        if let Some(node) = this.as_xml_node() {
+            node.set_node_value(
+                activation.context.gc_context,
+                name.coerce_to_string(activation)?,
+            );
+        }
+    }
+    Ok(Value::Undefined)
 }
 
 fn node_type<'gc>(
@@ -265,15 +231,7 @@ fn node_type<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     Ok(this
         .as_xml_node()
-        .map(|n| {
-            match n.node_type() {
-                xml::DOCUMENT_NODE => xml::ELEMENT_NODE,
-                xml::DOCUMENT_TYPE_NODE => xml::TEXT_NODE,
-                xml::COMMENT_NODE => xml::TEXT_NODE,
-                n => n,
-            }
-            .into()
-        })
+        .map(|n| n.node_type().into())
         .unwrap_or_else(|| Value::Undefined))
 }
 
@@ -310,15 +268,7 @@ fn child_nodes<'gc>(
             activation.context.gc_context,
             activation.context.avm1.prototypes().array,
             node.children()
-                .filter(XmlNode::is_as2_compatible)
-                .map(|mut child| {
-                    child
-                        .script_object(
-                            activation.context.gc_context,
-                            Some(activation.context.avm1.prototypes.xml_node),
-                        )
-                        .into()
-                }),
+                .map(|mut child| child.script_object(activation).into()),
         )
         .into());
     }
@@ -332,25 +282,10 @@ fn first_child<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(node) = this.as_xml_node() {
-        let mut children = node.children();
-        let mut next = children.next();
-        while let Some(my_next) = next {
-            if my_next.is_as2_compatible() {
-                break;
-            }
-
-            next = my_next.next_sibling();
-        }
-
-        return Ok(next
-            .map(|mut child| {
-                child
-                    .script_object(
-                        activation.context.gc_context,
-                        Some(activation.context.avm1.prototypes.xml_node),
-                    )
-                    .into()
-            })
+        return Ok(node
+            .children()
+            .next()
+            .map(|mut child| child.script_object(activation).into())
             .unwrap_or_else(|| Value::Null));
     }
 
@@ -363,24 +298,10 @@ fn last_child<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(node) = this.as_xml_node() {
-        let mut children = node.children();
-        let mut prev = children.next_back();
-        while let Some(my_prev) = prev {
-            if my_prev.is_as2_compatible() {
-                break;
-            }
-
-            prev = my_prev.prev_sibling();
-        }
-        return Ok(prev
-            .map(|mut child| {
-                child
-                    .script_object(
-                        activation.context.gc_context,
-                        Some(activation.context.avm1.prototypes.xml_node),
-                    )
-                    .into()
-            })
+        return Ok(node
+            .children()
+            .next_back()
+            .map(|mut child| child.script_object(activation).into())
             .unwrap_or_else(|| Value::Null));
     }
 
@@ -395,14 +316,7 @@ fn parent_node<'gc>(
     if let Some(node) = this.as_xml_node() {
         return Ok(node
             .parent()
-            .map(|mut parent| {
-                parent
-                    .script_object(
-                        activation.context.gc_context,
-                        Some(activation.context.avm1.prototypes.xml_node),
-                    )
-                    .into()
-            })
+            .map(|mut parent| parent.script_object(activation).into())
             .unwrap_or_else(|| Value::Null));
     }
 
@@ -415,23 +329,9 @@ fn previous_sibling<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(node) = this.as_xml_node() {
-        let mut prev = node.prev_sibling();
-        while let Some(my_prev) = prev {
-            if my_prev.is_as2_compatible() {
-                break;
-            }
-
-            prev = my_prev.prev_sibling();
-        }
-
-        return Ok(prev
-            .map(|mut prev| {
-                prev.script_object(
-                    activation.context.gc_context,
-                    Some(activation.context.avm1.prototypes.xml_node),
-                )
-                .into()
-            })
+        return Ok(node
+            .prev_sibling()
+            .map(|mut prev| prev.script_object(activation).into())
             .unwrap_or_else(|| Value::Null));
     }
 
@@ -444,23 +344,9 @@ fn next_sibling<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(node) = this.as_xml_node() {
-        let mut next = node.next_sibling();
-        while let Some(my_next) = next {
-            if my_next.is_as2_compatible() {
-                break;
-            }
-
-            next = my_next.next_sibling();
-        }
-
-        return Ok(next
-            .map(|mut next| {
-                next.script_object(
-                    activation.context.gc_context,
-                    Some(activation.context.avm1.prototypes.xml_node),
-                )
-                .into()
-            })
+        return Ok(node
+            .next_sibling()
+            .map(|mut next| next.script_object(activation).into())
             .unwrap_or_else(|| Value::Null));
     }
 
@@ -475,8 +361,7 @@ fn attributes<'gc>(
     if let Some(mut node) = this.as_xml_node() {
         return Ok(node
             .attribute_script_object(activation.context.gc_context)
-            .map(|o| o.into())
-            .unwrap_or_else(|| Value::Undefined));
+            .into());
     }
 
     Ok(Value::Undefined)
@@ -507,8 +392,7 @@ pub fn create_proto<'gc>(
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let xmlnode_proto = XmlNodeObject::empty_node(gc_context, Some(proto));
-    let object = xmlnode_proto.as_script_object().unwrap();
-    define_properties_on(PROTO_DECLS, gc_context, object, fn_proto);
-    xmlnode_proto
+    let xml_node_proto = ScriptObject::object(gc_context, Some(proto));
+    define_properties_on(PROTO_DECLS, gc_context, xml_node_proto, fn_proto);
+    xml_node_proto.into()
 }

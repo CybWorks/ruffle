@@ -9,13 +9,13 @@ use crate::avm1::property::Attribute;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{ArrayObject, Object, Value};
 use crate::backend::navigator::RequestOptions;
-use crate::display_object::{DisplayObject, TDisplayObject};
+use crate::display_object::{TDisplayObject, TDisplayObjectContainer};
 use gc_arena::MutationContext;
 
 const PROTO_DECLS: &[Declaration] = declare_properties! {
-    "loadClip" => method(load_clip);
-    "unloadClip" => method(unload_clip);
-    "getProgress" => method(get_progress);
+    "loadClip" => method(load_clip; DONT_ENUM | DONT_DELETE);
+    "unloadClip" => method(unload_clip; DONT_ENUM | DONT_DELETE);
+    "getProgress" => method(get_progress; DONT_ENUM | DONT_DELETE);
 };
 
 pub fn constructor<'gc>(
@@ -37,96 +37,119 @@ pub fn constructor<'gc>(
     Ok(this.into())
 }
 
-pub fn load_clip<'gc>(
+fn load_clip<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let url_val = args.get(0).cloned().unwrap_or(Value::Undefined);
-    let url = url_val.coerce_to_string(activation)?;
-    let target = args.get(1).cloned().unwrap_or(Value::Undefined);
+    if let [url, target, ..] = args {
+        if let Value::String(url) = url {
+            let target = match target {
+                Value::String(_) => {
+                    let start_clip = activation.target_clip_or_root();
+                    activation.resolve_target_display_object(start_clip, *target, true)?
+                }
+                Value::Number(level_id) => {
+                    // Levels are rounded down.
+                    // TODO: What happens with negative levels?
+                    Some(activation.resolve_level(*level_id as i32))
+                }
+                Value::Object(object) => object.as_display_object(),
+                _ => None,
+            };
+            if let Some(target) = target {
+                let future = activation.context.load_manager.load_movie_into_clip(
+                    activation.context.player.clone().unwrap(),
+                    target,
+                    &url.to_utf8_lossy(),
+                    RequestOptions::get(),
+                    None,
+                    Some(this),
+                );
+                activation.context.navigator.spawn_future(future);
 
-    if let Value::Object(target) = target {
-        if let Some(mc) = target
-            .as_display_object()
-            .and_then(|dobj| dobj.as_movie_clip())
-        {
-            let fetch = activation
-                .context
-                .navigator
-                .fetch(&url.to_utf8_lossy(), RequestOptions::get());
-            let process = activation.context.load_manager.load_movie_into_clip(
-                activation.context.player.clone().unwrap(),
-                DisplayObject::MovieClip(mc),
-                fetch,
-                url.to_string(),
-                None,
-                Some(this),
-            );
-
-            activation.context.navigator.spawn_future(process);
+                return Ok(true.into());
+            }
         }
 
-        Ok(true.into())
-    } else {
-        Ok(false.into())
+        return Ok(false.into());
     }
+
+    Ok(Value::Undefined)
 }
 
-pub fn unload_clip<'gc>(
+fn unload_clip<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let target = args.get(0).cloned().unwrap_or(Value::Undefined);
-
-    if let Value::Object(target) = target {
-        if let Some(mut mc) = target
-            .as_display_object()
-            .and_then(|dobj| dobj.as_movie_clip())
-        {
-            mc.unload(&mut activation.context);
-            mc.replace_with_movie(activation.context.gc_context, None);
-
+    if let [target, ..] = args {
+        let target = match target {
+            Value::String(_) => {
+                let start_clip = activation.target_clip_or_root();
+                activation.resolve_target_display_object(start_clip, *target, true)?
+            }
+            Value::Number(level_id) => {
+                // Levels are rounded down.
+                // TODO: What happens with negative levels?
+                activation.context.stage.child_by_depth(*level_id as i32)
+            }
+            Value::Object(object) => object.as_display_object(),
+            _ => None,
+        };
+        if let Some(target) = target {
+            target.unload(&mut activation.context);
+            if let Some(mut mc) = target.as_movie_clip() {
+                mc.replace_with_movie(activation.context.gc_context, None);
+            }
             return Ok(true.into());
         }
+
+        return Ok(false.into());
     }
 
-    Ok(false.into())
+    Ok(Value::Undefined)
 }
 
-pub fn get_progress<'gc>(
+fn get_progress<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let target = args.get(0).cloned().unwrap_or(Value::Undefined);
-
-    if let Value::Object(target) = target {
-        if let Some(mc) = target
-            .as_display_object()
-            .and_then(|dobj| dobj.as_movie_clip())
-        {
-            let ret_obj = ScriptObject::object(activation.context.gc_context, None);
-            ret_obj.define_value(
-                activation.context.gc_context,
-                "bytesLoaded",
-                mc.movie()
-                    .map(|mv| (mv.uncompressed_len()).into())
-                    .unwrap_or(Value::Undefined),
-                Attribute::empty(),
-            );
-            ret_obj.define_value(
-                activation.context.gc_context,
-                "bytesTotal",
-                mc.movie()
-                    .map(|mv| (mv.uncompressed_len()).into())
-                    .unwrap_or(Value::Undefined),
-                Attribute::empty(),
-            );
-
-            return Ok(ret_obj.into());
+    if let [target, ..] = args {
+        let target = match target {
+            Value::String(_) => {
+                let start_clip = activation.target_clip_or_root();
+                activation.resolve_target_display_object(start_clip, *target, true)?
+            }
+            Value::Number(level_id) => {
+                // Levels are rounded down.
+                // TODO: What happens with negative levels?
+                activation.context.stage.child_by_depth(*level_id as i32)
+            }
+            Value::Object(object) if object.as_display_object().is_some() => {
+                object.as_display_object()
+            }
+            _ => return Ok(Value::Undefined),
+        };
+        let result = ScriptObject::bare_object(activation.context.gc_context);
+        if let Some(target) = target {
+            if let Some(movie) = target.movie() {
+                result.define_value(
+                    activation.context.gc_context,
+                    "bytesLoaded",
+                    movie.compressed_len().into(),
+                    Attribute::empty(),
+                );
+                result.define_value(
+                    activation.context.gc_context,
+                    "bytesTotal",
+                    movie.compressed_len().into(),
+                    Attribute::empty(),
+                );
+            }
         }
+        return Ok(result.into());
     }
 
     Ok(Value::Undefined)

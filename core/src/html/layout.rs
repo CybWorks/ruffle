@@ -278,8 +278,7 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
         } else {
             self.font_leading_adjustment()
         };
-
-        if self.current_line_span.bullet && self.is_first_line {
+        if self.current_line_span.bullet && self.is_first_line && box_count > 0 {
             self.append_bullet(context, &self.current_line_span.clone());
         }
 

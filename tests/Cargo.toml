@@ -4,13 +4,11 @@ version = "0.1.0"
 authors = ["Aaron Hill <aa1ronham@gmail.com>"]
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
-futures = "0.3.19"
-ruffle_core = { path = "../core" }
+futures = "0.3.21"
+ruffle_core = { path = "../core", features = ["deterministic"] }
 ruffle_render_wgpu = { path = "../render/wgpu" }
-image = "0.23.14"
+image = "0.24.1"
 
 [features]
 # Enable running image comparison tests. This is off by default,
@@ -20,5 +18,5 @@ imgtests = []
 
 [dev-dependencies]
 approx = "0.5.0"
-pretty_assertions = "1.0.0"
+pretty_assertions = "1.2.1"
 env_logger = "0.9.0"

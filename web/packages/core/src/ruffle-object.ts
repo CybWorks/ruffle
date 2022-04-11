@@ -8,6 +8,8 @@ import {
     isFallbackElement,
     isScriptAccessAllowed,
     isSwfFilename,
+    isYoutubeFlashSource,
+    workaroundYoutubeMixedContent,
     RufflePlayer,
 } from "./ruffle-player";
 import { registerElement } from "./register-element";
@@ -219,8 +221,11 @@ export class RuffleObject extends RufflePlayer {
         if (isFallbackElement(elem)) {
             return false;
         }
-        // Don't polyfill if there's already a <ruffle-embed> inside the <object>.
-        if (elem.getElementsByTagName("ruffle-embed").length > 0) {
+        // Don't polyfill if there's already a <ruffle-object> or a <ruffle-embed> inside the <object>.
+        if (
+            elem.getElementsByTagName("ruffle-object").length > 0 ||
+            elem.getElementsByTagName("ruffle-embed").length > 0
+        ) {
             return false;
         }
 
@@ -230,8 +235,31 @@ export class RuffleObject extends RufflePlayer {
         let isSwf;
         // Check for SWF file.
         if (data) {
+            // Don't polyfill when the file is a Youtube Flash source.
+            if (isYoutubeFlashSource(data)) {
+                // Workaround YouTube mixed content; this isn't what browsers do automatically, but while we're here, we may as well
+                workaroundYoutubeMixedContent(elem, "data");
+                return false;
+            }
             isSwf = isSwfFilename(data);
         } else if (params && params.movie) {
+            // Don't polyfill when the file is a Youtube Flash source.
+            if (isYoutubeFlashSource(params.movie)) {
+                // Workaround YouTube mixed content; this isn't what browsers do automatically, but while we're here, we may as well
+                const movie_elem = elem.querySelector(
+                    "param[name='movie']"
+                ) as HTMLElement;
+                if (movie_elem) {
+                    workaroundYoutubeMixedContent(movie_elem, "value");
+                    // The data attribute needs to be set for the re-fetch to happen
+                    // It also needs to be set on Firefox for the YouTube object rewrite to work, regardless of mixed content
+                    const movie_src = movie_elem.getAttribute("value");
+                    if (movie_src) {
+                        elem.setAttribute("data", movie_src);
+                    }
+                }
+                return false;
+            }
             isSwf = isSwfFilename(params.movie);
         } else {
             // Don't polyfill when no file is specified.
@@ -245,9 +273,15 @@ export class RuffleObject extends RufflePlayer {
         if (classid === FLASH_ACTIVEX_CLASSID.toLowerCase()) {
             // classid is an old-IE style embed that would not work on modern browsers.
             // Often there will be an <embed> inside the <object> that would take precedence.
-            // Only polyfill this <object> if it doesn't contain a polyfillable <embed>.
-            return !Array.from(elem.getElementsByTagName("embed")).some(
-                RuffleEmbed.isInterdictable
+            // Only polyfill this <object> if it doesn't contain a polyfillable <embed> or
+            // another <object> that would be supported on modern browsers.
+            return (
+                !Array.from(elem.getElementsByTagName("object")).some(
+                    RuffleObject.isInterdictable
+                ) &&
+                !Array.from(elem.getElementsByTagName("embed")).some(
+                    RuffleEmbed.isInterdictable
+                )
             );
         } else if (classid != null && classid !== "") {
             // Non-Flash classid.

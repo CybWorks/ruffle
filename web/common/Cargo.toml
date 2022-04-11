@@ -1,15 +1,15 @@
 [package]
 name = "ruffle_web_common"
 version = "0.1.0"
-authors = ["Mike Welsh <mwelsh@gmail.com>"]
+authors = ["Ruffle LLC <ruffle@ruffle.rs>"]
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-js-sys = "0.3.55"
+js-sys = "0.3.57"
 log = "0.4"
-wasm-bindgen = "=0.2.78"
+wasm-bindgen = "=0.2.80"
 
 [dependencies.web-sys]
-version = "0.3.50"
+version = "0.3.57"
 features = ["Window"]

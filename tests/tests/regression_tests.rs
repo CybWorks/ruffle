@@ -8,7 +8,6 @@ use ruffle_core::backend::video::SoftwareVideoBackend;
 use ruffle_core::backend::video::VideoBackend;
 use ruffle_core::backend::{
     audio::NullAudioBackend,
-    locale::NullLocaleBackend,
     log::LogBackend,
     navigator::{NullExecutor, NullNavigatorBackend},
     render::NullRenderer,
@@ -81,7 +80,6 @@ macro_rules! swf_tests_approx {
     ($($(#[$attr:meta])* ($name:ident, $path:expr, $num_frames:literal $(, $opt:ident = $val:expr)*),)*) => {
         $(
         #[test]
-        #[allow(clippy::if_then_panic)] // TODO: Remove when https://github.com/brendanzab/approx/pull/72 is merged.
         $(#[$attr])*
         fn $name() -> Result<(), Error> {
             set_logger();
@@ -102,6 +100,7 @@ macro_rules! swf_tests_approx {
 // Inside the folder is expected to be "test.swf" and "output.txt" with the correct output.
 swf_tests! {
     (action_to_integer, "avm1/action_to_integer", 1),
+    (add2, "avm1/add2", 1),
     (add_property, "avm1/add_property", 1),
     (arguments, "avm1/arguments", 1),
     (array_call_method, "avm1/array_call_method", 1),
@@ -177,6 +176,7 @@ swf_tests! {
     (as3_bytearray_readobject_amf0, "avm2/bytearray_readobject_amf0", 1),
     (as3_bytearray_readobject_amf3, "avm2/bytearray_readobject_amf3", 1),
     (as3_bytearray, "avm2/bytearray", 1),
+    (as3_class_call, "avm2/class_call", 1),
     (as3_class_cast_call, "avm2/class_cast_call", 1),
     (as3_class_enumeration, "avm2/class_enumeration", 1),
     (as3_class_is, "avm2/class_is", 1),
@@ -331,6 +331,9 @@ swf_tests! {
     (as3_loaderinfo_quine, "avm2/loaderinfo_quine", 2),
     (as3_lshift, "avm2/lshift", 1),
     (as3_modulo, "avm2/modulo", 1),
+    (as3_mouseevent_constr, "avm2/mouseevent_constr", 1),
+    (as3_mouseevent_stagexy, "avm2/mouseevent_stagexy", 1),
+    (as3_mouseevent_valueof_tostring, "avm2/mouseevent_valueof_tostring", 1),
     (as3_movieclip_constr, "avm2/movieclip_constr", 1),
     (as3_movieclip_currentlabels, "avm2/movieclip_currentlabels", 5),
     (as3_movieclip_currentscene, "avm2/movieclip_currentscene", 5),
@@ -435,6 +438,7 @@ swf_tests! {
     (as3_string_indexof_lastindexof, "avm2/string_indexof_lastindexof", 1),
     (as3_string_length, "avm2/string_length", 1),
     (as3_string_match, "avm2/string_match", 1),
+    (as3_string_replace, "avm2/string_replace", 1),
     (as3_string_slice_substr_substring, "avm2/string_slice_substr_substring", 1),
     (as3_string_split, "avm2/string_split", 1),
     (as3_subtract, "avm2/subtract", 1),
@@ -527,8 +531,10 @@ swf_tests! {
     (define_function2_preload_order, "avm1/define_function2_preload_order", 1),
     (define_function2_preload, "avm1/define_function2_preload", 1),
     (define_local, "avm1/define_local", 1),
+    (define_local_with_paths, "avm1/define_local_with_paths", 1),
     (delete, "avm1/delete", 3),
     (displacement_map_filter, "avm1/displacement_map_filter", 1),
+    (divide_swf4, "avm1/divide_swf4", 1),
     (do_init_action, "avm1/do_init_action", 3),
     (drop_shadow_filter, "avm1/drop_shadow_filter", 1),
     (duplicate_movie_clip_drawing, "avm1/duplicate_movie_clip_drawing", 1),
@@ -592,6 +598,8 @@ swf_tests! {
     (infinite_recursion_virtual_property, "avm1/infinite_recursion_virtual_property", 1),
     (init_array_invalid, "avm1/init_array_invalid", 1),
     (init_object_invalid, "avm1/init_array_invalid", 1),
+    (is_finite, "avm1/is_finite", 1),
+    (is_finite_swf6, "avm1/is_finite_swf6", 1),
     (is_prototype_of, "avm1/is_prototype_of", 1),
     (issue_1086, "avm1/issue_1086", 1),
     (issue_1104, "avm1/issue_1104", 3),
@@ -627,7 +635,11 @@ swf_tests! {
     (matrix, "avm1/matrix", 1),
     (mcl_as_broadcaster, "avm1/mcl_as_broadcaster", 1),
     (mcl_getprogress, "avm1/mcl_getprogress", 6),
+    (mcl_giftarget, "avm1/mcl_giftarget", 11),
+    (mcl_jpgtarget, "avm1/mcl_jpgtarget", 11),
     (mcl_loadclip, "avm1/mcl_loadclip", 11),
+    (mcl_mislabeled_target, "avm1/mcl_mislabeled_target", 11),
+    (mcl_pngtarget, "avm1/mcl_pngtarget", 11),
     (mcl_unloadclip, "avm1/mcl_unloadclip", 11),
     (mouse_listeners, "avm1/mouse_listeners", 1),
     (movieclip_depth_methods, "avm1/movieclip_depth_methods", 3),
@@ -645,6 +657,8 @@ swf_tests! {
     (object_constructor, "avm1/object_constructor", 1),
     (object_function, "avm1/object_function", 1),
     (object_prototypes, "avm1/object_prototypes", 1),
+    (object_string_coerce_swf5, "avm1/object_string_coerce_swf5", 1),
+    (object_string_coerce_swf6, "avm1/object_string_coerce_swf6", 1),
     (on_construct, "avm1/on_construct", 1),
     (parse_int, "avm1/parse_int", 1),
     (path_string, "avm1/path_string", 1),
@@ -657,14 +671,13 @@ swf_tests! {
     (recursive_prototypes, "avm1/recursive_prototypes", 2),
     (register_and_init_order, "avm1/register_and_init_order", 1),
     (register_class_return_value, "avm1/register_class_return_value", 1),
-    (register_class_swf6, "avm1/register_class_swf6", 1),
-    (register_class, "avm1/register_class", 1),
+    (register_class_swf6, "avm1/register_class_swf6", 3),
+    (register_class, "avm1/register_class", 3),
     (register_underflow, "avm1/register_underflow", 1),
     (remove_movie_clip, "avm1/remove_movie_clip", 2),
     (removed_base_clip_tell_target, "avm1/removed_base_clip_tell_target", 2),
     (removed_clip_halts_script, "avm1/removed_clip_halts_script", 13),
     (root_global_parent, "avm1/root_global_parent", 3),
-    (roots_and_levels, "avm1/roots_and_levels", 1),
     (selection, "avm1/selection", 1),
     (set_interval, "avm1/set_interval", 20),
     (set_variable_scope, "avm1/set_variable_scope", 1),
@@ -678,10 +691,11 @@ swf_tests! {
     (stage_property_representation, "avm1/stage_property_representation", 1),
     (strictequals_swf6, "avm1/strictequals_swf6", 1),
     (strictly_equals, "avm1/strictly_equals", 1),
-    #[ignore] (string_coercion, "avm1/string_coercion", 1),
+    (string_coercion, "avm1/string_coercion", 1),
     (string_methods_negative_args, "avm1/string_methods_negative_args", 1),
     (string_methods, "avm1/string_methods", 1),
     (string_ops_swf6, "avm1/string_ops_swf6", 1),
+    (swf4_bool, "avm1/swf4_bool", 1),
     (swf5_encoding, "avm1/swf5_encoding", 1),
     (swf6_case_insensitive, "avm1/swf6_case_insensitive", 1),
     (swf7_case_sensitive, "avm1/swf7_case_sensitive", 1),
@@ -761,7 +775,7 @@ swf_tests_approx! {
     (as3_displayobject_width, "avm2/displayobject_width", 7, epsilon = 0.06),
     (as3_divide, "avm2/divide", 1, epsilon = 0.0), // TODO: Discrepancy in float formatting.
     (as3_edittext_align, "avm2/edittext_align", 1, epsilon = 3.0),
-    (as3_edittext_autosize, "avm2/edittext_autosize", 1, epsilon = 5.0), // TODO AS3 has _width higher by 5.0, probably padding logic mistake
+    (as3_edittext_autosize, "avm2/edittext_autosize", 1, epsilon = 0.1),
     (as3_edittext_bullet, "avm2/edittext_bullet", 1, epsilon = 3.0),
     (as3_edittext_font_size, "avm2/edittext_font_size", 1, epsilon = 0.1),
     (as3_edittext_leading, "avm2/edittext_leading", 1, epsilon = 0.3),
@@ -775,7 +789,7 @@ swf_tests_approx! {
     (as3_number_toprecision, "avm2/number_toprecision", 1, max_relative = 0.001),
     (as3_parse_float, "avm2/parse_float", 1, max_relative = 5.0 * f64::EPSILON),
     (edittext_align, "avm1/edittext_align", 1, epsilon = 3.0),
-    (edittext_autosize, "avm1/edittext_autosize", 1, epsilon = 4.0), // TODO Flash has _width higher by 4.0, probably padding logic mistake
+    (edittext_autosize, "avm1/edittext_autosize", 1, epsilon = 0.1),
     (edittext_bullet, "avm1/edittext_bullet", 1, epsilon = 3.0),
     (edittext_hscroll, "avm1/edittext_hscroll", 1, epsilon = 3.0),
     (edittext_letter_spacing, "avm1/edittext_letter_spacing", 1, epsilon = 15.0), // TODO: Discrepancy in wrapping in letterSpacing = 0.1 test.
@@ -834,6 +848,52 @@ fn external_interface_avm1() -> Result<(), Error> {
             root.insert("nested".to_string(), nested.into());
             let result = player_locked
                 .call_internal_interface("callWith", vec!["trace".into(), root.into()]);
+            player_locked.log_backend().avm_trace(&format!(
+                "After calling `callWith` with a complex payload: {:?}",
+                result
+            ));
+            Ok(())
+        },
+        false,
+    )
+}
+
+#[test]
+fn external_interface_avm2() -> Result<(), Error> {
+    set_logger();
+    test_swf_with_hooks(
+        "tests/swfs/avm2/external_interface/test.swf",
+        1,
+        "tests/swfs/avm2/external_interface/output.txt",
+        |player| {
+            player
+                .lock()
+                .unwrap()
+                .add_external_interface(Box::new(ExternalInterfaceTestProvider::new()));
+            Ok(())
+        },
+        |player| {
+            let mut player_locked = player.lock().unwrap();
+
+            let parroted =
+                player_locked.call_internal_interface("parrot", vec!["Hello World!".into()]);
+            player_locked.log_backend().avm_trace(&format!(
+                "After calling `parrot` with a string: {:?}",
+                parroted
+            ));
+
+            player_locked.call_internal_interface("freestanding", vec!["Hello World!".into()]);
+
+            let root: ExternalValue = vec![
+                "string".into(),
+                100.into(),
+                ExternalValue::Null,
+                false.into(),
+            ]
+            .into();
+
+            let result =
+                player_locked.call_internal_interface("callWith", vec!["trace".into(), root]);
             player_locked.log_backend().avm_trace(&format!(
                 "After calling `callWith` with a complex payload: {:?}",
                 result
@@ -1067,7 +1127,7 @@ fn run_swf(
     check_img &= RUN_IMG_TESTS;
 
     let base_path = Path::new(swf_path).parent().unwrap();
-    let (mut executor, channel) = NullExecutor::new();
+    let mut executor = NullExecutor::new();
     let movie = SwfMovie::from_path(swf_path, None)?;
     let frame_time = 1000.0 / movie.frame_rate().to_f64();
     let trace_output = Rc::new(RefCell::new(Vec::new()));
@@ -1109,14 +1169,13 @@ fn run_swf(
     let player = Player::new(
         render_backend,
         Box::new(NullAudioBackend::new()),
-        Box::new(NullNavigatorBackend::with_base_path(base_path, channel)),
+        Box::new(NullNavigatorBackend::with_base_path(base_path, &executor)),
         Box::new(MemoryStorageBackend::default()),
-        Box::new(NullLocaleBackend::new()),
         video_backend,
         Box::new(TestLogBackend::new(trace_output.clone())),
         Box::new(NullUiBackend::new()),
     )?;
-    player.lock().unwrap().set_root_movie(Arc::new(movie));
+    player.lock().unwrap().set_root_movie(movie);
     player
         .lock()
         .unwrap()
@@ -1127,7 +1186,7 @@ fn run_swf(
     for _ in 0..num_frames {
         player.lock().unwrap().run_frame();
         player.lock().unwrap().update_timers(frame_time);
-        executor.poll_all().unwrap();
+        executor.run();
     }
 
     // Render the image to disk
@@ -1188,7 +1247,7 @@ fn run_swf(
 
     before_end(player)?;
 
-    executor.block_all().unwrap();
+    executor.run();
 
     let trace = trace_output.borrow().join("\n");
     Ok(trace)

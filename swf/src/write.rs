@@ -1,5 +1,3 @@
-#![allow(clippy::unusual_byte_groupings)]
-
 use crate::{
     error::{Error, Result},
     string::SwfStr,
@@ -484,6 +482,7 @@ impl<W: Write> Writer<W> {
                 }
             }
 
+            #[allow(clippy::unusual_byte_groupings)]
             Tag::CsmTextSettings(ref settings) => {
                 self.write_tag_header(TagCode::CsmTextSettings, 12)?;
                 self.write_character_id(settings.id)?;
@@ -667,45 +666,7 @@ impl<W: Write> Writer<W> {
                 }
             }
 
-            Tag::DefineFontInfo(ref font_info) => {
-                let use_wide_codes = self.version >= 6 || font_info.version >= 2;
-
-                let len = font_info.name.len()
-                    + if use_wide_codes { 2 } else { 1 } * font_info.code_table.len()
-                    + if font_info.version >= 2 { 1 } else { 0 }
-                    + 4;
-
-                let tag_id = if font_info.version == 1 {
-                    TagCode::DefineFontInfo
-                } else {
-                    TagCode::DefineFontInfo2
-                };
-                self.write_tag_header(tag_id, len as u32)?;
-                self.write_u16(font_info.id)?;
-
-                // SWF19 has ANSI and Shift-JIS backwards?
-                self.write_u8(font_info.name.len() as u8)?;
-                self.output.write_all(font_info.name.as_bytes())?;
-                self.write_u8(
-                    if font_info.is_small_text { 0b100000 } else { 0 }
-                        | if font_info.is_ansi { 0b10000 } else { 0 }
-                        | if font_info.is_shift_jis { 0b1000 } else { 0 }
-                        | if font_info.is_italic { 0b100 } else { 0 }
-                        | if font_info.is_bold { 0b10 } else { 0 }
-                        | if use_wide_codes { 0b1 } else { 0 },
-                )?;
-                // TODO(Herschel): Assert language is unknown for v1.
-                if font_info.version >= 2 {
-                    self.write_language(font_info.language)?;
-                }
-                for &code in &font_info.code_table {
-                    if use_wide_codes {
-                        self.write_u16(code)?;
-                    } else {
-                        self.write_u8(code as u8)?;
-                    }
-                }
-            }
+            Tag::DefineFontInfo(ref font_info) => self.write_define_font_info(font_info)?,
 
             Tag::DefineFontName {
                 id,
@@ -1622,25 +1583,22 @@ impl<W: Write> Writer<W> {
         // TODO(Herschel): Handle overflow.
         self.write_u16(line_style.width.get() as u16)?;
         if shape_version >= 4 {
-            let mut bits = self.bits();
             // LineStyle2
-            bits.write_ubits(2, line_style.start_cap as u32)?;
-            bits.write_ubits(
-                2,
-                match line_style.join_style {
-                    LineJoinStyle::Round => 0,
-                    LineJoinStyle::Bevel => 1,
-                    LineJoinStyle::Miter(_) => 2,
-                },
-            )?;
-            bits.write_bit(line_style.fill_style.is_some())?;
-            bits.write_bit(!line_style.allow_scale_x)?;
-            bits.write_bit(!line_style.allow_scale_y)?;
-            bits.write_bit(line_style.is_pixel_hinted)?;
-            bits.write_ubits(5, 0)?;
-            bits.write_bit(!line_style.allow_close)?;
-            bits.write_ubits(2, line_style.end_cap as u32)?;
-            drop(bits);
+            let mut flags = LineStyleFlag::empty();
+            flags.set(LineStyleFlag::PIXEL_HINTING, line_style.is_pixel_hinted);
+            flags.set(LineStyleFlag::NO_V_SCALE, !line_style.allow_scale_y);
+            flags.set(LineStyleFlag::NO_H_SCALE, !line_style.allow_scale_x);
+            flags.set(LineStyleFlag::HAS_FILL, line_style.fill_style.is_some());
+            flags |= match line_style.join_style {
+                LineJoinStyle::Round => LineStyleFlag::ROUND,
+                LineJoinStyle::Bevel => LineStyleFlag::BEVEL,
+                LineJoinStyle::Miter(_) => LineStyleFlag::MITER,
+            };
+            let mut flags = flags.bits();
+            flags |= (line_style.start_cap as u16) << 6;
+            flags |= (line_style.end_cap as u16) << 8;
+            self.write_u16(flags)?;
+
             if let LineJoinStyle::Miter(miter_factor) = line_style.join_style {
                 self.write_fixed8(miter_factor)?;
             }
@@ -1716,70 +1674,54 @@ impl<W: Write> Writer<W> {
         {
             // TODO: Assert version.
             let mut writer = Writer::new(&mut buf, self.version);
-            writer.write_u8(
-                if place_object.clip_actions.is_some() {
-                    0b1000_0000
-                } else {
-                    0
-                } | if place_object.clip_depth.is_some() {
-                    0b0100_0000
-                } else {
-                    0
-                } | if place_object.name.is_some() {
-                    0b0010_0000
-                } else {
-                    0
-                } | if place_object.ratio.is_some() {
-                    0b0001_0000
-                } else {
-                    0
-                } | if place_object.color_transform.is_some() {
-                    0b0000_1000
-                } else {
-                    0
-                } | if place_object.matrix.is_some() {
-                    0b0000_0100
-                } else {
-                    0
-                } | match place_object.action {
-                    PlaceObjectAction::Place(_) => 0b10,
-                    PlaceObjectAction::Modify => 0b01,
-                    PlaceObjectAction::Replace(_) => 0b11,
-                },
-            )?;
+
+            let mut flags = PlaceFlag::empty();
+            flags.set(
+                PlaceFlag::MOVE,
+                matches!(
+                    place_object.action,
+                    PlaceObjectAction::Modify | PlaceObjectAction::Replace(_)
+                ),
+            );
+            flags.set(
+                PlaceFlag::HAS_CHARACTER,
+                matches!(
+                    place_object.action,
+                    PlaceObjectAction::Place(_) | PlaceObjectAction::Replace(_)
+                ),
+            );
+            flags.set(PlaceFlag::HAS_MATRIX, place_object.matrix.is_some());
+            flags.set(
+                PlaceFlag::HAS_COLOR_TRANSFORM,
+                place_object.color_transform.is_some(),
+            );
+            flags.set(PlaceFlag::HAS_RATIO, place_object.ratio.is_some());
+            flags.set(PlaceFlag::HAS_NAME, place_object.name.is_some());
+            flags.set(PlaceFlag::HAS_CLIP_DEPTH, place_object.clip_depth.is_some());
+            flags.set(
+                PlaceFlag::HAS_CLIP_ACTIONS,
+                place_object.clip_actions.is_some(),
+            );
+
             if place_object_version >= 3 {
-                writer.write_u8(
-                    if place_object.background_color.is_some() {
-                        0b100_0000
-                    } else {
-                        0
-                    } | if place_object.is_visible.is_some() {
-                        0b10_0000
-                    } else {
-                        0
-                    } | if place_object.is_image { 0b1_0000 } else { 0 }
-                        | if place_object.class_name.is_some() {
-                            0b1000
-                        } else {
-                            0
-                        }
-                        | if place_object.is_bitmap_cached.is_some() {
-                            0b100
-                        } else {
-                            0
-                        }
-                        | if place_object.blend_mode.is_some() {
-                            0b10
-                        } else {
-                            0
-                        }
-                        | if place_object.filters.is_some() {
-                            0b1
-                        } else {
-                            0
-                        },
-                )?;
+                flags.set(PlaceFlag::HAS_FILTER_LIST, place_object.filters.is_some());
+                flags.set(PlaceFlag::HAS_BLEND_MODE, place_object.blend_mode.is_some());
+                flags.set(
+                    PlaceFlag::HAS_CACHE_AS_BITMAP,
+                    place_object.is_bitmap_cached.is_some(),
+                );
+                flags.set(PlaceFlag::HAS_CLASS_NAME, place_object.class_name.is_some());
+                flags.set(PlaceFlag::HAS_IMAGE, place_object.has_image);
+                flags.set(PlaceFlag::HAS_VISIBLE, place_object.is_visible.is_some());
+                flags.set(
+                    PlaceFlag::OPAQUE_BACKGROUND,
+                    place_object.background_color.is_some(),
+                );
+                writer.write_u16(flags.bits())?;
+            } else {
+                writer.write_u8(flags.bits() as u8)?;
             }
+
             writer.write_u16(place_object.depth)?;
 
             if place_object_version >= 3 {
@@ -2110,7 +2052,7 @@ impl<W: Write> Writer<W> {
             // so that we can calculate their offsets.
             let mut offsets = Vec::with_capacity(num_glyphs);
             let mut has_wide_offsets = false;
-            let has_wide_codes = !font.is_ansi;
+            let has_wide_codes = !font.flags.contains(FontFlag::IS_ANSI);
             let mut shape_buf = Vec::new();
             {
                 let mut shape_writer = Writer::new(&mut shape_buf, self.version);
@@ -2142,16 +2084,7 @@ impl<W: Write> Writer<W> {
 
             let mut writer = Writer::new(&mut buf, self.version);
             writer.write_character_id(font.id)?;
-            writer.write_u8(
-                if font.layout.is_some() { 0b10000000 } else { 0 }
-                    | if font.is_shift_jis { 0b1000000 } else { 0 }
-                    | if font.is_small_text { 0b100000 } else { 0 }
-                    | if font.is_ansi { 0b10000 } else { 0 }
-                    | if has_wide_offsets { 0b1000 } else { 0 }
-                    | if has_wide_codes { 0b100 } else { 0 }
-                    | if font.is_italic { 0b10 } else { 0 }
-                    | if font.is_bold { 0b1 } else { 0 },
-            )?;
+            writer.write_u8(font.flags.bits())?;
             writer.write_language(font.language)?;
             writer.write_u8(font.name.len() as u8)?;
             writer.output.write_all(font.name.as_bytes())?;
@@ -2194,11 +2127,7 @@ impl<W: Write> Writer<W> {
                 writer.write_u16(layout.descent)?;
                 writer.write_i16(layout.leading)?;
                 for glyph in &font.glyphs {
-                    writer.write_i16(
-                        glyph
-                            .advance
-                            .ok_or_else(|| Error::invalid_data("glyph.advance cannot be None"))?,
-                    )?;
+                    writer.write_i16(glyph.advance)?;
                 }
                 for glyph in &font.glyphs {
                     writer.write_rectangle(
@@ -2240,6 +2169,44 @@ impl<W: Write> Writer<W> {
         self.write_string(font.name)?;
         if let Some(data) = font.data {
             self.output.write_all(data)?;
+        }
+        Ok(())
+    }
+
+    fn write_define_font_info(&mut self, font_info: &FontInfo) -> Result<()> {
+        let use_wide_codes = self.version >= 6 || font_info.version >= 2;
+
+        let len = font_info.name.len()
+            + if use_wide_codes { 2 } else { 1 } * font_info.code_table.len()
+            + if font_info.version >= 2 { 1 } else { 0 }
+            + 4;
+
+        let tag_id = if font_info.version == 1 {
+            TagCode::DefineFontInfo
+        } else {
+            TagCode::DefineFontInfo2
+        };
+        self.write_tag_header(tag_id, len as u32)?;
+        self.write_u16(font_info.id)?;
+
+        // SWF19 has ANSI and Shift-JIS backwards?
+        self.write_u8(font_info.name.len() as u8)?;
+        self.output.write_all(font_info.name.as_bytes())?;
+
+        let mut flags = font_info.flags;
+        flags.set(FontInfoFlag::HAS_WIDE_CODES, use_wide_codes);
+        self.write_u8(flags.bits())?;
+
+        // TODO(Herschel): Assert language is unknown for v1.
+        if font_info.version >= 2 {
+            self.write_language(font_info.language)?;
+        }
+        for &code in &font_info.code_table {
+            if use_wide_codes {
+                self.write_u16(code)?;
+            } else {
+                self.write_u8(code as u8)?;
+            }
         }
         Ok(())
     }
@@ -2509,6 +2476,7 @@ fn count_fbits(n: Fixed16) -> u32 {
 }
 
 #[cfg(test)]
+#[allow(clippy::unusual_byte_groupings)]
 mod tests {
     use super::Writer;
     use super::*;

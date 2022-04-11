@@ -83,10 +83,14 @@ jobs:
           - build_name: macos-x86_64
             os: macos-latest
             target: x86_64-apple-darwin
+            MACOSX_DEPLOYMENT_TARGET: 10.7
+            DESKTOP_FEATURES: sandbox
 
           - build_name: macos-aarch64
             os: macos-latest
             target: aarch64-apple-darwin
+            MACOSX_DEPLOYMENT_TARGET: 11.0
+            DESKTOP_FEATURES: sandbox
 
           - build_name: windows-x86_32
             os: windows-latest
@@ -118,27 +122,16 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt install -y libasound2-dev libxcb-shape0-dev libxcb-xfixes0-dev
-
-      # We need macOS SDK 11.0 to build for aarch64.
-      # GitHub Actions runners have the 11.0 SDK installed, but are still stuck on macOS 10.15.
-      # Various efforts of changing SDKPATH, CFLAGS, etc. to use the proper SDK have not compiled or linked correctly.
-      # This hack deletes all other SDKs which forces the build tools to use the proper version.
-      # Remove this hack when macOS 11 is publicly available on GitHub Actions.
-      # From https://github.com/actions/virtual-environments/issues/2211
-      - name: Set SDK for macOS aarch64
-        if: matrix.target == 'aarch64-apple-darwin'
-        run: |
-          sudo xcode-select -s "/Applications/Xcode_12.4.app"
-          sudo rm -Rf /Library/Developer/CommandLineTools/SDKs/*
+          sudo apt install -y libasound2-dev libxcb-shape0-dev libxcb-xfixes0-dev libgtk-3-dev
 
       - name: Cargo build
         uses: actions-rs/cargo@v1
         with:
           command: build
-          args: --package ruffle_desktop --release ${{ matrix.target && '--target' }} ${{ matrix.target }}
+          args: --package ruffle_desktop --release ${{matrix.DESKTOP_FEATURES && '--features' }} ${{matrix.DESKTOP_FEATURES}} ${{ matrix.target && '--target' }} ${{ matrix.target }}
         env:
           RUSTFLAGS: ${{ matrix.RUSTFLAGS }}
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.MACOSX_DEPLOYMENT_TARGET }}
 
       - name: Package common
         run: |
@@ -156,7 +149,8 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           cp ${{ env.CARGO_BUILD_DIR }}/ruffle_desktop package/ruffle
-          cd package/
+          # We must enter the package/ directory in order to create a flat tarball (i.e. without a directory in it).
+          cd package
           tar -czvf ../${{ env.PACKAGE_FILE }} *
 
       - name: Upload package
@@ -186,6 +180,9 @@ jobs:
     env:
       PACKAGE_FILE: ${{ needs.create-nightly-release.outputs.package_prefix }}-macos-universal.tar.gz
     steps:
+      - name: Clone Ruffle repo
+        uses: actions/checkout@v2
+
       - name: Download aarch64 binary
         uses: actions/download-artifact@v2
         with:
@@ -200,9 +197,47 @@ jobs:
         run: |
           lipo -create -output package/ruffle target/x86_64-apple-darwin/release/ruffle_desktop target/aarch64-apple-darwin/release/ruffle_desktop
           chmod +x package/ruffle
+      
+      - name: Create app bundle
+        run: |
+          cp -r desktop/packages/macOS package/Ruffle.app
+          mkdir package/Ruffle.app/Contents/MacOS
+          mv package/ruffle package/Ruffle.app/Contents/MacOS/ruffle
+
+      - name: Compile asset catalog
+        run: |
+          mkdir package/Ruffle.app/Contents/Resources
+          xcrun actool --compile package/Ruffle.app/Contents/Resources desktop/assets/Assets.xcassets --minimum-deployment-target 10.0 --platform macosx --warnings --errors --notices --include-all-app-icons
+
+      - name: Sign bundle
+        continue-on-error: true
+        env:
+          APPLE_DEVELOPER_KEY: ${{ secrets.APPLE_DEVELOPER_KEY }}
+          APPLE_DEVELOPER_KEY_PASSWORD: ${{ secrets.APPLE_DEVELOPER_KEY_PASSWORD }}
+        run: |
+          echo $APPLE_DEVELOPER_KEY | base64 --decode > certificate.p12
+          security create-keychain -p correct-horse-battery-staple build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p correct-horse-battery-staple build.keychain
+          security import certificate.p12 -k build.keychain -P $APPLE_DEVELOPER_KEY_PASSWORD -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k correct-horse-battery-staple build.keychain
+          codesign -s ${{ secrets.APPLE_DEVELOPER_IDENTITY }} -f --entitlements desktop/assets/macOSEntitlements.plist --options runtime package/Ruffle.app
+          codesign --verify -vvvv package/Ruffle.app
+      
+      - name: Notarize bundle
+        continue-on-error: true
+        run: |
+          xcrun notarytool store-credentials "Ruffle" --apple-id ${{ secrets.APPLE_ID }} --team-id ${{ secrets.APPLE_TEAM }} --password ${{ secrets.APPLE_APP_PASSWORD }}
+          cd package
+          zip -r Ruffle.zip Ruffle.app
+          mv Ruffle.zip ..
+          cd ..
+          xcrun notarytool submit Ruffle.zip --keychain-profile Ruffle --wait
+          xcrun stapler staple package/Ruffle.app
 
       - name: Package macOS
         run: |
+          # We must enter the package/ directory in order to create a flat tarball (i.e. without a directory in it).
           cd package
           tar -czvf ../${{ env.PACKAGE_FILE }} *
 
@@ -236,9 +271,10 @@ jobs:
           target: wasm32-unknown-unknown
 
       - name: Setup Node.js
-        uses: actions/setup-node@v1
+        uses: actions/setup-node@v2
         with:
           node-version: "16"
+          registry-url: https://registry.npmjs.org
 
       # wasm-bindgen-cli version must match wasm-bindgen crate version.
       # Be sure to update in test_web.yml, web/Cargo.toml and web/README.md.
@@ -246,7 +282,7 @@ jobs:
         uses: actions-rs/cargo@v1
         with:
           command: install
-          args: wasm-bindgen-cli --version 0.2.78
+          args: wasm-bindgen-cli --version 0.2.80
 
       - name: Setup conda
         uses: conda-incubator/setup-miniconda@v2
@@ -264,14 +300,15 @@ jobs:
           BUILD_ID: ${{ github.run_number }}
           # Build web demo with WebGPU support for testing in Chrome origin trial on ruffle.rs
           CARGO_FEATURES: ${{ matrix.demo && 'wgpu' || '' }}
+          FIREFOX_EXTENSION_ID: ${{ secrets.FIREFOX_EXTENSION_ID }} # Needed to inject into manifest.json
         working-directory: web
         shell: bash -l {0}
         run: |
-          npm run bootstrap
-          npm run build
+          npm ci
+          npm run build:dual-wasm
           npm run docs
 
-      - name: Sign Firefox extension
+      - name: Publish Firefox extension
         if: env.FIREFOX_EXTENSION_ID != '' && !matrix.demo
         id: sign-firefox
         continue-on-error: true
@@ -283,11 +320,19 @@ jobs:
         shell: bash -l {0}
         run: npm run sign-firefox
 
+      - name: Publish npm package
+        if: ${{ !matrix.demo }}
+        # npm scoped packages are private by default, explicitly make public
+        run: npm publish --access public
+        continue-on-error: true
+        working-directory: web/packages/selfhosted/dist
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       - name: Package selfhosted
         if: ${{ !matrix.demo }}
-        run: |
-          cd web/packages/selfhosted/dist/
-          zip -r release.zip .
+        run: zip -r release.zip .
+        working-directory: web/packages/selfhosted/dist
 
       - name: Upload selfhosted
         if: ${{ !matrix.demo }}
@@ -311,17 +356,6 @@ jobs:
           asset_name: ${{ needs.create-nightly-release.outputs.package_prefix }}-web-extension.zip
           asset_content_type: application/zip
 
-      - name: Upload Firefox extension (signed)
-        if: steps.sign-firefox.outcome == 'success' && !matrix.demo
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-nightly-release.outputs.upload_url }}
-          asset_path: ./web/packages/extension/dist/firefox.xpi
-          asset_name: ${{ needs.create-nightly-release.outputs.package_prefix }}-web-extension-firefox.xpi
-          asset_content_type: application/x-xpinstall
-
       - name: Upload Firefox extension (unsigned)
         if: steps.sign-firefox.outcome != 'success' && !matrix.demo
         uses: actions/upload-release-asset@v1
@@ -332,6 +366,19 @@ jobs:
           asset_path: ./web/packages/extension/dist/firefox_unsigned.xpi
           asset_name: ${{ needs.create-nightly-release.outputs.package_prefix }}-web-extension-firefox-unsigned.xpi
           asset_content_type: application/x-xpinstall
+
+      - name: Publish Chrome extension
+        if: env.CHROME_EXTENSION_ID != '' && !matrix.demo
+        id: publish-chrome-extension
+        continue-on-error: true
+        env:
+          CHROME_EXTENSION_ID: ${{ secrets.CHROME_EXTENSION_ID }}
+        uses: mnao305/chrome-extension-upload@2.2.0
+        with:
+          extension-id: ${{ secrets.CHROME_EXTENSION_ID }}
+          client-id: ${{ secrets.CHROME_CLIENT_ID }}
+          refresh-token: ${{ secrets.CHROME_REFRESH_TOKEN }}
+          file-path: ./web/packages/extension/dist/ruffle_extension.zip
 
       - name: Clone web demo
         if: matrix.demo
@@ -346,8 +393,6 @@ jobs:
       - name: Update web demo
         if: matrix.demo
         run: |
-          cd demo/
-
           # Delete the old build.
           rm -f *.js *.wasm *.html
 
@@ -359,6 +404,7 @@ jobs:
           git config user.email "ruffle@ruffle.rs"
           git add -A
           git commit --amend -m "Nightly build ${{ needs.create-nightly-release.outputs.date }}"
+        working-directory: demo
 
       - name: Push web demo
         if: github.repository == 'ruffle-rs/ruffle' && matrix.demo
@@ -382,8 +428,6 @@ jobs:
       - name: Update JS docs
         if: ${{ !matrix.demo }}
         run: |
-          cd js-docs/
-
           # Delete the old docs
           rm -rf master/
 
@@ -395,6 +439,7 @@ jobs:
           git config user.email "ruffle@ruffle.rs"
           git add -A
           git commit --amend -m "Nightly build ${{ needs.create-nightly-release.outputs.date }}"
+        working-directory: js-docs
 
       - name: Push JS docs
         if: github.repository == 'ruffle-rs/ruffle' && !matrix.demo
@@ -409,6 +454,7 @@ jobs:
     name: Publish AUR package
     needs: build
     runs-on: ubuntu-latest
+    if: github.repository == 'ruffle-rs/ruffle'
     steps:
       - uses: actions/checkout@v2
 
@@ -428,7 +474,6 @@ jobs:
         run: sed -e "s/@VERSION@/${{ steps.current_time_dots.outputs.formattedTime }}/" -i ./PKGBUILD
 
       - name: Publish AUR package
-        if: github.repository == 'ruffle-rs/ruffle'
         uses: KSXGitHub/github-actions-deploy-aur@v2.2.5
         with:
           pkgname: ruffle-nightly-bin

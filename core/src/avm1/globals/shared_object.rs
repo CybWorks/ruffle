@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::function::{Executable, FunctionObject};
@@ -13,23 +11,23 @@ use crate::string::AvmString;
 use flash_lso::types::Value as AmfValue;
 use flash_lso::types::{AMFVersion, Element, Lso};
 use gc_arena::MutationContext;
-use json::JsonValue;
+use std::borrow::Cow;
 
 const PROTO_DECLS: &[Declaration] = declare_properties! {
-    "clear" => method(clear);
-    "close" => method(close);
-    "connect" => method(connect);
-    "flush" => method(flush);
-    "getSize" => method(get_size);
-    "send" => method(send);
-    "setFps" => method(set_fps);
-    "onStatus" => method(on_status);
-    "onSync" => method(on_sync);
+    "clear" => method(clear; DONT_ENUM | DONT_DELETE);
+    "close" => method(close; DONT_ENUM | DONT_DELETE);
+    "connect" => method(connect; DONT_ENUM | DONT_DELETE);
+    "flush" => method(flush; DONT_ENUM | DONT_DELETE);
+    "getSize" => method(get_size; DONT_ENUM | DONT_DELETE);
+    "send" => method(send; DONT_ENUM | DONT_DELETE);
+    "setFps" => method(set_fps; DONT_ENUM | DONT_DELETE);
+    "onStatus" => method(on_status; DONT_ENUM | DONT_DELETE);
+    "onSync" => method(on_sync; DONT_ENUM | DONT_DELETE);
 };
 
 const OBJECT_DECLS: &[Declaration] = declare_properties! {
-    "deleteAll" => method(delete_all);
-    "getDiskUsage" => method(get_disk_usage);
+    "deleteAll" => method(delete_all; DONT_ENUM);
+    "getDiskUsage" => method(get_disk_usage; DONT_ENUM);
     "getLocal" => method(get_local);
     "getRemote" => method(get_remote);
     "getMaxSize" => method(get_max_size);
@@ -81,10 +79,10 @@ fn serialize_value<'gc>(
                 let length = o.length(activation).unwrap();
                 Some(AmfValue::ECMAArray(vec![], values, length as u32))
             } else if let Some(xml_node) = o.as_xml_node() {
-                xml_node
-                    .into_string(&|_| true)
-                    .map(|xml_string| AmfValue::XML(xml_string, true))
-                    .ok()
+                Some(AmfValue::XML(
+                    xml_node.into_string().to_utf8_lossy().into_owned(),
+                    true,
+                ))
             } else if let Some(date) = o.as_date_object() {
                 date.date_time()
                     .map(|date_time| AmfValue::Date(date_time.timestamp_millis() as f64, None))
@@ -213,90 +211,6 @@ fn deserialize_lso<'gc>(
     }
 
     Ok(obj.into())
-}
-
-/// Deserialize a Json shared object element into a Value
-fn recursive_deserialize_json<'gc>(
-    json_value: &JsonValue,
-    activation: &mut Activation<'_, 'gc, '_>,
-) -> Value<'gc> {
-    match json_value {
-        JsonValue::Null => Value::Null,
-        JsonValue::Short(s) => Value::String(AvmString::new_utf8(
-            activation.context.gc_context,
-            s.to_string(),
-        )),
-        JsonValue::String(s) => {
-            Value::String(AvmString::new_utf8(activation.context.gc_context, s))
-        }
-        JsonValue::Number(f) => Value::Number((*f).into()),
-        JsonValue::Boolean(b) => (*b).into(),
-        JsonValue::Object(o) => {
-            if o.get("__proto__").and_then(JsonValue::as_str) == Some("Array") {
-                deserialize_array_json(o, activation)
-            } else {
-                deserialize_object_json(o, activation)
-            }
-        }
-        JsonValue::Array(_) => Value::Undefined,
-    }
-}
-
-/// Deserialize an Object and any children from a JSON object
-fn deserialize_object_json<'gc>(
-    json_obj: &json::object::Object,
-    activation: &mut Activation<'_, 'gc, '_>,
-) -> Value<'gc> {
-    // Deserialize Object
-    let obj = ScriptObject::object(
-        activation.context.gc_context,
-        Some(activation.context.avm1.prototypes.object),
-    );
-    for (name, value) in json_obj.iter() {
-        obj.define_value(
-            activation.context.gc_context,
-            AvmString::new_utf8(activation.context.gc_context, name),
-            recursive_deserialize_json(value, activation),
-            Attribute::empty(),
-        );
-    }
-    obj.into()
-}
-
-/// Deserialize an Array and any children from a JSON object
-fn deserialize_array_json<'gc>(
-    json_obj: &json::object::Object,
-    activation: &mut Activation<'_, 'gc, '_>,
-) -> Value<'gc> {
-    let array_constructor = activation.context.avm1.prototypes.array_constructor;
-    let len = json_obj
-        .get("length")
-        .and_then(JsonValue::as_i32)
-        .unwrap_or_default();
-    if let Ok(Value::Object(obj)) = array_constructor.construct(activation, &[len.into()]) {
-        for (name, value) in json_obj.iter() {
-            let value = recursive_deserialize_json(value, activation);
-            if let Ok(i) = name.parse::<i32>() {
-                obj.set_element(activation, i, value).unwrap();
-            } else {
-                // Ignore length and proto meta-properties
-                if name == "length" || name == "__proto__" {
-                    continue;
-                }
-
-                obj.define_value(
-                    activation.context.gc_context,
-                    AvmString::new_utf8(activation.context.gc_context, name),
-                    value,
-                    Attribute::empty(),
-                );
-            }
-        }
-
-        obj.into()
-    } else {
-        Value::Undefined
-    }
 }
 
 pub fn get_local<'gc>(
@@ -442,16 +356,8 @@ pub fn get_local<'gc>(
 
     // Load the data object from storage if it existed prior
     if let Some(saved) = activation.context.storage.get(&full_name) {
-        // Attempt to load it as an Lso
         if let Ok(lso) = flash_lso::read::Reader::default().parse(&saved) {
             data = deserialize_lso(activation, &lso)?.into();
-        } else {
-            // Attempt to load legacy Json
-            if let Ok(saved_string) = String::from_utf8(saved) {
-                if let Ok(json_data) = json::parse(&saved_string) {
-                    data = recursive_deserialize_json(&json_data, activation);
-                }
-            }
         }
     }
 

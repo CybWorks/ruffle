@@ -8,8 +8,8 @@ use crate::avm1::{Object, ScriptObject, TObject, Value};
 use gc_arena::MutationContext;
 
 const PROTO_DECLS: &[Declaration] = declare_properties! {
-    "call" => method(call);
-    "apply" => method(apply);
+    "call" => method(call; DONT_ENUM | DONT_DELETE);
+    "apply" => method(apply; DONT_ENUM | DONT_DELETE);
 };
 
 /// Implements `new Function()`
@@ -56,7 +56,7 @@ pub fn call<'gc>(
         Some(exec) => exec.exec(
             ExecutionName::Static("[Anonymous]"),
             activation,
-            this,
+            this.into(),
             1,
             args,
             ExecutionReason::FunctionCall,
@@ -99,7 +99,7 @@ pub fn apply<'gc>(
         Some(exec) => exec.exec(
             ExecutionName::Static("[Anonymous]"),
             activation,
-            this,
+            this.into(),
             1,
             &child_args,
             ExecutionReason::FunctionCall,

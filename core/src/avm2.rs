@@ -21,7 +21,7 @@ macro_rules! avm_debug {
     )
 }
 
-mod activation;
+pub mod activation;
 mod array;
 mod bytearray;
 mod class;
@@ -31,7 +31,7 @@ mod function;
 mod globals;
 mod method;
 mod names;
-mod object;
+pub mod object;
 mod property;
 mod property_map;
 mod regexp;
@@ -46,7 +46,7 @@ mod vtable;
 pub use crate::avm2::activation::Activation;
 pub use crate::avm2::array::ArrayStorage;
 pub use crate::avm2::domain::Domain;
-pub use crate::avm2::events::Event;
+pub use crate::avm2::events::{Event, EventData};
 pub use crate::avm2::names::{Namespace, QName};
 pub use crate::avm2::object::{
     ArrayObject, ClassObject, Object, ScriptObject, SoundChannelObject, StageObject, TObject,
@@ -160,24 +160,11 @@ impl<'gc> Avm2<'gc> {
         event: Event<'gc>,
         target: Object<'gc>,
     ) -> Result<bool, Error> {
-        let event_constr = context.avm2.classes().event;
-        Self::dispatch_event_with_class(context, event, event_constr, target)
-    }
-
-    /// Dispatch an event on an object with a specific Event type.
-    ///
-    /// The `bool` parameter reads true if the event was cancelled.
-    pub fn dispatch_event_with_class(
-        context: &mut UpdateContext<'_, 'gc, '_>,
-        event: Event<'gc>,
-        event_class: ClassObject<'gc>,
-        target: Object<'gc>,
-    ) -> Result<bool, Error> {
         use crate::avm2::events::dispatch_event;
 
         let mut activation = Activation::from_nothing(context.reborrow());
 
-        let event_object = EventObject::from_event(&mut activation, event_class, event)?;
+        let event_object = EventObject::from_event(&mut activation, event)?;
 
         dispatch_event(&mut activation, target, event_object)
     }
@@ -331,12 +318,10 @@ impl<'gc> Avm2<'gc> {
     }
 
     fn pop_args(&mut self, arg_count: u32) -> Vec<Value<'gc>> {
-        let mut args = Vec::with_capacity(arg_count as usize);
-        args.resize(arg_count as usize, Value::Undefined);
+        let mut args = vec![Value::Undefined; arg_count as usize];
         for arg in args.iter_mut().rev() {
             *arg = self.pop();
         }
-
         args
     }
 

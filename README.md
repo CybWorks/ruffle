@@ -1,15 +1,21 @@
 <p align="center">
- <a href="https://ruffle.rs"><img src="https://ruffle.rs/assets/logo.svg" alt="Ruffle"></a>
+  <a href="https://ruffle.rs"><img alt="Ruffle" src="https://ruffle.rs/assets/logo.svg" /></a>
 </p>
 <p align="center">
- <a href="https://github.com/ruffle-rs/ruffle/actions">
-  <img src="https://img.shields.io/github/workflow/status/ruffle-rs/ruffle/Test%20Rust?label=rust%20build" alt="Rust Build Status" />
-  <img src="https://img.shields.io/github/workflow/status/ruffle-rs/ruffle/Test%20Web?label=web%20build" alt="Web Build Status" />
- </a>
-  <a href="https://discord.gg/ruffle">
-      <img src="https://img.shields.io/discord/610531541889581066" alt="Ruffle Discord">
+  <a href="https://github.com/ruffle-rs/ruffle/actions">
+    <img alt="Rust Build Status" src="https://img.shields.io/github/workflow/status/ruffle-rs/ruffle/Test%20Rust?label=Rust%20Build&logo=github" />
+    <img alt="Web Build Status" src="https://img.shields.io/github/workflow/status/ruffle-rs/ruffle/Test%20Web?label=Web%20Build&logo=github" />
   </a>
-  <br>
+  <a href="https://www.npmjs.com/package/@ruffle-rs/ruffle">
+    <img alt="Ruffle npm" src="https://img.shields.io/npm/v/@ruffle-rs/ruffle?color=007acc&logo=npm" />
+  </a>
+  <a href="https://aur.archlinux.org/packages/ruffle-nightly-bin">
+    <img alt="Ruffle AUR" src="https://img.shields.io/aur/version/ruffle-nightly-bin?logo=archlinux" />
+  </a>
+  <a href="https://discord.gg/ruffle">
+    <img alt="Ruffle Discord" src="https://img.shields.io/discord/610531541889581066?label=&color=7389d8&labelColor=6a7ec2&logoColor=ffffff&logo=discord" />
+  </a>
+  <br />
   <strong><a href="https://ruffle.rs">website</a> | <a href="https://ruffle.rs/demo">demo</a> | <a href="https://github.com/ruffle-rs/ruffle/releases">nightly builds</a> | <a href="https://github.com/ruffle-rs/ruffle/wiki">wiki</a></strong>
 </p>
 
@@ -35,7 +41,10 @@ For more detailed instructions, see our [wiki page](https://github.com/ruffle-rs
 
 ### Desktop
 
-- `cargo run --package=ruffle_desktop -- test.swf`
+If you are building for a Linux platform, make sure that the GTK 3 development packages are
+installed on your system. (Ubuntu: `libgtk-3-dev`, Fedora: `gtk3-devel`)
+
+- `cargo run --release --package=ruffle_desktop -- test.swf`
 
 ### Web or Extension
 
@@ -48,15 +57,15 @@ If you have a collection of "real world" SWFs to test against, the scanner may b
 ruffle's parsing capabilities. Provided with a folder and an output filename, it will attempt to read
 all of the flash files and report on the success of such a task.
 
-- `cargo run --package=ruffle_scanner -- folder/with/swfs/ results.csv`
+- `cargo run --release --package=ruffle_scanner -- folder/with/swfs/ results.csv`
 
 ### Exporter
 
 If you have a swf and would like to capture an image of it, you may use the exporter tool.
 This currently requires hardware acceleration, but can be run headless (with no window).
 
-- `cargo run --package=exporter -- path/to/file.swf`
-- `cargo run --package=exporter -- path/to/file.swf path/to/screenshots --frames 5`
+- `cargo run --release --package=exporter -- path/to/file.swf`
+- `cargo run --release --package=exporter -- path/to/file.swf path/to/screenshots --frames 5`
 
 ## Structure
 

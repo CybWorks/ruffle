@@ -4,7 +4,6 @@ use crate::avm1::globals::system::SystemProperties;
 use crate::avm1::{Avm1, Object, Timers, UpdateContext};
 use crate::avm2::Avm2;
 use crate::backend::audio::{AudioManager, NullAudioBackend};
-use crate::backend::locale::NullLocaleBackend;
 use crate::backend::log::NullLogBackend;
 use crate::backend::navigator::NullNavigatorBackend;
 use crate::backend::render::NullRenderer;
@@ -52,10 +51,9 @@ where
             audio: &mut NullAudioBackend::new(),
             ui: &mut NullUiBackend::new(),
             action_queue: &mut ActionQueue::new(),
-            library: &mut Library::empty(gc_context),
+            library: &mut Library::empty(),
             navigator: &mut NullNavigatorBackend::new(),
             renderer: &mut NullRenderer::new(),
-            locale: &mut NullLocaleBackend::new(),
             log: &mut NullLogBackend::new(),
             video: &mut NullVideoBackend::new(),
             mouse_over_object: None,
@@ -76,6 +74,7 @@ where
             avm1: &mut avm1,
             avm2: &mut avm2,
             external_interface: &mut Default::default(),
+            start_time: Instant::now(),
             update_start: Instant::now(),
             max_execution_duration: Duration::from_secs(15),
             focus_tracker: FocusTracker::new(gc_context),
@@ -86,7 +85,7 @@ where
         };
         context.stage.replace_at_depth(&mut context, root, 0);
 
-        root.post_instantiation(&mut context, root, None, Instantiator::Movie, false);
+        root.post_instantiation(&mut context, None, Instantiator::Movie, false);
         root.set_name(context.gc_context, "".into());
 
         fn run_test<'a, 'gc: 'a, F>(

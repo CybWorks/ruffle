@@ -193,7 +193,7 @@ impl<'gc> Avm1Button<'gc> {
 
         for (child, depth) in children {
             // Initialize new child.
-            child.post_instantiation(context, child, None, Instantiator::Movie, false);
+            child.post_instantiation(context, None, Instantiator::Movie, false);
             child.run_frame(context);
             let removed_child = self.replace_at_depth(context, child, depth.into());
             dispatch_added_event(self.into(), child, false, context);
@@ -255,7 +255,6 @@ impl<'gc> TDisplayObject<'gc> for Avm1Button<'gc> {
     fn post_instantiation(
         &self,
         context: &mut UpdateContext<'_, 'gc, '_>,
-        display_object: DisplayObject<'gc>,
         _init_object: Option<Object<'gc>>,
         _instantiated_by: Instantiator,
         run_frame: bool,
@@ -272,7 +271,7 @@ impl<'gc> TDisplayObject<'gc> for Avm1Button<'gc> {
         if mc.object.is_none() {
             let object = StageObject::for_display_object(
                 context.gc_context,
-                display_object,
+                (*self).into(),
                 Some(context.avm1.prototypes().button),
             );
             mc.object = Some(object.into());
@@ -326,7 +325,7 @@ impl<'gc> TDisplayObject<'gc> for Avm1Button<'gc> {
             drop(read);
 
             for (child, depth) in new_children {
-                child.post_instantiation(context, child, None, Instantiator::Movie, false);
+                child.post_instantiation(context, None, Instantiator::Movie, false);
                 self.0
                     .write(context.gc_context)
                     .hit_area
@@ -357,38 +356,6 @@ impl<'gc> TDisplayObject<'gc> for Avm1Button<'gc> {
         }
 
         false
-    }
-
-    fn mouse_pick(
-        &self,
-        context: &mut UpdateContext<'_, 'gc, '_>,
-        point: (Twips, Twips),
-        require_button_mode: bool,
-    ) -> Option<DisplayObject<'gc>> {
-        // The button is hovered if the mouse is over any child nodes.
-        if self.visible() {
-            for child in self.iter_render_list().rev() {
-                let result = child.mouse_pick(context, point, require_button_mode);
-                if result.is_some() {
-                    return result;
-                }
-            }
-
-            for child in self.0.read().hit_area.values() {
-                if child.hit_test_shape(context, point, HitTestOptions::MOUSE_PICK) {
-                    return Some((*self).into());
-                }
-            }
-        }
-        None
-    }
-
-    fn mouse_cursor(&self) -> MouseCursor {
-        if self.use_hand_cursor() {
-            MouseCursor::Hand
-        } else {
-            MouseCursor::Arrow
-        }
     }
 
     fn object(&self) -> Value<'gc> {
@@ -456,7 +423,7 @@ impl<'gc> TInteractiveObject<'gc> for Avm1Button<'gc> {
     }
 
     fn filter_clip_event(self, event: ClipEvent) -> ClipEventResult {
-        if !self.visible() {
+        if !self.visible() && !matches!(event, ClipEvent::ReleaseOutside) {
             return ClipEventResult::NotHandled;
         }
 
@@ -479,12 +446,12 @@ impl<'gc> TInteractiveObject<'gc> for Avm1Button<'gc> {
         let static_data = write.static_data;
         let static_data = static_data.read();
         let (new_state, condition, sound) = match event {
-            ClipEvent::DragOut => (
+            ClipEvent::DragOut { .. } => (
                 ButtonState::Over,
                 ButtonActionCondition::OVER_DOWN_TO_OUT_DOWN,
                 None,
             ),
-            ClipEvent::DragOver => (
+            ClipEvent::DragOver { .. } => (
                 ButtonState::Down,
                 ButtonActionCondition::OUT_DOWN_TO_OVER_DOWN,
                 None,
@@ -504,12 +471,12 @@ impl<'gc> TInteractiveObject<'gc> for Avm1Button<'gc> {
                 ButtonActionCondition::OUT_DOWN_TO_IDLE,
                 static_data.over_to_up_sound.as_ref(),
             ),
-            ClipEvent::RollOut => (
+            ClipEvent::RollOut { .. } => (
                 ButtonState::Up,
                 ButtonActionCondition::OVER_UP_TO_IDLE,
                 static_data.over_to_up_sound.as_ref(),
             ),
-            ClipEvent::RollOver => (
+            ClipEvent::RollOver { .. } => (
                 ButtonState::Over,
                 ButtonActionCondition::IDLE_TO_OVER_UP,
                 static_data.up_to_over_sound.as_ref(),
@@ -549,6 +516,40 @@ impl<'gc> TInteractiveObject<'gc> for Avm1Button<'gc> {
         }
 
         ClipEventResult::NotHandled
+    }
+
+    fn mouse_pick(
+        &self,
+        context: &mut UpdateContext<'_, 'gc, '_>,
+        point: (Twips, Twips),
+        require_button_mode: bool,
+    ) -> Option<InteractiveObject<'gc>> {
+        // The button is hovered if the mouse is over any child nodes.
+        if self.visible() && self.mouse_enabled() {
+            for child in self.iter_render_list().rev() {
+                let result = child
+                    .as_interactive()
+                    .and_then(|c| c.mouse_pick(context, point, require_button_mode));
+                if result.is_some() {
+                    return result;
+                }
+            }
+
+            for child in self.0.read().hit_area.values() {
+                if child.hit_test_shape(context, point, HitTestOptions::MOUSE_PICK) {
+                    return Some((*self).into());
+                }
+            }
+        }
+        None
+    }
+
+    fn mouse_cursor(self, _context: &mut UpdateContext<'_, 'gc, '_>) -> MouseCursor {
+        if self.use_hand_cursor() && self.enabled() {
+            MouseCursor::Hand
+        } else {
+            MouseCursor::Arrow
+        }
     }
 }
 

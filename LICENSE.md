@@ -9,7 +9,7 @@ at your option.
 
 ## MIT License
 
-Copyright (c) 2018-2021 Michael R. Welsh <mwelsh@gmail.com> and Ruffle contributors
+Copyright (c) 2018-2022 Ruffle LLC <ruffle@ruffle.rs> and Ruffle contributors
                         (https://github.com/ruffle-rs/ruffle/graphs/contributors)
 
 Permission is hereby granted, free of charge, to any
@@ -504,6 +504,7 @@ Ruffle depends on third-party libraries with compatible licenses.
 | [regex](https://github.com/rust-lang/regex) | [Apache-2.0](#Apache-20)/[MIT](#MIT) | Copyright (c) 2014 The Rust Project Developers  | 
 | [regex-automata](https://github.com/BurntSushi/regex-automata) | [MIT](#MIT)/[Unlicense](#Unlicense) | Copyright (c) 2015 Andrew Gallant  | 
 | [regex-syntax](https://github.com/rust-lang/regex) | [Apache-2.0](#Apache-20)/[MIT](#MIT) | Copyright (c) 2014 The Rust Project Developers  | 
+| [rfd](https://github.com/PolyMeilex/rfd) | [MIT](#MIT) | Copyright (c) 2022 Bartłomiej Maryńczak  | 
 | [ring](https://github.com/briansmith/ring) |  | Copyright 2015-2016 Brian Smith. | 
 | [rle-decode-fast](https://github.com/WanzenBug/rle-decode-helper) | [Apache-2.0](#Apache-20)/[MIT](#MIT) | Copyright 2019 Moritz "WanzenBug" Wanzenböck  | 
 | [rust-argon2](https://github.com/sru-systems/rust-argon2) | [Apache-2.0](#Apache-20)/[MIT](#MIT) | Copyright (c) 2017 Martijn Rijkeboer <mrr@sru-systems.com>  | 
@@ -550,7 +551,7 @@ Ruffle depends on third-party libraries with compatible licenses.
 | [strsim](https://github.com/dguo/strsim-rs) | [MIT](#MIT) | Copyright (c) 2015 Danny Guo Copyright (c) 2016 Titus Wormer <tituswormer@gmail.com>  | 
 | [strsim](https://github.com/dguo/strsim-rs) | [MIT](#MIT) | Copyright (c) 2015 Danny Guo Copyright (c) 2016 Titus Wormer <tituswormer@gmail.com> Copyright (c) 2018 Akash Kurdekar  | 
 | [svg](https://github.com/bodoni/svg) | [Apache-2.0](#Apache-20)/[MIT](#MIT) | Copyright 2015–2021 The svg Developers Copyright 2015–2021 The svg Developers  | 
-| [swf](https://github.com/ruffle-rs/ruffle) | [Apache-2.0](#Apache-20)/[MIT](#MIT) | Copyright (c) 2018 Mike Welsh <mwelsh@gmail.com>  | 
+| [swf](https://github.com/ruffle-rs/ruffle) | [Apache-2.0](#Apache-20)/[MIT](#MIT) | Copyright (c) 2018 Ruffle LLC <ruffle@ruffle.rs> and Ruffle contributors | 
 | [syn](https://github.com/dtolnay/syn) | [Apache-2.0](#Apache-20)/[MIT](#MIT) | Copyright (c) David Tolnay <dtolnay@gmail.com> | 
 | [synstructure](https://github.com/mystor/synstructure) | [MIT](#MIT) | Copyright 2016 Nika Layzell  | 
 | [tar](https://github.com/alexcrichton/tar-rs) | [Apache-2.0](#Apache-20)/[MIT](#MIT) | Copyright (c) 2014 Alex Crichton  | 
@@ -565,7 +566,6 @@ Ruffle depends on third-party libraries with compatible licenses.
 | [time](https://github.com/time-rs/time) | [Apache-2.0](#Apache-20)/[MIT](#MIT) | Copyright (c) 2019 Jacob Pratt  | 
 | [time-macros](https://github.com/time-rs/time) | [Apache-2.0](#Apache-20)/[MIT](#MIT) | Copyright (c) 2019 Jacob Pratt  | 
 | [time-macros-impl](https://github.com/time-rs/time) | [Apache-2.0](#Apache-20)/[MIT](#MIT) | Copyright (c) 2019 Jacob Pratt  | 
-| [tinyfiledialogs](https://github.com/jdm/tinyfiledialogs-rs) | zlib-acknowledgement | Copyright (c) Guillaume Vareille <vareille@users.sourceforge.net>, Josh Matthews <josh@joshmatthews.net> | 
 | [tinyvec](https://github.com/Lokathor/tinyvec) | [Apache-2.0](#Apache-20)/[MIT](#MIT)/[Zlib](#Zlib) | Copyright (c) Lokathor <zefria@gmail.com> | 
 | [tinyvec_macros](https://github.com/Soveu/tinyvec_macros) | [Apache-2.0](#Apache-20)/[MIT](#MIT)/[Zlib](#Zlib) | Copyright (c) 2020 Soveu  | 
 | [toml](https://github.com/alexcrichton/toml-rs) | [Apache-2.0](#Apache-20)/[MIT](#MIT) | Copyright (c) 2014 Alex Crichton  | 

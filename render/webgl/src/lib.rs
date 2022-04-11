@@ -92,8 +92,6 @@ pub struct WebGlRenderBackend {
 
     renderbuffer_width: i32,
     renderbuffer_height: i32,
-    view_width: i32,
-    view_height: i32,
     view_matrix: [[f32; 4]; 4],
 
     bitmap_registry: HashMap<BitmapHandle, Bitmap>,
@@ -229,8 +227,6 @@ impl WebGlRenderBackend {
             textures: vec![],
             renderbuffer_width: 1,
             renderbuffer_height: 1,
-            view_width: 1,
-            view_height: 1,
             view_matrix: [[0.0; 4]; 4],
 
             mask_state: MaskState::NoMask,
@@ -357,7 +353,7 @@ impl WebGlRenderBackend {
         Ok(shader)
     }
 
-    fn build_msaa_buffers(&mut self, width: i32, height: i32) -> Result<(), Error> {
+    fn build_msaa_buffers(&mut self) -> Result<(), Error> {
         if self.gl2.is_none() || self.msaa_sample_count <= 1 {
             self.gl.bind_framebuffer(Gl::FRAMEBUFFER, None);
             self.gl.bind_renderbuffer(Gl::RENDERBUFFER, None);
@@ -395,8 +391,8 @@ impl WebGlRenderBackend {
             Gl2::RENDERBUFFER,
             self.msaa_sample_count as i32,
             Gl2::RGB8,
-            width,
-            height,
+            self.renderbuffer_width,
+            self.renderbuffer_height,
         );
         gl.check_error("renderbuffer_storage_multisample (color)")?;
 
@@ -408,8 +404,8 @@ impl WebGlRenderBackend {
             Gl2::RENDERBUFFER,
             self.msaa_sample_count as i32,
             Gl2::STENCIL_INDEX8,
-            width,
-            height,
+            self.renderbuffer_width,
+            self.renderbuffer_height,
         );
         gl.check_error("renderbuffer_storage_multisample (stencil)")?;
 
@@ -445,8 +441,8 @@ impl WebGlRenderBackend {
             Gl2::TEXTURE_2D,
             0,
             Gl2::RGB as i32,
-            width,
-            height,
+            self.renderbuffer_width,
+            self.renderbuffer_height,
             0,
             Gl2::RGB,
             Gl2::UNSIGNED_BYTE,
@@ -586,15 +582,6 @@ impl WebGlRenderBackend {
         Mesh { draws }
     }
 
-    fn build_matrices(&mut self) {
-        self.view_matrix = [
-            [1.0 / (self.view_width as f32 / 2.0), 0.0, 0.0, 0.0],
-            [0.0, -1.0 / (self.view_height as f32 / 2.0), 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-            [-1.0, 1.0, 0.0, 1.0],
-        ];
-    }
-
     /// Creates and binds a new VAO.
     fn create_vertex_array(&self) -> Result<WebGlVertexArrayObject, Error> {
         let vao = if let Some(gl2) = &self.gl2 {
@@ -653,38 +640,26 @@ impl WebGlRenderBackend {
     }
 
     fn register_bitmap(&mut self, bitmap: Bitmap) -> Result<BitmapInfo, Error> {
+        let (format, data) = match &bitmap.data {
+            BitmapFormat::Rgb(data) => (Gl::RGB, data),
+            BitmapFormat::Rgba(data) => (Gl::RGBA, data),
+        };
+
         let texture = self.gl.create_texture().unwrap();
         self.gl.bind_texture(Gl::TEXTURE_2D, Some(&texture));
-        match &bitmap.data {
-            BitmapFormat::Rgb(data) => self
-                .gl
-                .tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
-                    Gl::TEXTURE_2D,
-                    0,
-                    Gl::RGB as i32,
-                    bitmap.width as i32,
-                    bitmap.height as i32,
-                    0,
-                    Gl::RGB,
-                    Gl::UNSIGNED_BYTE,
-                    Some(data),
-                )
-                .into_js_result()?,
-            BitmapFormat::Rgba(data) => self
-                .gl
-                .tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
-                    Gl::TEXTURE_2D,
-                    0,
-                    Gl::RGBA as i32,
-                    bitmap.width as i32,
-                    bitmap.height as i32,
-                    0,
-                    Gl::RGBA,
-                    Gl::UNSIGNED_BYTE,
-                    Some(data),
-                )
-                .into_js_result()?,
-        }
+        self.gl
+            .tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
+                Gl::TEXTURE_2D,
+                0,
+                format as i32,
+                bitmap.width as i32,
+                bitmap.height as i32,
+                0,
+                format,
+                Gl::UNSIGNED_BYTE,
+                Some(data),
+            )
+            .into_js_result()?;
 
         // You must set the texture parameters for non-power-of-2 textures to function in WebGL1.
         self.gl
@@ -717,18 +692,20 @@ impl WebGlRenderBackend {
 
 impl RenderBackend for WebGlRenderBackend {
     fn set_viewport_dimensions(&mut self, width: u32, height: u32) {
-        self.view_width = width as i32;
-        self.view_height = height as i32;
-
         // Build view matrix based on canvas size.
-        self.build_matrices();
+        self.view_matrix = [
+            [1.0 / (width as f32 / 2.0), 0.0, 0.0, 0.0],
+            [0.0, -1.0 / (height as f32 / 2.0), 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [-1.0, 1.0, 0.0, 1.0],
+        ];
 
         // Setup GL viewport and renderbuffers clamped to reasonable sizes.
-        self.renderbuffer_width = self.view_width.clamp(1, self.gl.drawing_buffer_width());
-        self.renderbuffer_height = self.view_height.clamp(1, self.gl.drawing_buffer_height());
+        self.renderbuffer_width = (width as i32).min(self.gl.drawing_buffer_width());
+        self.renderbuffer_height = (height as i32).min(self.gl.drawing_buffer_height());
 
         // Recreate framebuffers with the new size.
-        let _ = self.build_msaa_buffers(self.renderbuffer_width, self.renderbuffer_height);
+        let _ = self.build_msaa_buffers();
         self.gl
             .viewport(0, 0, self.renderbuffer_width, self.renderbuffer_height);
     }

@@ -290,11 +290,11 @@ impl AudioMixer {
     /// Creates a `Stream` that decodes and resamples a timeline "stream" sound.
     fn make_stream_from_swf_slice<'a>(
         &self,
-        format: &swf::SoundFormat,
+        stream_info: &swf::SoundStreamHead,
         data_stream: SwfSlice,
     ) -> Result<Box<dyn 'a + Stream>, Error> {
         // Instantiate a decoder for the compression that the sound data uses.
-        let clip_stream_decoder = decoders::make_stream_decoder(format, data_stream)?;
+        let clip_stream_decoder = decoders::make_stream_decoder(stream_info, data_stream)?;
 
         // Convert the `Decoder` to a `Stream`, and resample it to the output sample rate.
         let stream = DecoderStream::new(clip_stream_decoder);
@@ -377,12 +377,10 @@ impl AudioMixer {
         clip_data: SwfSlice,
         stream_info: &swf::SoundStreamHead,
     ) -> Result<SoundInstanceHandle, Error> {
-        let format = &stream_info.stream_format;
-
         // The audio data for stream sounds is distributed among the frames of a
         // movie clip. The stream tag reader will parse through the SWF and
         // feed the decoder audio data on the fly.
-        let stream = self.make_stream_from_swf_slice(format, clip_data)?;
+        let stream = self.make_stream_from_swf_slice(stream_info, clip_data)?;
 
         let mut sound_instances = self.sound_instances.lock().unwrap();
         let handle = sound_instances.insert(SoundInstance {
@@ -567,12 +565,13 @@ impl EventSoundStream {
         skip_sample_frames: u16,
     ) -> Self {
         let skip_sample_frames: u32 = skip_sample_frames.into();
-        let sample_divisor = 44100 / u32::from(decoder.sample_rate());
-        let start_sample_frame =
-            settings.in_sample.unwrap_or(0) / sample_divisor + skip_sample_frames;
+        let sample_divisor = 44100.0 / f64::from(decoder.sample_rate());
+        let start_sample_frame = (f64::from(settings.in_sample.unwrap_or(0)) / sample_divisor)
+            as u32
+            + skip_sample_frames;
         let end_sample_frame = settings
             .out_sample
-            .map(|n| n / sample_divisor)
+            .map(|n| (f64::from(n) / sample_divisor) as u32)
             .unwrap_or(num_sample_frames)
             + skip_sample_frames;
 

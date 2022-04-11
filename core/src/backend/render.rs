@@ -345,10 +345,20 @@ pub fn decode_jpeg(
 
     let decoded_data = match metadata.pixel_format {
         jpeg_decoder::PixelFormat::RGB24 => decoded_data,
-        jpeg_decoder::PixelFormat::CMYK32 => {
-            log::warn!("Unimplemented CMYK32 JPEG pixel format");
-            decoded_data
-        }
+        jpeg_decoder::PixelFormat::CMYK32 => decoded_data
+            .chunks_exact(4)
+            .flat_map(|chunk| {
+                let c = f32::from(chunk[0]);
+                let m = f32::from(chunk[1]);
+                let y = f32::from(chunk[2]);
+                let k = f32::from(chunk[3]);
+
+                let r = ((255.0 - c) * (255.0 - k) / 255.0) as u8;
+                let g = ((255.0 - m) * (255.0 - k) / 255.0) as u8;
+                let b = ((255.0 - y) * (255.0 - k) / 255.0) as u8;
+                [r, g, b]
+            })
+            .collect(),
         jpeg_decoder::PixelFormat::L8 => {
             let mut rgb = Vec::with_capacity(decoded_data.len() * 3);
             for elem in decoded_data {
@@ -564,6 +574,9 @@ pub fn decode_png(data: &[u8]) -> Result<Bitmap, Error> {
         width: info.width,
         height: info.height,
         data: if info.color_type == ColorType::Rgba {
+            // In contrast to DefineBitsLossless tags, PNGs embedded in a DefineBitsJPEG tag will not have
+            // premultiplied alpha and need to be converted before sending to the renderer.
+            premultiply_alpha_rgba(&mut data);
             BitmapFormat::Rgba(data)
         } else {
             // EXPAND expands other types to RGB.
@@ -580,11 +593,24 @@ pub fn decode_gif(data: &[u8]) -> Result<Bitmap, Error> {
     decode_options.set_color_output(gif::ColorOutput::RGBA);
     let mut reader = decode_options.read_info(data)?;
     let frame = reader.read_next_frame()?.ok_or("No frames in GIF")?;
+    // GIFs embedded in a DefineBitsJPEG tag will not have premultiplied alpha and need to be converted before sending to the renderer.
+    let mut data = frame.buffer.to_vec();
+    premultiply_alpha_rgba(&mut data);
 
     Ok(Bitmap {
         width: frame.width.into(),
         height: frame.height.into(),
-        data: BitmapFormat::Rgba(frame.buffer.to_vec()),
+        data: BitmapFormat::Rgba(data),
+    })
+}
+
+/// Converts standard RBGA to premultiplied alpha.
+pub fn premultiply_alpha_rgba(rgba: &mut [u8]) {
+    rgba.chunks_exact_mut(4).for_each(|rgba| {
+        let a = f32::from(rgba[3]) / 255.0;
+        rgba[0] = (f32::from(rgba[0]) * a) as u8;
+        rgba[1] = (f32::from(rgba[1]) * a) as u8;
+        rgba[2] = (f32::from(rgba[2]) * a) as u8;
     })
 }
 
@@ -594,9 +620,9 @@ pub fn unmultiply_alpha_rgba(rgba: &mut [u8]) {
     rgba.chunks_exact_mut(4).for_each(|rgba| {
         if rgba[3] > 0 {
             let a = f32::from(rgba[3]) / 255.0;
-            rgba[0] = f32::min(f32::from(rgba[0]) / a, 255.0) as u8;
-            rgba[1] = f32::min(f32::from(rgba[1]) / a, 255.0) as u8;
-            rgba[2] = f32::min(f32::from(rgba[2]) / a, 255.0) as u8;
+            rgba[0] = (f32::from(rgba[0]) / a) as u8;
+            rgba[1] = (f32::from(rgba[1]) / a) as u8;
+            rgba[2] = (f32::from(rgba[2]) / a) as u8;
         }
     })
 }

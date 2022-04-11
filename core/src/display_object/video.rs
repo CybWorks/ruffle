@@ -175,7 +175,11 @@ impl<'gc> Video<'gc> {
         };
 
         if let Some(num_frames) = num_frames {
-            frame_id %= num_frames as u32;
+            frame_id = if num_frames > 0 {
+                frame_id % num_frames as u32
+            } else {
+                0
+            }
         }
 
         let last_frame = read.decoded_frame.as_ref().map(|(lf, _)| *lf);
@@ -301,7 +305,6 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
     fn post_instantiation(
         &self,
         context: &mut UpdateContext<'_, 'gc, '_>,
-        display_object: DisplayObject<'gc>,
         _init_object: Option<Avm1Object<'gc>>,
         _instantiated_by: Instantiator,
         run_frame: bool,
@@ -379,7 +382,7 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
             if vm_type == AvmType::Avm1 {
                 let object: Avm1Object<'_> = Avm1StageObject::for_display_object(
                     context.gc_context,
-                    display_object,
+                    (*self).into(),
                     Some(context.avm1.prototypes().video),
                 )
                 .into();

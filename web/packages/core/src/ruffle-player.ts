@@ -13,6 +13,7 @@ import {
 } from "./load-options";
 import { MovieMetadata } from "./movie-metadata";
 import { InternalContextMenuItem } from "./context-menu";
+import { swfFileName } from "./swf-file-name";
 
 export const FLASH_MIMETYPE = "application/x-shockwave-flash";
 export const FUTURESPLASH_MIMETYPE = "application/futuresplash";
@@ -37,6 +38,7 @@ const enum PanicError {
     WasmDownload,
     WasmMimeType,
     WasmNotFound,
+    WasmDisabledMicrosoftEdge,
     SwfFetchError,
 }
 
@@ -131,7 +133,7 @@ export class RufflePlayer extends HTMLElement {
     // Set to true when a touch event is encountered.
     private isTouch = false;
 
-    private swfUrl?: string;
+    private swfUrl?: URL;
     private instance: Ruffle | null;
     private options: BaseLoadOptions | null;
     private lastActivePlayingState: boolean;
@@ -416,6 +418,12 @@ export class RufflePlayer extends HTMLElement {
                     e.ruffleIndexError = PanicError.WasmDownload;
                 } else if (e.name === "TypeError") {
                     e.ruffleIndexError = PanicError.JavascriptConflict;
+                } else if (
+                    navigator.userAgent.includes("Edg") &&
+                    message.includes("webassembly is not defined")
+                ) {
+                    // Microsoft Edge detection.
+                    e.ruffleIndexError = PanicError.WasmDisabledMicrosoftEdge;
                 }
             }
             this.panic(e);
@@ -427,7 +435,11 @@ export class RufflePlayer extends HTMLElement {
             this,
             config
         );
-        console.log("New Ruffle instance created.");
+        console.log(
+            "New Ruffle instance created (WebAssembly extensions: " +
+                (ruffleConstructor.is_wasm_simd_used() ? "ON" : "OFF") +
+                ")"
+        );
 
         // In Firefox, AudioContext.state is always "suspended" when the object has just been created.
         // It may change by itself to "running" some milliseconds later. So we need to wait a little
@@ -573,14 +585,7 @@ export class RufflePlayer extends HTMLElement {
 
             if ("url" in options) {
                 console.log(`Loading SWF file ${options.url}`);
-                try {
-                    this.swfUrl = new URL(
-                        options.url,
-                        document.location.href
-                    ).href;
-                } catch {
-                    this.swfUrl = options.url;
-                }
+                this.swfUrl = new URL(options.url, document.location.href);
 
                 const parameters = {
                     ...sanitizeParameters(
@@ -589,7 +594,7 @@ export class RufflePlayer extends HTMLElement {
                     ...sanitizeParameters(options.parameters),
                 };
 
-                this.instance!.stream_from(this.swfUrl, parameters);
+                this.instance!.stream_from(this.swfUrl.href, parameters);
             } else if ("data" in options) {
                 console.log("Loading SWF data");
                 this.instance!.load_data(
@@ -613,6 +618,18 @@ export class RufflePlayer extends HTMLElement {
                 this.playButton.style.display = "none";
             }
         }
+    }
+
+    /**
+     * Whether this player is currently playing.
+     *
+     * @returns True if this player is playing, false if it's paused or hasn't started yet.
+     */
+    get isPlaying(): boolean {
+        if (this.instance) {
+            return this.instance.is_playing();
+        }
+        return false;
     }
 
     /**
@@ -707,7 +724,7 @@ export class RufflePlayer extends HTMLElement {
         try {
             if (this.swfUrl) {
                 console.log("Downloading SWF: " + this.swfUrl);
-                const response = await fetch(this.swfUrl);
+                const response = await fetch(this.swfUrl.href);
                 if (!response.ok) {
                     console.error("SWF download failed");
                     return;
@@ -717,9 +734,7 @@ export class RufflePlayer extends HTMLElement {
                 const swfDownloadA = document.createElement("a");
                 swfDownloadA.style.display = "none";
                 swfDownloadA.href = blobUrl;
-                swfDownloadA.download = this.swfUrl.substring(
-                    this.swfUrl.lastIndexOf("/") + 1
-                );
+                swfDownloadA.download = swfFileName(this.swfUrl);
                 document.body.appendChild(swfDownloadA);
                 swfDownloadA.click();
                 document.body.removeChild(swfDownloadA);
@@ -1127,7 +1142,7 @@ export class RufflePlayer extends HTMLElement {
         const issueTitle = `Error on ${pageUrl}`;
         let issueLink = `https://github.com/ruffle-rs/ruffle/issues/new?title=${encodeURIComponent(
             issueTitle
-        )}&labels=error-report&body=`;
+        )}&template=error_report.md&labels=error-report&body=`;
         let issueBody = encodeURIComponent(errorText);
         if (
             errorArray.stackIndex > -1 &&
@@ -1236,6 +1251,20 @@ export class RufflePlayer extends HTMLElement {
                     <li><a href="#" id="panic-view-details">View Error Details</a></li>
                 `;
                 break;
+            case PanicError.WasmDisabledMicrosoftEdge:
+                // Self hosted: User has disabled WebAssembly in Microsoft Edge through the
+                // "Enhance your Security on the web" setting.
+                errorBody = `
+                    <p>Ruffle failed to load the required ".wasm" file component.</p>
+                    <p>To fix this, try opening your browser's settings, clicking "Privacy, search, and services", scrolling down, and turning off "Enhance your security on the web".</p>
+                    <p>This will allow your browser to load the required ".wasm" files.</p>
+                    <p>If the issue persists, you might have to use a different browser.</p>
+                `;
+                errorFooter = `
+                    <li><a target="_top" href="https://github.com/ruffle-rs/ruffle/wiki/Frequently-Asked-Questions-For-Users#edge-webassembly-error">More Information</a></li>
+                    <li><a href="#" id="panic-view-details">View Error Details</a></li>
+                `;
+                break;
             case PanicError.JavascriptConflict:
                 // Self hosted: Cannot load `.wasm` file - a native object / function is overriden
                 errorBody = `
@@ -1300,9 +1329,8 @@ export class RufflePlayer extends HTMLElement {
     }
 
     displayRootMovieDownloadFailedMessage(): void {
-        const swfUrl = new URL(this.swfUrl!);
         if (
-            window.location.origin == swfUrl.origin ||
+            window.location.origin == this.swfUrl!.origin ||
             !this.isExtension ||
             !window.location.protocol.includes("http")
         ) {
@@ -1445,6 +1473,65 @@ export function isBuiltInContextMenuVisible(menu: string | null): boolean {
         return true;
     }
     return false;
+}
+
+/**
+ * Returns whether the given filename is a Youtube Flash source.
+ *
+ * @param filename The filename to test.
+ * @returns True if the filename is a Youtube Flash source.
+ */
+export function isYoutubeFlashSource(filename: string | null): boolean {
+    if (filename) {
+        let pathname = "";
+        let cleaned_hostname = "";
+        try {
+            // A base URL is required if `filename` is a relative URL, but we don't need to detect the real URL origin.
+            const url = new URL(filename, RUFFLE_ORIGIN);
+            pathname = url.pathname;
+            cleaned_hostname = url.hostname.replace("www.", "");
+        } catch (err) {
+            // Some invalid filenames, like `///`, could raise a TypeError. Let's fail silently in this situation.
+        }
+        // See https://wiki.mozilla.org/QA/Youtube_Embedded_Rewrite
+        if (
+            pathname.startsWith("/v/") &&
+            (cleaned_hostname === "youtube.com" ||
+                cleaned_hostname === "youtube-nocookie.com")
+        ) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Workaround Youtube mixed content if upgradeToHttps is true.
+ *
+ * @param elem The element to change.
+ * @param attr The attribute to adjust.
+ */
+export function workaroundYoutubeMixedContent(
+    elem: HTMLElement,
+    attr: string
+): void {
+    const elem_attr = elem.getAttribute(attr);
+    const window_config = window.RufflePlayer?.config ?? {};
+    if (elem_attr) {
+        try {
+            const url = new URL(elem_attr);
+            if (
+                url.protocol === "http:" &&
+                window.location.protocol === "https:" &&
+                window_config.upgradeToHttps !== false
+            ) {
+                url.protocol = "https:";
+                elem.setAttribute(attr, url.toString());
+            }
+        } catch (err) {
+            // Some invalid filenames, like `///`, could raise a TypeError. Let's fail silently in this situation.
+        }
+    }
 }
 
 /**

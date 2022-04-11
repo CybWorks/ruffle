@@ -1,10 +1,8 @@
-use crate::avm1::{
-    Error as Avm1Error, Object as Avm1Object, TObject as Avm1TObject, Value as Avm1Value,
-};
+use crate::avm1::{Object as Avm1Object, TObject as Avm1TObject, Value as Avm1Value};
 use crate::avm2::{
     Activation as Avm2Activation, Avm2, Error as Avm2Error, Event as Avm2Event,
-    Namespace as Avm2Namespace, Object as Avm2Object, QName as Avm2QName, TObject as Avm2TObject,
-    Value as Avm2Value,
+    EventData as Avm2EventData, Namespace as Avm2Namespace, Object as Avm2Object,
+    QName as Avm2QName, TObject as Avm2TObject, Value as Avm2Value,
 };
 use crate::context::{RenderContext, UpdateContext};
 use crate::drawing::Drawing;
@@ -37,7 +35,6 @@ mod text;
 mod video;
 
 use crate::avm1::activation::Activation;
-use crate::backend::ui::MouseCursor;
 pub use crate::display_object::container::{
     DisplayObjectContainer, Lists, TDisplayObjectContainer,
 };
@@ -579,6 +576,8 @@ pub trait TDisplayObject<'gc>:
             // mode and alignment transform, but the AS APIs expect "global" to be relative to the
             // Stage, not final view coordinates.
             // I suspect we want this to include the stage transform eventually.
+            // NOTE: If we do, make sure to remove the override of this
+            // function on `Stage`.
             if display_object.as_stage().is_some() {
                 break;
             }
@@ -1027,7 +1026,7 @@ pub trait TDisplayObject<'gc>:
     /// Emit an `enterFrame` event on this DisplayObject and any children it
     /// may have.
     fn enter_frame(&self, context: &mut UpdateContext<'_, 'gc, '_>) {
-        let mut enter_frame_evt = Avm2Event::new("enterFrame");
+        let mut enter_frame_evt = Avm2Event::new("enterFrame", Avm2EventData::Empty);
         enter_frame_evt.set_bubbles(false);
         enter_frame_evt.set_cancelable(false);
 
@@ -1073,7 +1072,7 @@ pub trait TDisplayObject<'gc>:
     /// Emit a `frameConstructed` event on this DisplayObject and any children it
     /// may have.
     fn frame_constructed(&self, context: &mut UpdateContext<'_, 'gc, '_>) {
-        let mut frame_constructed_evt = Avm2Event::new("frameConstructed");
+        let mut frame_constructed_evt = Avm2Event::new("frameConstructed", Avm2EventData::Empty);
         frame_constructed_evt.set_bubbles(false);
         frame_constructed_evt.set_cancelable(false);
 
@@ -1098,7 +1097,7 @@ pub trait TDisplayObject<'gc>:
 
     /// Emit an `exitFrame` broadcast event.
     fn exit_frame(&self, context: &mut UpdateContext<'_, 'gc, '_>) {
-        let mut exit_frame_evt = Avm2Event::new("exitFrame");
+        let mut exit_frame_evt = Avm2Event::new("exitFrame", Avm2EventData::Empty);
         exit_frame_evt.set_bubbles(false);
         exit_frame_evt.set_cancelable(false);
 
@@ -1279,20 +1278,9 @@ pub trait TDisplayObject<'gc>:
         self.hit_test_bounds(pos)
     }
 
-    #[allow(unused_variables)]
-    fn mouse_pick(
-        &self,
-        context: &mut UpdateContext<'_, 'gc, '_>,
-        pos: (Twips, Twips),
-        require_button_mode: bool,
-    ) -> Option<DisplayObject<'gc>> {
-        None
-    }
-
     fn post_instantiation(
         &self,
         context: &mut UpdateContext<'_, 'gc, '_>,
-        _display_object: DisplayObject<'gc>,
         _init_object: Option<Avm1Object<'gc>>,
         _instantiated_by: Instantiator,
         run_frame: bool,
@@ -1324,60 +1312,22 @@ pub trait TDisplayObject<'gc>:
         true
     }
 
-    /// The cursor to use when this object is the hovered element under a mouse.
-    fn mouse_cursor(&self) -> MouseCursor {
-        MouseCursor::Hand
-    }
-
-    /// Obtain the top-most non-Stage parent of the display tree hierarchy, if
-    /// a suitable object exists. If none such object exists, this function
-    /// yields an AVM1 error (which shouldn't happen in normal usage).
+    /// Obtain the top-most non-Stage parent of the display tree hierarchy.
     ///
     /// This function implements the AVM1 concept of root clips. For the AVM2
     /// version, see `avm2_root`.
-    fn avm1_root(
-        &self,
-        context: &UpdateContext<'_, 'gc, '_>,
-    ) -> Result<DisplayObject<'gc>, Avm1Error<'gc>> {
-        let mut parent = if self.lock_root() {
-            None
-        } else {
-            self.avm1_parent()
-        };
-
-        while let Some(p) = parent {
-            if p.lock_root() {
+    fn avm1_root(&self) -> DisplayObject<'gc> {
+        let mut root = (*self).into();
+        loop {
+            if root.lock_root() {
                 break;
             }
-
-            let grandparent = p.avm1_parent();
-
-            if grandparent.is_none() {
-                break;
-            }
-
-            parent = grandparent;
+            root = match root.avm1_parent() {
+                Some(parent) => parent,
+                None => break,
+            };
         }
-
-        parent
-            .ok_or(Avm1Error::InvalidDisplayObjectHierarchy)
-            .or_else(|_| {
-                if let Avm1Value::Object(object) = self.object() {
-                    object
-                        .as_display_object()
-                        .ok_or(Avm1Error::InvalidDisplayObjectHierarchy)
-                } else if let Avm2Value::Object(object) = self.object2() {
-                    if self.is_on_stage(context) {
-                        object
-                            .as_display_object()
-                            .ok_or(Avm1Error::InvalidDisplayObjectHierarchy)
-                    } else {
-                        Err(Avm1Error::InvalidDisplayObjectHierarchy)
-                    }
-                } else {
-                    Err(Avm1Error::InvalidDisplayObjectHierarchy)
-                }
-            })
+        root
     }
 
     /// Obtain the top-most non-Stage parent of the display tree hierarchy, if

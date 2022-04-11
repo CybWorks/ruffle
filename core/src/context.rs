@@ -7,7 +7,6 @@ use crate::avm2::{
 };
 use crate::backend::{
     audio::{AudioBackend, AudioManager, SoundHandle, SoundInstanceHandle},
-    locale::LocaleBackend,
     log::LogBackend,
     navigator::NavigatorBackend,
     render::RenderBackend,
@@ -16,7 +15,7 @@ use crate::backend::{
     video::VideoBackend,
 };
 use crate::context_menu::ContextMenuState;
-use crate::display_object::{EditText, MovieClip, SoundTransform, Stage};
+use crate::display_object::{EditText, InteractiveObject, MovieClip, SoundTransform, Stage};
 use crate::external::ExternalInterface;
 use crate::focus_tracker::FocusTracker;
 use crate::library::Library;
@@ -80,9 +79,6 @@ pub struct UpdateContext<'a, 'gc, 'gc_context> {
     /// The storage backend, used for storing persistent state
     pub storage: &'a mut dyn StorageBackend,
 
-    /// The locale backend, used for localisation and personalisation
-    pub locale: &'a mut dyn LocaleBackend,
-
     /// The logging backend, used for trace output capturing.
     ///
     /// **DO NOT** use this field directly, use the `avm_trace` method instead.
@@ -98,10 +94,10 @@ pub struct UpdateContext<'a, 'gc, 'gc_context> {
     pub stage: Stage<'gc>,
 
     /// The display object that the mouse is currently hovering over.
-    pub mouse_over_object: Option<DisplayObject<'gc>>,
+    pub mouse_over_object: Option<InteractiveObject<'gc>>,
 
     /// If the mouse is down, the display object that the mouse is currently pressing.
-    pub mouse_down_object: Option<DisplayObject<'gc>>,
+    pub mouse_down_object: Option<InteractiveObject<'gc>>,
 
     /// The input manager, tracking keys state.
     pub input: &'a InputManager,
@@ -149,6 +145,9 @@ pub struct UpdateContext<'a, 'gc, 'gc_context> {
 
     /// External interface for (for example) JavaScript <-> ActionScript interaction
     pub external_interface: &'a mut ExternalInterface<'gc>,
+
+    /// The instant at which the SWF was launched.
+    pub start_time: Instant,
 
     /// The instant at which the current update started.
     pub update_start: Instant,
@@ -243,6 +242,10 @@ impl<'a, 'gc, 'gc_context> UpdateContext<'a, 'gc, 'gc_context> {
         self.audio_manager.stop_all_sounds(self.audio)
     }
 
+    pub fn is_sound_playing(&mut self, sound: SoundInstanceHandle) -> bool {
+        self.audio_manager.is_sound_playing(sound)
+    }
+
     pub fn is_sound_playing_with_handle(&mut self, sound: SoundHandle) -> bool {
         self.audio_manager.is_sound_playing_with_handle(sound)
     }
@@ -293,7 +296,6 @@ impl<'a, 'gc, 'gc_context> UpdateContext<'a, 'gc, 'gc_context> {
             audio_manager: self.audio_manager,
             navigator: self.navigator,
             renderer: self.renderer,
-            locale: self.locale,
             log: self.log,
             ui: self.ui,
             video: self.video,
@@ -316,6 +318,7 @@ impl<'a, 'gc, 'gc_context> UpdateContext<'a, 'gc, 'gc_context> {
             avm1: self.avm1,
             avm2: self.avm2,
             external_interface: self.external_interface,
+            start_time: self.start_time,
             update_start: self.update_start,
             max_execution_duration: self.max_execution_duration,
             focus_tracker: self.focus_tracker,

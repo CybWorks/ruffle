@@ -1,8 +1,4 @@
-#![allow(
-    renamed_and_removed_lints,
-    clippy::unknown_clippy_lints,
-    clippy::suspicious_operation_groupings
-)]
+#![allow(clippy::suspicious_operation_groupings)]
 
 use swf::{Fixed16, Twips};
 
@@ -166,7 +162,7 @@ impl std::ops::Mul<(Twips, Twips)> for Matrix {
     }
 }
 
-impl std::default::Default for Matrix {
+impl Default for Matrix {
     fn default() -> Matrix {
         Matrix::IDENTITY
     }
@@ -191,7 +187,6 @@ impl std::ops::MulAssign for Matrix {
 }
 
 #[cfg(test)]
-#[allow(clippy::if_then_panic)] // TODO: Remove when https://github.com/brendanzab/approx/pull/72 is merged.
 mod tests {
     use super::*;
     use approx::{assert_ulps_eq, AbsDiffEq, UlpsEq};

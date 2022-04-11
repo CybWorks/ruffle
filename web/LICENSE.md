@@ -549,7 +549,7 @@ Ruffle depends on third-party libraries with compatible licenses.
 | [strsim](https://github.com/dguo/strsim-rs) | [MIT](#MIT) | Copyright (c) 2015 Danny Guo Copyright (c) 2016 Titus Wormer <tituswormer@gmail.com>  | 
 | [strsim](https://github.com/dguo/strsim-rs) | [MIT](#MIT) | Copyright (c) 2015 Danny Guo Copyright (c) 2016 Titus Wormer <tituswormer@gmail.com> Copyright (c) 2018 Akash Kurdekar  | 
 | [svg](https://github.com/bodoni/svg) | [Apache-2.0](#Apache-20)/[MIT](#MIT) | Copyright 2015–2021 The svg Developers Copyright 2015–2021 The svg Developers  | 
-| [swf](https://github.com/ruffle-rs/ruffle) | [Apache-2.0](#Apache-20)/[MIT](#MIT) | Copyright (c) 2018 Mike Welsh <mwelsh@gmail.com>  | 
+| [swf](https://github.com/ruffle-rs/ruffle) | [Apache-2.0](#Apache-20)/[MIT](#MIT) | Copyright (c) 2018 Ruffle LLC <ruffle@ruffle.rs> and Ruffle contributors  | 
 | [syn](https://github.com/dtolnay/syn) | [Apache-2.0](#Apache-20)/[MIT](#MIT) | Copyright (c) David Tolnay <dtolnay@gmail.com> | 
 | [synstructure](https://github.com/mystor/synstructure) | [MIT](#MIT) | Copyright 2016 Nika Layzell  | 
 | [tar](https://github.com/alexcrichton/tar-rs) | [Apache-2.0](#Apache-20)/[MIT](#MIT) | Copyright (c) 2014 Alex Crichton  | 
@@ -564,7 +564,6 @@ Ruffle depends on third-party libraries with compatible licenses.
 | [time](https://github.com/time-rs/time) | [Apache-2.0](#Apache-20)/[MIT](#MIT) | Copyright (c) 2019 Jacob Pratt  | 
 | [time-macros](https://github.com/time-rs/time) | [Apache-2.0](#Apache-20)/[MIT](#MIT) | Copyright (c) 2019 Jacob Pratt  | 
 | [time-macros-impl](https://github.com/time-rs/time) | [Apache-2.0](#Apache-20)/[MIT](#MIT) | Copyright (c) 2019 Jacob Pratt  | 
-| [tinyfiledialogs](https://github.com/jdm/tinyfiledialogs-rs) | zlib-acknowledgement | Copyright (c) Guillaume Vareille <vareille@users.sourceforge.net>, Josh Matthews <josh@joshmatthews.net> | 
 | [tinyvec](https://github.com/Lokathor/tinyvec) | [Apache-2.0](#Apache-20)/[MIT](#MIT)/[Zlib](#Zlib) | Copyright (c) Lokathor <zefria@gmail.com> | 
 | [tinyvec_macros](https://github.com/Soveu/tinyvec_macros) | [Apache-2.0](#Apache-20)/[MIT](#MIT)/[Zlib](#Zlib) | Copyright (c) 2020 Soveu  | 
 | [toml](https://github.com/alexcrichton/toml-rs) | [Apache-2.0](#Apache-20)/[MIT](#MIT) | Copyright (c) 2014 Alex Crichton  | 

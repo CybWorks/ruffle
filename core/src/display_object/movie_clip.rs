@@ -25,7 +25,7 @@ use crate::display_object::interactive::{
 };
 use crate::display_object::{
     Avm1Button, Avm2Button, Bitmap, DisplayObjectBase, DisplayObjectPtr, EditText, Graphic,
-    MorphShapeStatic, TDisplayObject, Text, Video,
+    MorphShape, TDisplayObject, Text, Video,
 };
 use crate::drawing::Drawing;
 use crate::events::{ButtonKeyCode, ClipEvent, ClipEventResult};
@@ -87,7 +87,13 @@ pub struct MovieClipData<'gc> {
     is_focusable: bool,
     has_focus: bool,
     enabled: bool,
+
+    /// Show a hand cursor when the clip is in button mode.
     use_hand_cursor: bool,
+
+    /// Force enable button mode, which causes all mouse-related events to
+    /// trigger on this clip rather than any input-eligible children.
+    button_mode: bool,
     last_queued_script_frame: Option<FrameNumber>,
     queued_script_frame: Option<FrameNumber>,
     queued_goto_frame: Option<FrameNumber>,
@@ -116,6 +122,7 @@ impl<'gc> MovieClip<'gc> {
                 has_focus: false,
                 enabled: true,
                 use_hand_cursor: true,
+                button_mode: false,
                 last_queued_script_frame: None,
                 queued_script_frame: None,
                 queued_goto_frame: None,
@@ -150,6 +157,7 @@ impl<'gc> MovieClip<'gc> {
                 has_focus: false,
                 enabled: true,
                 use_hand_cursor: true,
+                button_mode: false,
                 last_queued_script_frame: None,
                 queued_script_frame: None,
                 queued_goto_frame: None,
@@ -187,6 +195,7 @@ impl<'gc> MovieClip<'gc> {
                 has_focus: false,
                 enabled: true,
                 use_hand_cursor: true,
+                button_mode: false,
                 last_queued_script_frame: None,
                 queued_script_frame: None,
                 queued_goto_frame: None,
@@ -221,6 +230,7 @@ impl<'gc> MovieClip<'gc> {
                 has_focus: false,
                 enabled: true,
                 use_hand_cursor: true,
+                button_mode: false,
                 last_queued_script_frame: None,
                 queued_script_frame: None,
                 queued_goto_frame: None,
@@ -246,11 +256,7 @@ impl<'gc> MovieClip<'gc> {
             .replace_with_movie(gc_context, movie)
     }
 
-    pub fn preload(
-        self,
-        context: &mut UpdateContext<'_, 'gc, '_>,
-        morph_shapes: &mut fnv::FnvHashMap<CharacterId, MorphShapeStatic>,
-    ) {
+    pub fn preload(self, context: &mut UpdateContext<'_, 'gc, '_>) {
         use swf::TagCode;
         // TODO: Re-creating static data because preload step occurs after construction.
         // Should be able to hoist this up somewhere, or use MaybeUninit.
@@ -258,7 +264,6 @@ impl<'gc> MovieClip<'gc> {
         let data = self.0.read().static_data.swf.clone();
         let mut reader = data.read_from(0);
         let mut cur_frame = 1;
-        let mut ids = fnv::FnvHashMap::default();
         let mut preload_stream_handle = None;
         let tag_callback = |reader: &mut SwfStream<'_>, tag_code, tag_len| match tag_code {
             TagCode::CsmTextSettings => self
@@ -325,18 +330,14 @@ impl<'gc> MovieClip<'gc> {
                 .0
                 .write(context.gc_context)
                 .define_font_4(context, reader),
-            TagCode::DefineMorphShape => self.0.write(context.gc_context).define_morph_shape(
-                context,
-                reader,
-                morph_shapes,
-                1,
-            ),
-            TagCode::DefineMorphShape2 => self.0.write(context.gc_context).define_morph_shape(
-                context,
-                reader,
-                morph_shapes,
-                2,
-            ),
+            TagCode::DefineMorphShape => self
+                .0
+                .write(context.gc_context)
+                .define_morph_shape(context, reader, 1),
+            TagCode::DefineMorphShape2 => self
+                .0
+                .write(context.gc_context)
+                .define_morph_shape(context, reader, 2),
             TagCode::DefineShape => self
                 .0
                 .write(context.gc_context)
@@ -361,12 +362,10 @@ impl<'gc> MovieClip<'gc> {
                 .0
                 .write(context.gc_context)
                 .define_video_stream(context, reader),
-            TagCode::DefineSprite => self.0.write(context.gc_context).define_sprite(
-                context,
-                reader,
-                tag_len,
-                morph_shapes,
-            ),
+            TagCode::DefineSprite => self
+                .0
+                .write(context.gc_context)
+                .define_sprite(context, reader, tag_len),
             TagCode::DefineText => self
                 .0
                 .write(context.gc_context)
@@ -396,46 +395,6 @@ impl<'gc> MovieClip<'gc> {
                 .0
                 .write(context.gc_context)
                 .jpeg_tables(context, reader, tag_len),
-            TagCode::PlaceObject => self.0.write(context.gc_context).preload_place_object(
-                context,
-                reader,
-                tag_len,
-                &mut ids,
-                morph_shapes,
-                1,
-            ),
-            TagCode::PlaceObject2 => self.0.write(context.gc_context).preload_place_object(
-                context,
-                reader,
-                tag_len,
-                &mut ids,
-                morph_shapes,
-                2,
-            ),
-            TagCode::PlaceObject3 => self.0.write(context.gc_context).preload_place_object(
-                context,
-                reader,
-                tag_len,
-                &mut ids,
-                morph_shapes,
-                3,
-            ),
-            TagCode::PlaceObject4 => self.0.write(context.gc_context).preload_place_object(
-                context,
-                reader,
-                tag_len,
-                &mut ids,
-                morph_shapes,
-                4,
-            ),
-            TagCode::RemoveObject => self
-                .0
-                .write(context.gc_context)
-                .preload_remove_object(context, reader, &mut ids, 1),
-            TagCode::RemoveObject2 => self
-                .0
-                .write(context.gc_context)
-                .preload_remove_object(context, reader, &mut ids, 2),
             TagCode::ShowFrame => {
                 self.0
                     .write(context.gc_context)
@@ -1095,7 +1054,6 @@ impl<'gc> MovieClip<'gc> {
         let tag_stream_start = mc.static_data.swf.as_ref().as_ptr() as u64;
         let data = mc.static_data.swf.clone();
         let mut reader = data.read_from(mc.tag_stream_pos);
-        let mut has_stream_block = false;
         drop(mc);
 
         let vm_type = context.avm_type();
@@ -1119,24 +1077,23 @@ impl<'gc> MovieClip<'gc> {
             TagCode::RemoveObject2 if run_display_actions => self.remove_object(context, reader, 2),
             TagCode::SetBackgroundColor => self.set_background_color(context, reader),
             TagCode::StartSound => self.start_sound_1(context, reader),
-            TagCode::SoundStreamBlock => {
-                has_stream_block = true;
-                self.sound_stream_block(context, reader)
-            }
+            TagCode::SoundStreamBlock => self.sound_stream_block(context, reader),
             _ => Ok(()),
         };
         let _ = tag_utils::decode_tags(&mut reader, tag_callback, TagCode::ShowFrame);
 
-        self.0.write(context.gc_context).tag_stream_pos =
-            reader.get_ref().as_ptr() as u64 - tag_stream_start;
+        let mut write = self.0.write(context.gc_context);
+        write.tag_stream_pos = reader.get_ref().as_ptr() as u64 - tag_stream_start;
 
-        // If we are playing a streaming sound, there should(?) be a `SoundStreamBlock` on each frame.
-        if !has_stream_block {
-            self.0.write(context.gc_context).stop_audio_stream(context);
+        // Check if our audio track has finished playing.
+        if let Some(audio_stream) = write.audio_stream {
+            if !context.is_sound_playing(audio_stream) {
+                write.audio_stream = None;
+            }
         }
 
-        let frame_id = self.0.read().current_frame;
-        self.0.write(context.gc_context).queued_script_frame = Some(frame_id);
+        let frame_id = write.current_frame;
+        write.queued_script_frame = Some(frame_id);
     }
 
     /// Instantiate a given child object on the timeline at a given depth.
@@ -1170,7 +1127,7 @@ impl<'gc> MovieClip<'gc> {
                     // Run first frame.
                     child.apply_place_object(context, self.movie(), place_object);
                     child.construct_frame(context);
-                    child.post_instantiation(context, child, None, Instantiator::Movie, false);
+                    child.post_instantiation(context, None, Instantiator::Movie, false);
                     // In AVM1, children are added in `run_frame` so this is necessary.
                     // In AVM2 we add them in `construct_frame` so calling this causes
                     // duplicate frames
@@ -1415,7 +1372,6 @@ impl<'gc> MovieClip<'gc> {
     fn construct_as_avm1_object(
         self,
         context: &mut UpdateContext<'_, 'gc, '_>,
-        display_object: DisplayObject<'gc>,
         init_object: Option<Avm1Object<'gc>>,
         instantiated_by: Instantiator,
         run_frame: bool,
@@ -1468,7 +1424,7 @@ impl<'gc> MovieClip<'gc> {
 
             let object: Avm1Object<'gc> = StageObject::for_display_object(
                 context.gc_context,
-                display_object,
+                self.into(),
                 Some(context.avm1.prototypes().movie_clip),
             )
             .into();
@@ -1504,7 +1460,7 @@ impl<'gc> MovieClip<'gc> {
             {
                 if event_handler.events.contains(ClipEventFlag::INITIALIZE) {
                     context.action_queue.queue_actions(
-                        display_object,
+                        self.into(),
                         ActionType::Initialize {
                             bytecode: event_handler.action_data.clone(),
                         },
@@ -1517,7 +1473,7 @@ impl<'gc> MovieClip<'gc> {
             }
 
             context.action_queue.queue_actions(
-                display_object,
+                self.into(),
                 ActionType::Construct {
                     constructor: avm1_constructor,
                     events,
@@ -1678,12 +1634,25 @@ impl<'gc> MovieClip<'gc> {
         self.0.read().tag_stream_len()
     }
 
+    pub fn forced_button_mode(self) -> bool {
+        self.0.read().button_mode
+    }
+
+    pub fn set_forced_button_mode(
+        self,
+        context: &mut UpdateContext<'_, 'gc, '_>,
+        button_mode: bool,
+    ) {
+        self.0.write(context.gc_context).button_mode = button_mode;
+    }
+
     pub fn is_button_mode(&self, context: &mut UpdateContext<'_, 'gc, '_>) -> bool {
-        if self
-            .0
-            .read()
-            .clip_event_flags
-            .intersects(ClipEvent::BUTTON_EVENT_FLAGS)
+        if self.forced_button_mode()
+            || self
+                .0
+                .read()
+                .clip_event_flags
+                .intersects(ClipEvent::BUTTON_EVENT_FLAGS)
         {
             true
         } else {
@@ -1774,10 +1743,7 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
 
     fn run_frame(&self, context: &mut UpdateContext<'_, 'gc, '_>) {
         // Run my load/enterFrame clip event.
-        let mc = self.0.write(context.gc_context);
-        let is_load_frame = !mc.initialized();
-        drop(mc);
-
+        let is_load_frame = !self.0.read().initialized();
         if is_load_frame {
             self.event_dispatch(context, ClipEvent::Load);
             self.0.write(context.gc_context).set_initialized(true);
@@ -1788,14 +1754,6 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
         // Run my SWF tags.
         if self.playing() {
             self.run_frame_internal(context, true);
-        }
-
-        if is_load_frame {
-            self.0.write(context.gc_context).run_clip_postevent(
-                (*self).into(),
-                context,
-                ClipEvent::Load,
-            );
         }
     }
 
@@ -1915,82 +1873,6 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
         false
     }
 
-    fn mouse_pick(
-        &self,
-        context: &mut UpdateContext<'_, 'gc, '_>,
-        point: (Twips, Twips),
-        require_button_mode: bool,
-    ) -> Option<DisplayObject<'gc>> {
-        if self.visible() {
-            let this: DisplayObject<'gc> = (*self).into();
-
-            if let Some(masker) = self.masker() {
-                if !masker.hit_test_shape(context, point, HitTestOptions::SKIP_INVISIBLE) {
-                    return None;
-                }
-            }
-
-            if self.world_bounds().contains(point) {
-                // This MovieClip operates in "button mode" if it has a mouse handler,
-                // either via on(..) or via property mc.onRelease, etc.
-                let is_button_mode = self.is_button_mode(context);
-
-                if is_button_mode {
-                    let mut options = HitTestOptions::SKIP_INVISIBLE;
-                    options.set(HitTestOptions::SKIP_MASK, self.maskee().is_none());
-                    if self.hit_test_shape(context, point, options) {
-                        return Some(this);
-                    }
-                }
-            }
-
-            // Maybe we could skip recursing down at all if !world_bounds.contains(point),
-            // but a child button can have an invisible hit area outside the parent's bounds.
-            let mut hit_depth = 0;
-            let mut result = None;
-
-            for child in self.iter_render_list().rev() {
-                if child.clip_depth() > 0 {
-                    if result.is_some() && child.clip_depth() >= hit_depth {
-                        if child.hit_test_shape(context, point, HitTestOptions::MOUSE_PICK) {
-                            return result;
-                        } else {
-                            result = None;
-                        }
-                    }
-                } else if result.is_none() {
-                    result = child.mouse_pick(context, point, require_button_mode);
-
-                    if result.is_some() {
-                        hit_depth = child.depth();
-                    }
-                }
-            }
-
-            if result.is_some() {
-                return result;
-            }
-
-            if !require_button_mode {
-                let mut options = HitTestOptions::SKIP_INVISIBLE;
-                options.set(HitTestOptions::SKIP_MASK, self.maskee().is_none());
-                if self.hit_test_shape(context, point, options) {
-                    return Some(this);
-                }
-            }
-        }
-
-        None
-    }
-
-    fn mouse_cursor(&self) -> MouseCursor {
-        if self.use_hand_cursor() {
-            MouseCursor::Hand
-        } else {
-            MouseCursor::Arrow
-        }
-    }
-
     fn as_movie_clip(&self) -> Option<MovieClip<'gc>> {
         Some(*self)
     }
@@ -2010,7 +1892,6 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
     fn post_instantiation(
         &self,
         context: &mut UpdateContext<'_, 'gc, '_>,
-        display_object: DisplayObject<'gc>,
         init_object: Option<Avm1Object<'gc>>,
         instantiated_by: Instantiator,
         run_frame: bool,
@@ -2022,13 +1903,7 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
                 .avm1
                 .add_to_exec_list(context.gc_context, (*self).into());
 
-            self.construct_as_avm1_object(
-                context,
-                display_object,
-                init_object,
-                instantiated_by,
-                run_frame,
-            );
+            self.construct_as_avm1_object(context, init_object, instantiated_by, run_frame);
         }
     }
 
@@ -2117,7 +1992,8 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
     }
 
     fn filter_clip_event(self, event: ClipEvent) -> ClipEventResult {
-        if event.is_button_event() && !self.visible() {
+        if event.is_button_event() && !self.visible() && !matches!(event, ClipEvent::ReleaseOutside)
+        {
             return ClipEventResult::NotHandled;
         }
 
@@ -2134,14 +2010,14 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
     fn event_dispatch(
         self,
         context: &mut UpdateContext<'_, 'gc, '_>,
-        event: ClipEvent,
+        event: ClipEvent<'gc>,
     ) -> ClipEventResult {
         let frame_name = match event {
-            ClipEvent::RollOut | ClipEvent::ReleaseOutside => Some(WStr::from_units(b"_up")),
-            ClipEvent::RollOver | ClipEvent::Release | ClipEvent::DragOut => {
+            ClipEvent::RollOut { .. } | ClipEvent::ReleaseOutside => Some(WStr::from_units(b"_up")),
+            ClipEvent::RollOver { .. } | ClipEvent::Release | ClipEvent::DragOut { .. } => {
                 Some(WStr::from_units(b"_over"))
             }
-            ClipEvent::Press | ClipEvent::DragOver => Some(WStr::from_units(b"_down")),
+            ClipEvent::Press | ClipEvent::DragOver { .. } => Some(WStr::from_units(b"_down")),
             _ => None,
         };
 
@@ -2158,27 +2034,30 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
         if let Some(AvmObject::Avm1(object)) = read.object {
             let swf_version = read.movie().version();
             if swf_version >= 5 {
-                for event_handler in read
-                    .clip_event_handlers
-                    .iter()
-                    .filter(|handler| handler.events.contains(event.flag()))
-                {
-                    // KeyPress event must have matching key code.
-                    if let ClipEvent::KeyPress { key_code } = event {
-                        if key_code == event_handler.key_code {
-                            // KeyPress events are consumed by a single instance.
-                            handled = ClipEventResult::Handled;
-                        } else {
-                            continue;
+                if let Some(flag) = event.flag() {
+                    for event_handler in read
+                        .clip_event_handlers
+                        .iter()
+                        .filter(|handler| handler.events.contains(flag))
+                    {
+                        // KeyPress event must have matching key code.
+                        if let ClipEvent::KeyPress { key_code } = event {
+                            if key_code == event_handler.key_code {
+                                // KeyPress events are consumed by a single instance.
+                                handled = ClipEventResult::Handled;
+                            } else {
+                                continue;
+                            }
                         }
+
+                        context.action_queue.queue_actions(
+                            self.into(),
+                            ActionType::Normal {
+                                bytecode: event_handler.action_data.clone(),
+                            },
+                            event == ClipEvent::Unload,
+                        );
                     }
-                    context.action_queue.queue_actions(
-                        self.into(),
-                        ActionType::Normal {
-                            bytecode: event_handler.action_data.clone(),
-                        },
-                        event == ClipEvent::Unload,
-                    );
                 }
 
                 // Queue ActionScript-defined event handlers after the SWF defined ones.
@@ -2200,9 +2079,92 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
                     }
                 }
             }
+        } else {
+            drop(read);
+            handled = self.event_dispatch_to_avm2(context, event);
         }
 
         handled
+    }
+
+    fn mouse_pick(
+        &self,
+        context: &mut UpdateContext<'_, 'gc, '_>,
+        point: (Twips, Twips),
+        require_button_mode: bool,
+    ) -> Option<InteractiveObject<'gc>> {
+        if self.visible() && self.mouse_enabled() {
+            let this: InteractiveObject<'gc> = (*self).into();
+
+            if let Some(masker) = self.masker() {
+                if !masker.hit_test_shape(context, point, HitTestOptions::SKIP_INVISIBLE) {
+                    return None;
+                }
+            }
+
+            if self.world_bounds().contains(point) {
+                // This MovieClip operates in "button mode" if it has a mouse handler,
+                // either via on(..) or via property mc.onRelease, etc.
+                let is_button_mode = self.is_button_mode(context);
+
+                if is_button_mode {
+                    let mut options = HitTestOptions::SKIP_INVISIBLE;
+                    options.set(HitTestOptions::SKIP_MASK, self.maskee().is_none());
+                    if self.hit_test_shape(context, point, options) {
+                        return Some(this);
+                    }
+                }
+            }
+
+            // Maybe we could skip recursing down at all if !world_bounds.contains(point),
+            // but a child button can have an invisible hit area outside the parent's bounds.
+            let mut hit_depth = 0;
+            let mut result = None;
+
+            for child in self.iter_render_list().rev() {
+                if child.clip_depth() > 0 {
+                    if result.is_some() && child.clip_depth() >= hit_depth {
+                        if child.hit_test_shape(context, point, HitTestOptions::MOUSE_PICK) {
+                            return result;
+                        } else {
+                            result = None;
+                        }
+                    }
+                } else if result.is_none() {
+                    result = child
+                        .as_interactive()
+                        .and_then(|c| c.mouse_pick(context, point, require_button_mode));
+
+                    if result.is_some() {
+                        hit_depth = child.depth();
+                    }
+                }
+            }
+
+            if result.is_some() {
+                return result;
+            }
+
+            // AVM2 allows movie clips to recieve mouse events without
+            // explicitly enabling button mode.
+            if !require_button_mode || matches!(self.object2(), Avm2Value::Object(_)) {
+                let mut options = HitTestOptions::SKIP_INVISIBLE;
+                options.set(HitTestOptions::SKIP_MASK, self.maskee().is_none());
+                if self.hit_test_shape(context, point, options) {
+                    return Some(this);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn mouse_cursor(self, context: &mut UpdateContext<'_, 'gc, '_>) -> MouseCursor {
+        if self.use_hand_cursor() && self.enabled() && self.is_button_mode(context) {
+            MouseCursor::Hand
+        } else {
+            MouseCursor::Arrow
+        }
     }
 }
 
@@ -2311,32 +2273,6 @@ impl<'gc> MovieClipData<'gc> {
         Ok(())
     }
 
-    /// Run clip actions that trigger after the clip's own actions.
-    ///
-    /// Currently, this is purely limited to `MovieClipLoader`'s `onLoadInit`
-    /// event, delivered via the `LoadManager`. We need to be called here so
-    /// that external init code runs after the event.
-    ///
-    /// TODO: If it turns out other `Load` events need to be delayed, perhaps
-    /// we should change which frame triggers a `Load` event, rather than
-    /// making sure our actions run after the clip's.
-    fn run_clip_postevent(
-        &self,
-        self_display_object: DisplayObject<'gc>,
-        context: &mut UpdateContext<'_, 'gc, '_>,
-        event: ClipEvent,
-    ) {
-        // Finally, queue any loaders that may be waiting for this event.
-        if let ClipEvent::Load = event {
-            context.load_manager.movie_clip_on_load(
-                self_display_object,
-                //TODO: This should have an AVM2 onload path.
-                self.object.and_then(|o| o.as_avm1_object().ok()),
-                context.action_queue,
-            );
-        }
-    }
-
     pub fn clip_event_handlers(&self) -> &[ClipEventHandler] {
         &self.clip_event_handlers
     }
@@ -2376,10 +2312,10 @@ impl<'gc> MovieClipData<'gc> {
     ) -> Option<Avm1Object<'gc>> {
         let symbol_name = self.static_data.exported_name.read();
         let symbol_name = symbol_name.as_ref()?;
-        let library = context.library.library_for_movie_mut(self.movie());
-        let registry = library.avm1_constructor_registry()?;
-        let ctor = registry.get(*symbol_name)?;
-        Some(Avm1Object::FunctionObject(ctor))
+        let constructor = context
+            .avm1
+            .get_registered_constructor(self.movie().version(), *symbol_name)?;
+        Some((*constructor).into())
     }
 
     pub fn movie(&self) -> Arc<SwfMovie> {
@@ -2419,13 +2355,16 @@ impl<'gc, 'a> MovieClipData<'gc> {
         &mut self,
         context: &mut UpdateContext<'_, 'gc, '_>,
         reader: &mut SwfStream<'a>,
-        morph_shapes: &mut fnv::FnvHashMap<CharacterId, MorphShapeStatic>,
         version: u8,
     ) -> DecodeResult {
-        // Certain backends may have to preload morph shape frames, so defer registering until the end.
-        let swf_shape = reader.read_define_morph_shape(version)?;
-        let morph_shape = MorphShapeStatic::from_swf_tag(context, &swf_shape, self.movie());
-        morph_shapes.insert(swf_shape.id, morph_shape);
+        let movie = self.movie();
+        let tag = reader.read_define_morph_shape(version)?;
+        let id = tag.id;
+        let morph_shape = MorphShape::from_swf_tag(context.gc_context, tag, movie.clone());
+        context
+            .library
+            .library_for_movie_mut(movie)
+            .register_character(id, Character::MorphShape(morph_shape));
         Ok(())
     }
 
@@ -2444,56 +2383,6 @@ impl<'gc, 'a> MovieClipData<'gc> {
             .library
             .library_for_movie_mut(self.movie())
             .register_character(id, Character::Graphic(graphic));
-        Ok(())
-    }
-
-    #[inline]
-    fn preload_place_object(
-        &mut self,
-        context: &mut UpdateContext<'_, 'gc, '_>,
-        reader: &mut SwfStream<'a>,
-        tag_len: usize,
-        ids: &mut fnv::FnvHashMap<Depth, CharacterId>,
-        morph_shapes: &mut fnv::FnvHashMap<CharacterId, MorphShapeStatic>,
-        version: u8,
-    ) -> DecodeResult {
-        use swf::PlaceObjectAction;
-        let place_object = if version == 1 {
-            reader.read_place_object(tag_len)
-        } else {
-            reader.read_place_object_2_or_3(version)
-        }?;
-        match place_object.action {
-            PlaceObjectAction::Place(id) => {
-                if let Some(morph_shape) = morph_shapes.get_mut(&id) {
-                    ids.insert(place_object.depth.into(), id);
-                    if let Some(ratio) = place_object.ratio {
-                        morph_shape.register_ratio(context, ratio);
-                    }
-                }
-            }
-            PlaceObjectAction::Modify => {
-                if let Some(&id) = ids.get(&place_object.depth.into()) {
-                    if let Some(morph_shape) = morph_shapes.get_mut(&id) {
-                        ids.insert(place_object.depth.into(), id);
-                        if let Some(ratio) = place_object.ratio {
-                            morph_shape.register_ratio(context, ratio);
-                        }
-                    }
-                }
-            }
-            PlaceObjectAction::Replace(id) => {
-                if let Some(morph_shape) = morph_shapes.get_mut(&id) {
-                    ids.insert(place_object.depth.into(), id);
-                    if let Some(ratio) = place_object.ratio {
-                        morph_shape.register_ratio(context, ratio);
-                    }
-                } else {
-                    ids.remove(&place_object.depth.into());
-                }
-            }
-        };
-
         Ok(())
     }
 
@@ -2829,7 +2718,7 @@ impl<'gc, 'a> MovieClipData<'gc> {
             .map(|g| swf::Glyph {
                 shape_records: g,
                 code: 0,
-                advance: None,
+                advance: 0,
                 bounds: None,
             })
             .collect::<Vec<_>>();
@@ -2842,11 +2731,7 @@ impl<'gc, 'a> MovieClipData<'gc> {
             glyphs,
             language: swf::Language::Unknown,
             layout: None,
-            is_small_text: false,
-            is_shift_jis: false,
-            is_ansi: false,
-            is_bold: false,
-            is_italic: false,
+            flags: swf::FontFlag::empty(),
         };
         let font_object = Font::from_swf_tag(
             context.gc_context,
@@ -2964,7 +2849,6 @@ impl<'gc, 'a> MovieClipData<'gc> {
         context: &mut UpdateContext<'_, 'gc, '_>,
         reader: &mut SwfStream<'a>,
         tag_len: usize,
-        morph_shapes: &mut fnv::FnvHashMap<CharacterId, MorphShapeStatic>,
     ) -> DecodeResult {
         let id = reader.read_character_id()?;
         let num_frames = reader.read_u16()?;
@@ -2983,7 +2867,7 @@ impl<'gc, 'a> MovieClipData<'gc> {
             num_frames,
         );
 
-        movie_clip.preload(context, morph_shapes);
+        movie_clip.preload(context);
 
         context
             .library
@@ -3104,23 +2988,6 @@ impl<'gc, 'a> MovieClipData<'gc> {
             .library
             .library_for_movie_mut(self.movie())
             .set_jpeg_tables(jpeg_data);
-        Ok(())
-    }
-
-    #[inline]
-    fn preload_remove_object(
-        &mut self,
-        _context: &mut UpdateContext<'_, 'gc, '_>,
-        reader: &mut SwfStream<'a>,
-        ids: &mut fnv::FnvHashMap<Depth, CharacterId>,
-        version: u8,
-    ) -> DecodeResult {
-        let remove_object = if version == 1 {
-            reader.read_remove_object_1()
-        } else {
-            reader.read_remove_object_2()
-        }?;
-        ids.remove(&remove_object.depth.into());
         Ok(())
     }
 
@@ -3277,7 +3144,7 @@ impl<'gc, 'a> MovieClip<'gc> {
                 let audio_stream = context.start_stream(
                     mc.static_data.audio_stream_handle,
                     self,
-                    mc.current_frame() + 1,
+                    mc.current_frame(),
                     slice,
                     stream_info,
                 );
@@ -3358,6 +3225,7 @@ impl Default for Scene {
 struct MovieClipStatic<'gc> {
     id: CharacterId,
     swf: SwfSlice,
+    #[collect(require_static)]
     frame_labels: HashMap<WString, FrameNumber>,
     #[collect(require_static)]
     scene_labels: HashMap<WString, Scene>,

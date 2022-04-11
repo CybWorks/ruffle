@@ -1,12 +1,5 @@
-#![allow(
-    renamed_and_removed_lints,
-    clippy::same_item_push,
-    clippy::unknown_clippy_lints
-)]
-
 //! Ruffle web frontend.
 mod audio;
-mod locale;
 mod log_adapter;
 mod navigator;
 mod storage;
@@ -22,7 +15,7 @@ use ruffle_core::backend::{
 };
 use ruffle_core::config::Letterbox;
 use ruffle_core::context::UpdateContext;
-use ruffle_core::events::{KeyCode, MouseWheelDelta};
+use ruffle_core::events::{KeyCode, MouseButton, MouseWheelDelta};
 use ruffle_core::external::{
     ExternalInterfaceMethod, ExternalInterfaceProvider, Value as ExternalValue, Value,
 };
@@ -247,14 +240,9 @@ impl Ruffle {
     ///
     /// This method should only be called once per player.
     pub fn load_data(&mut self, swf_data: Uint8Array, parameters: &JsValue) -> Result<(), JsValue> {
-        let movie = Arc::new({
-            let mut data = vec![0; swf_data.length() as usize];
-            swf_data.copy_to(&mut data[..]);
-            let mut movie = SwfMovie::from_data(&data, None, None)
-                .map_err(|e| format!("Error loading movie: {}", e))?;
-            movie.append_parameters(parse_movie_parameters(parameters));
-            movie
-        });
+        let mut movie = SwfMovie::from_data(&swf_data.to_vec(), None, None)
+            .map_err(|e| format!("Error loading movie: {}", e))?;
+        movie.append_parameters(parse_movie_parameters(parameters));
 
         self.on_metadata(movie.header());
 
@@ -454,6 +442,15 @@ impl Ruffle {
         })
         .unwrap_or_default()
     }
+
+    /// Returns whether the `simd128` target feature was enabled at build time.
+    /// This is intended to discriminate between the two WebAssembly module
+    /// versions, one of which uses WebAssembly extensions, and the other one
+    /// being "vanilla". `simd128` is used as proxy for most extensions, since
+    /// no other WebAssembly target feature is exposed to `cfg!`.
+    pub fn is_wasm_simd_used() -> bool {
+        cfg!(target_feature = "simd128")
+    }
 }
 
 impl Ruffle {
@@ -492,14 +489,12 @@ impl Ruffle {
                 Box::new(MemoryStorageBackend::default())
             }
         };
-        let locale = Box::new(locale::WebLocaleBackend::new());
         let trace_observer = Arc::new(RefCell::new(JsValue::UNDEFINED));
         let video = Box::new(SoftwareVideoBackend::new());
         let log = Box::new(log_adapter::WebLogBackend::new(trace_observer.clone()));
         let ui = Box::new(ui::WebUiBackend::new(js_player.clone(), &canvas));
 
-        let core =
-            ruffle_core::Player::new(renderer, audio, navigator, storage, locale, video, log, ui)?;
+        let core = ruffle_core::Player::new(renderer, audio, navigator, storage, video, log, ui)?;
         if let Ok(mut core) = core.try_lock() {
             // Set config parameters.
             if let Some(color) = config.background_color.and_then(parse_html_color) {
@@ -588,22 +583,25 @@ impl Ruffle {
             // Create mouse down handler.
             let mouse_down_callback = Closure::wrap(Box::new(move |js_event: PointerEvent| {
                 let _ = ruffle.with_instance(move |instance| {
-                    // Only fire player mouse event for left clicks.
-                    if js_event.button() == 0 {
-                        if let Some(target) = js_event.current_target() {
-                            let _ = target
-                                .unchecked_ref::<Element>()
-                                .set_pointer_capture(js_event.pointer_id());
-                        }
-                        let device_pixel_ratio = instance.device_pixel_ratio;
-                        let event = PlayerEvent::MouseDown {
-                            x: f64::from(js_event.offset_x()) * device_pixel_ratio,
-                            y: f64::from(js_event.offset_y()) * device_pixel_ratio,
-                        };
-                        let _ = instance.with_core_mut(|core| {
-                            core.handle_event(event);
-                        });
+                    if let Some(target) = js_event.current_target() {
+                        let _ = target
+                            .unchecked_ref::<Element>()
+                            .set_pointer_capture(js_event.pointer_id());
                     }
+                    let device_pixel_ratio = instance.device_pixel_ratio;
+                    let event = PlayerEvent::MouseDown {
+                        x: f64::from(js_event.offset_x()) * device_pixel_ratio,
+                        y: f64::from(js_event.offset_y()) * device_pixel_ratio,
+                        button: match js_event.button() {
+                            0 => MouseButton::Left,
+                            1 => MouseButton::Middle,
+                            2 => MouseButton::Right,
+                            _ => MouseButton::Unknown,
+                        },
+                    };
+                    let _ = instance.with_core_mut(|core| {
+                        core.handle_event(event);
+                    });
 
                     js_event.prevent_default();
                 });
@@ -660,21 +658,24 @@ impl Ruffle {
             // Create mouse up handler.
             let mouse_up_callback = Closure::wrap(Box::new(move |js_event: PointerEvent| {
                 let _ = ruffle.with_instance_mut(|instance| {
-                    // Only fire player mouse event for left clicks.
-                    if js_event.button() == 0 {
-                        if let Some(target) = js_event.current_target() {
-                            let _ = target
-                                .unchecked_ref::<Element>()
-                                .release_pointer_capture(js_event.pointer_id());
-                        }
-                        let event = PlayerEvent::MouseUp {
-                            x: f64::from(js_event.offset_x()) * instance.device_pixel_ratio,
-                            y: f64::from(js_event.offset_y()) * instance.device_pixel_ratio,
-                        };
-                        let _ = instance.with_core_mut(|core| {
-                            core.handle_event(event);
-                        });
+                    if let Some(target) = js_event.current_target() {
+                        let _ = target
+                            .unchecked_ref::<Element>()
+                            .release_pointer_capture(js_event.pointer_id());
                     }
+                    let event = PlayerEvent::MouseUp {
+                        x: f64::from(js_event.offset_x()) * instance.device_pixel_ratio,
+                        y: f64::from(js_event.offset_y()) * instance.device_pixel_ratio,
+                        button: match js_event.button() {
+                            0 => MouseButton::Left,
+                            1 => MouseButton::Middle,
+                            2 => MouseButton::Right,
+                            _ => MouseButton::Unknown,
+                        },
+                    };
+                    let _ = instance.with_core_mut(|core| {
+                        core.handle_event(event);
+                    });
 
                     if instance.has_focus {
                         js_event.prevent_default();

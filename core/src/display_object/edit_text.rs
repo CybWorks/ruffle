@@ -33,7 +33,7 @@ use swf::Twips;
 pub type Error = Box<dyn std::error::Error>;
 
 /// The kind of autosizing behavior an `EditText` should have, if any
-#[derive(Copy, Clone, Debug, Collect)]
+#[derive(Copy, Clone, Debug, Collect, PartialEq, Eq)]
 #[collect(no_drop)]
 pub enum AutoSizeMode {
     None,
@@ -231,6 +231,12 @@ impl<'gc> EditText<'gc> {
             text_spans.hide_text();
         }
 
+        let autosize = if swf_tag.is_auto_size {
+            AutoSizeMode::Left
+        } else {
+            AutoSizeMode::None
+        };
+
         let bounds: BoundingBox = swf_tag.bounds.clone().into();
 
         let (layout, intrinsic_bounds) = LayoutBox::lower_from_text_spans(
@@ -315,7 +321,7 @@ impl<'gc> EditText<'gc> {
                 layout,
                 intrinsic_bounds,
                 bounds,
-                autosize: AutoSizeMode::None,
+                autosize,
                 variable: variable.map(|s| s.to_string_lossy(encoding)),
                 bound_stage_object: None,
                 firing_variable_binding: false,
@@ -328,7 +334,11 @@ impl<'gc> EditText<'gc> {
             },
         ));
 
-        et.redraw_border(context.gc_context);
+        if swf_tag.is_auto_size {
+            et.relayout(context);
+        } else {
+            et.redraw_border(context.gc_context);
+        }
 
         et
     }
@@ -750,7 +760,7 @@ impl<'gc> EditText<'gc> {
         let autosize = edit_text.autosize;
         let is_word_wrap = edit_text.is_word_wrap;
         let movie = edit_text.static_data.swf.clone();
-        let width = edit_text.bounds.width() - Twips::from_pixels(Self::INTERNAL_PADDING * 2.0);
+        let padding = Twips::from_pixels(EditText::INTERNAL_PADDING) * 2;
 
         if edit_text.is_password {
             // If the text is a password, hide the text
@@ -764,7 +774,7 @@ impl<'gc> EditText<'gc> {
             &edit_text.text_spans,
             context,
             movie,
-            width,
+            edit_text.bounds.width() - padding,
             is_word_wrap,
             edit_text.is_device_font,
         );
@@ -776,44 +786,25 @@ impl<'gc> EditText<'gc> {
         edit_text.hscroll = 0.0;
         edit_text.scroll = 1;
 
-        match autosize {
-            AutoSizeMode::None => {}
-            AutoSizeMode::Left => {
-                if !is_word_wrap {
-                    edit_text.bounds.set_width(intrinsic_bounds.width());
+        if autosize != AutoSizeMode::None {
+            // The edit text's bounds needs to have the padding baked in.
+            let width = intrinsic_bounds.width() + padding;
+            let height = intrinsic_bounds.height() + padding;
+            let new_x = match autosize {
+                AutoSizeMode::Left => edit_text.bounds.x_min,
+                AutoSizeMode::Center => {
+                    (edit_text.bounds.x_min + edit_text.bounds.x_max - width) / 2
                 }
-
-                edit_text.bounds.set_height(intrinsic_bounds.height());
-                edit_text.base.base.set_transformed_by_script(true);
-                drop(edit_text);
-                self.redraw_border(context.gc_context);
+                AutoSizeMode::Right => edit_text.bounds.x_max - width,
+                AutoSizeMode::None => unreachable!(),
+            };
+            if !is_word_wrap {
+                edit_text.bounds.set_x(new_x);
+                edit_text.bounds.set_width(width);
             }
-            AutoSizeMode::Center => {
-                if !is_word_wrap {
-                    let center = (edit_text.bounds.x_min + edit_text.bounds.x_max) / 2;
-                    edit_text
-                        .bounds
-                        .set_x(center - intrinsic_bounds.width() / 2);
-                    edit_text.bounds.set_width(intrinsic_bounds.width());
-                }
-
-                edit_text.bounds.set_height(intrinsic_bounds.height());
-                edit_text.base.base.set_transformed_by_script(true);
-                drop(edit_text);
-                self.redraw_border(context.gc_context);
-            }
-            AutoSizeMode::Right => {
-                if !is_word_wrap {
-                    let new_x = edit_text.bounds.x_max - intrinsic_bounds.width();
-                    edit_text.bounds.set_x(new_x);
-                    edit_text.bounds.set_width(intrinsic_bounds.width());
-                }
-
-                edit_text.bounds.set_height(intrinsic_bounds.height());
-                edit_text.base.base.set_transformed_by_script(true);
-                drop(edit_text);
-                self.redraw_border(context.gc_context);
-            }
+            edit_text.bounds.set_height(height);
+            drop(edit_text);
+            self.redraw_border(context.gc_context);
         }
     }
 
@@ -1399,17 +1390,12 @@ impl<'gc> EditText<'gc> {
     }
 
     /// Construct the text field's AVM1 representation.
-    fn construct_as_avm1_object(
-        &self,
-        context: &mut UpdateContext<'_, 'gc, '_>,
-        display_object: DisplayObject<'gc>,
-        run_frame: bool,
-    ) {
+    fn construct_as_avm1_object(&self, context: &mut UpdateContext<'_, 'gc, '_>, run_frame: bool) {
         let mut text = self.0.write(context.gc_context);
         if text.object.is_none() {
             let object: Avm1Object<'gc> = Avm1StageObject::for_display_object(
                 context.gc_context,
-                display_object,
+                (*self).into(),
                 Some(context.avm1.prototypes().text_field),
             )
             .into();
@@ -1512,7 +1498,6 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
     fn post_instantiation(
         &self,
         context: &mut UpdateContext<'_, 'gc, '_>,
-        display_object: DisplayObject<'gc>,
         _init_object: Option<Avm1Object<'gc>>,
         _instantiated_by: Instantiator,
         run_frame: bool,
@@ -1530,7 +1515,7 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
         let vm_type = library.avm_type();
 
         if vm_type == AvmType::Avm1 {
-            self.construct_as_avm1_object(context, display_object, run_frame);
+            self.construct_as_avm1_object(context, run_frame);
         }
     }
 
@@ -1768,27 +1753,6 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
         self.set_removed(context.gc_context, true);
     }
 
-    fn mouse_pick(
-        &self,
-        context: &mut UpdateContext<'_, 'gc, '_>,
-        point: (Twips, Twips),
-        _require_button_mode: bool,
-    ) -> Option<DisplayObject<'gc>> {
-        // The button is hovered if the mouse is over any child nodes.
-        if self.visible()
-            && self.is_selectable()
-            && self.hit_test_shape(context, point, HitTestOptions::MOUSE_PICK)
-        {
-            Some((*self).into())
-        } else {
-            None
-        }
-    }
-
-    fn mouse_cursor(&self) -> MouseCursor {
-        MouseCursor::IBeam
-    }
-
     fn on_focus_changed(&self, gc_context: MutationContext<'gc, '_>, focused: bool) {
         let mut text = self.0.write(gc_context);
         text.has_focus = focused;
@@ -1827,7 +1791,7 @@ impl<'gc> TInteractiveObject<'gc> for EditText<'gc> {
     fn event_dispatch(
         self,
         context: &mut UpdateContext<'_, 'gc, '_>,
-        _event: ClipEvent,
+        event: ClipEvent<'gc>,
     ) -> ClipEventResult {
         let tracker = context.focus_tracker;
         tracker.set(Some(self.into()), context);
@@ -1841,7 +1805,31 @@ impl<'gc> TInteractiveObject<'gc> for EditText<'gc> {
                 Some(TextSelection::for_position(self.text_length()));
         }
 
+        self.event_dispatch_to_avm2(context, event);
+
         ClipEventResult::Handled
+    }
+
+    fn mouse_pick(
+        &self,
+        context: &mut UpdateContext<'_, 'gc, '_>,
+        point: (Twips, Twips),
+        _require_button_mode: bool,
+    ) -> Option<InteractiveObject<'gc>> {
+        // The button is hovered if the mouse is over any child nodes.
+        if self.visible()
+            && self.mouse_enabled()
+            && self.is_selectable()
+            && self.hit_test_shape(context, point, HitTestOptions::MOUSE_PICK)
+        {
+            Some((*self).into())
+        } else {
+            None
+        }
+    }
+
+    fn mouse_cursor(self, _context: &mut UpdateContext<'_, 'gc, '_>) -> MouseCursor {
+        MouseCursor::IBeam
     }
 }
 

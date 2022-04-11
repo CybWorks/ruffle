@@ -51,13 +51,7 @@ pub fn native_instance_init<'gc>(
                 this.init_display_object(activation.context.gc_context, child);
                 child.set_object2(activation.context.gc_context, this);
 
-                child.post_instantiation(
-                    &mut activation.context,
-                    child,
-                    None,
-                    Instantiator::Avm2,
-                    false,
-                );
+                child.post_instantiation(&mut activation.context, None, Instantiator::Avm2, false);
                 child.construct_frame(&mut activation.context);
             }
         }
@@ -239,6 +233,26 @@ pub fn set_scale_x<'gc>(
         dobj.set_scale_x(activation.context.gc_context, Percent::from_unit(new_scale));
     }
 
+    Ok(Value::Undefined)
+}
+
+/// Implements `filters`'s getter.
+pub fn filters<'gc>(
+    _activation: &mut Activation<'_, 'gc, '_>,
+    _this: Option<Object<'gc>>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error> {
+    log::warn!("DisplayObject.filters getter - not yet implemented");
+    Ok(Value::Undefined)
+}
+
+/// Implements `filters`'s setter.
+pub fn set_filters<'gc>(
+    _activation: &mut Activation<'_, 'gc, '_>,
+    _this: Option<Object<'gc>>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error> {
+    log::warn!("DisplayObject.filters setter - not yet implemented");
     Ok(Value::Undefined)
 }
 
@@ -565,14 +579,12 @@ pub fn loader_info<'gc>(
 ) -> Result<Value<'gc>, Error> {
     if let Some(dobj) = this.and_then(|this| this.as_display_object()) {
         if let Some(root) = dobj.avm2_root(&mut activation.context) {
-            if DisplayObject::ptr_eq(root, dobj) {
-                let movie = dobj.movie();
+            let movie = dobj.movie();
 
-                if let Some(movie) = movie {
-                    let obj = LoaderInfoObject::from_movie(activation, movie, root)?;
+            if let Some(movie) = movie {
+                let obj = LoaderInfoObject::from_movie(activation, movie, root)?;
 
-                    return Ok(obj.into());
-                }
+                return Ok(obj.into());
             }
         }
 
@@ -626,6 +638,7 @@ pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>
         ("mouseX", Some(mouse_x), None),
         ("mouseY", Some(mouse_y), None),
         ("loaderInfo", Some(loader_info), None),
+        ("filters", Some(filters), Some(set_filters)),
     ];
     write.define_public_builtin_instance_properties(mc, PUBLIC_INSTANCE_PROPERTIES);
 

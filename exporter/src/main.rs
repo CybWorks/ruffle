@@ -2,7 +2,6 @@ use clap::Parser;
 use image::RgbaImage;
 use indicatif::{ProgressBar, ProgressStyle};
 use ruffle_core::backend::audio::NullAudioBackend;
-use ruffle_core::backend::locale::NullLocaleBackend;
 use ruffle_core::backend::log::NullLogBackend;
 use ruffle_core::backend::navigator::NullNavigatorBackend;
 use ruffle_core::backend::storage::MemoryStorageBackend;
@@ -108,7 +107,6 @@ fn take_screenshot(
         Box::new(NullAudioBackend::new()),
         Box::new(NullNavigatorBackend::new()),
         Box::new(MemoryStorageBackend::default()),
-        Box::new(NullLocaleBackend::new()),
         Box::new(SoftwareVideoBackend::new()),
         Box::new(NullLogBackend::new()),
         Box::new(NullUiBackend::new()),
@@ -118,7 +116,7 @@ fn take_screenshot(
         .lock()
         .unwrap()
         .set_viewport_dimensions(width, height, size.scale as f64);
-    player.lock().unwrap().set_root_movie(Arc::new(movie));
+    player.lock().unwrap().set_root_movie(movie);
 
     let mut result = Vec::new();
     let totalframes = frames + skipframes;
@@ -269,7 +267,7 @@ fn capture_single_swf(descriptors: Descriptors, opt: &Opt) -> Result<(), Box<dyn
     Ok(())
 }
 
-#[allow(unknown_lints, clippy::branches_sharing_code)]
+#[allow(clippy::branches_sharing_code)]
 fn capture_multiple_swfs(mut descriptors: Descriptors, opt: &Opt) -> Result<(), Box<dyn Error>> {
     let output = opt.output_path.clone().unwrap();
     let files = find_files(&opt.swf, !opt.silent);

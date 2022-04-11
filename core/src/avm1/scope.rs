@@ -56,61 +56,6 @@ impl<'gc> Scope<'gc> {
         }
     }
 
-    /// Construct a closure scope to be used as the parent of all local scopes
-    /// when invoking a function.
-    ///
-    /// This function filters With scopes from the scope chain. If all scopes
-    /// are filtered (somehow), this function constructs and returns a new,
-    /// single global scope with a bare object.
-    pub fn new_closure_scope(
-        mut parent: GcCell<'gc, Self>,
-        mc: MutationContext<'gc, '_>,
-    ) -> GcCell<'gc, Self> {
-        let mut bottom_scope = None;
-        let mut top_scope: Option<GcCell<'gc, Self>> = None;
-
-        loop {
-            if parent.read().class != ScopeClass::With {
-                let next_scope = GcCell::allocate(
-                    mc,
-                    Self {
-                        parent: None,
-                        class: parent.read().class,
-                        values: parent.read().values,
-                    },
-                );
-
-                if bottom_scope.is_none() {
-                    bottom_scope = Some(next_scope);
-                }
-
-                if let Some(ref scope) = top_scope {
-                    scope.write(mc).parent = Some(next_scope);
-                }
-
-                top_scope = Some(next_scope);
-            }
-
-            let grandparent = parent.read().parent;
-            if let Some(grandparent) = grandparent {
-                parent = grandparent;
-            } else {
-                break;
-            }
-        }
-
-        bottom_scope.unwrap_or_else(|| {
-            GcCell::allocate(
-                mc,
-                Self {
-                    parent: None,
-                    class: ScopeClass::Global,
-                    values: ScriptObject::object_cell(mc, None),
-                },
-            )
-        })
-    }
-
     /// Construct a scope for use with `tellTarget` code where the timeline
     /// scope has been replaced with another given object.
     pub fn new_target_scope(
@@ -184,7 +129,7 @@ impl<'gc> Scope<'gc> {
         )
     }
 
-    /// Construct an arbitrary scope
+    /// Construct an arbitrary scope.
     pub fn new(
         parent: GcCell<'gc, Self>,
         class: ScopeClass,
@@ -226,6 +171,11 @@ impl<'gc> Scope<'gc> {
         self.parent
     }
 
+    /// Returns the class.
+    pub fn class(&self) -> ScopeClass {
+        self.class
+    }
+
     /// Resolve a particular value in the scope chain and the object which this value would expect as its `this` parameter if called.
     ///
     /// Because scopes are object chains, the same rules for `Object::get`
@@ -235,7 +185,6 @@ impl<'gc> Scope<'gc> {
         &self,
         name: AvmString<'gc>,
         activation: &mut Activation<'_, 'gc, '_>,
-        this: Object<'gc>,
     ) -> Result<CallableValue<'gc>, Error<'gc>> {
         if self.locals().has_property(activation, name) {
             return self
@@ -244,28 +193,10 @@ impl<'gc> Scope<'gc> {
                 .map(|v| CallableValue::Callable(self.locals_cell(), v));
         }
         if let Some(scope) = self.parent() {
-            return scope.resolve(name, activation, this);
+            return scope.resolve(name, activation);
         }
 
-        //TODO: Should undefined variables halt execution?
         Ok(CallableValue::UnCallable(Value::Undefined))
-    }
-
-    /// Check if a particular property in the scope chain is defined.
-    pub fn is_defined(
-        &self,
-        activation: &mut Activation<'_, 'gc, '_>,
-        name: AvmString<'gc>,
-    ) -> bool {
-        if self.locals().has_property(activation, name) {
-            return true;
-        }
-
-        if let Some(scope) = self.parent() {
-            return scope.is_defined(activation, name);
-        }
-
-        false
     }
 
     /// Update a particular value in the scope chain.
@@ -279,7 +210,6 @@ impl<'gc> Scope<'gc> {
         name: AvmString<'gc>,
         value: Value<'gc>,
         activation: &mut Activation<'_, 'gc, '_>,
-        this: Object<'gc>,
     ) -> Result<(), Error<'gc>> {
         if self.class == ScopeClass::Target || self.locals().has_property(activation, name) {
             // Value found on this object, so overwrite it.
@@ -287,7 +217,7 @@ impl<'gc> Scope<'gc> {
             self.locals().set(name, value, activation)
         } else if let Some(scope) = self.parent() {
             // Traverse the scope chain in search of the value.
-            scope.set(name, value, activation, this)
+            scope.set(name, value, activation)
         } else {
             // This probably shouldn't happen -- all AVM1 code runs in reference to some MovieClip,
             // so we should always have a MovieClip scope.
@@ -299,9 +229,9 @@ impl<'gc> Scope<'gc> {
 
     /// Define a named local variable on the scope.
     ///
-    /// If the property does not already exist on the local scope, it will created.
+    /// If the property does not already exist on the local scope, it will be created.
     /// Otherwise, the existing property will be set to `value`. This does not crawl the scope
-    /// chain. Any proeprties with the same name deeper in the scope chain will be shadowed.
+    /// chain. Any properties with the same name deeper in the scope chain will be shadowed.
     pub fn define_local(
         &self,
         name: AvmString<'gc>,
@@ -325,7 +255,7 @@ impl<'gc> Scope<'gc> {
             .define_value(mc, name, value, Attribute::empty());
     }
 
-    /// Delete a value from scope
+    /// Delete a value from scope.
     pub fn delete(&self, activation: &mut Activation<'_, 'gc, '_>, name: AvmString<'gc>) -> bool {
         if self.locals().has_property(activation, name) {
             return self.locals().delete(activation, name);

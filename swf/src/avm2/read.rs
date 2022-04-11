@@ -1,5 +1,3 @@
-#![allow(clippy::unusual_byte_groupings)]
-
 use crate::avm2::types::*;
 use crate::error::{Error, Result};
 use crate::extensions::ReadSwfExt;
@@ -501,7 +499,7 @@ impl<'a> Reader<'a> {
         })
     }
 
-    pub fn read_op(&mut self) -> Result<Option<Op>> {
+    pub fn read_op(&mut self) -> Result<Op> {
         use crate::avm2::opcode::OpCode;
         use num_traits::FromPrimitive;
 
@@ -858,7 +856,7 @@ impl<'a> Reader<'a> {
             OpCode::URShift => Op::URShift,
         };
 
-        Ok(Some(op))
+        Ok(op)
     }
 
     fn read_exception(&mut self) -> Result<Exception> {
@@ -873,6 +871,7 @@ impl<'a> Reader<'a> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unusual_byte_groupings)]
 pub mod tests {
     use super::*;
     use crate::test_data;

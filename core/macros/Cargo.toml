@@ -1,15 +1,12 @@
 [package]
 name = "ruffle_macros"
 version = "0.1.0"
-authors = ["Mike Welsh <mwelsh@gmail.com>"]
+authors = ["Ruffle LLC <ruffle@ruffle.rs>"]
 edition = "2021"
 
 [lib]
 proc-macro = true
 
 [dependencies]
-quote = "1.0.10"
-
-[dependencies.syn]
-version = "1.0.84"
-features = ["full"]
+quote = "1.0.17"
+syn = { version = "1.0.91", features = ["full"] }

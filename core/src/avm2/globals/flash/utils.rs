@@ -3,12 +3,14 @@
 use crate::avm2::object::TObject;
 use crate::avm2::QName;
 use crate::avm2::{Activation, Error, Object, Value};
+use instant::Instant;
 
 pub mod bytearray;
 pub mod compression_algorithm;
 pub mod dictionary;
 pub mod endian;
 pub mod proxy;
+pub mod timer;
 
 /// `flash.utils.flash_proxy` namespace
 pub const NS_FLASH_PROXY: &str = "http://www.adobe.com/2006/actionscript/flash/proxy";
@@ -19,7 +21,10 @@ pub fn get_timer<'gc>(
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error> {
-    Ok((activation.context.navigator.time_since_launch().as_millis() as u32).into())
+    Ok((Instant::now()
+        .duration_since(activation.context.start_time)
+        .as_millis() as u32)
+        .into())
 }
 
 /// Implements `flash.utils.getQualifiedClassName`
