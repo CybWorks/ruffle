@@ -19,7 +19,7 @@ use ruffle_macros::enum_trait_object;
 use std::cell::{Ref, RefMut};
 use std::fmt::Debug;
 use std::sync::Arc;
-use swf::Fixed8;
+use swf::{BlendMode, Fixed8};
 
 mod avm1_button;
 mod avm2_button;
@@ -46,7 +46,7 @@ pub use graphic::Graphic;
 pub use interactive::{InteractiveObject, TInteractiveObject};
 pub use morph_shape::{MorphShape, MorphShapeStatic};
 pub use movie_clip::{MovieClip, Scene};
-pub use stage::{Stage, StageAlign, StageDisplayState, StageQuality, StageScaleMode};
+pub use stage::{Stage, StageAlign, StageDisplayState, StageQuality, StageScaleMode, WindowMode};
 pub use text::Text;
 pub use video::Video;
 
@@ -91,6 +91,18 @@ pub struct DisplayObjectBase<'gc> {
     /// The display object we are currently masking.
     maskee: Option<DisplayObject<'gc>>,
 
+    /// The blend mode used when rendering this display object.
+    /// Values other than the defualt `BlendMode::Normal` implicitly cause cache-as-bitmap behavior.
+    #[collect(require_static)]
+    blend_mode: BlendMode,
+
+    /// The opaque background color of this display object.
+    /// The bounding box of the display object will be filled with the given color. This also
+    /// triggers cache-as-bitmap behavior. Only solid backgrounds are supported; the alpha channel
+    /// is ignored.
+    #[collect(require_static)]
+    opaque_background: Option<Color>,
+
     /// Bit flags for various display object properties.
     flags: DisplayObjectFlags,
 }
@@ -113,6 +125,8 @@ impl<'gc> Default for DisplayObjectBase<'gc> {
             masker: None,
             maskee: None,
             sound_transform: Default::default(),
+            blend_mode: Default::default(),
+            opaque_background: Default::default(),
             flags: DisplayObjectFlags::VISIBLE,
         }
     }
@@ -373,6 +387,31 @@ impl<'gc> DisplayObjectBase<'gc> {
         self.flags.set(DisplayObjectFlags::VISIBLE, value);
     }
 
+    fn blend_mode(&self) -> BlendMode {
+        self.blend_mode
+    }
+
+    fn set_blend_mode(&mut self, value: BlendMode) {
+        self.blend_mode = value;
+    }
+
+    /// The opaque background color of this display object.
+    /// The bounding box of the display object will be filled with this color.
+    fn opaque_background(&self) -> Option<Color> {
+        self.opaque_background.clone()
+    }
+
+    /// The opaque background color of this display object.
+    /// The bounding box of the display object will be filled with the given color. This also
+    /// triggers cache-as-bitmap behavior. Only solid backgrounds are supported; the alpha channel
+    /// is ignored.
+    fn set_opaque_background(&mut self, value: Option<Color>) {
+        self.opaque_background = value.map(|mut color| {
+            color.a = 255;
+            color
+        });
+    }
+
     fn is_root(&self) -> bool {
         self.flags.contains(DisplayObjectFlags::IS_ROOT)
     }
@@ -405,6 +444,14 @@ impl<'gc> DisplayObjectBase<'gc> {
 
     fn set_placed_by_script(&mut self, value: bool) {
         self.flags.set(DisplayObjectFlags::PLACED_BY_SCRIPT, value);
+    }
+
+    fn is_bitmap_cached(&self) -> bool {
+        self.flags.contains(DisplayObjectFlags::CACHE_AS_BITMAP)
+    }
+
+    fn set_is_bitmap_cached(&mut self, value: bool) {
+        self.flags.set(DisplayObjectFlags::CACHE_AS_BITMAP, value);
     }
 
     fn instantiated_by_timeline(&self) -> bool {
@@ -446,7 +493,7 @@ pub fn render_base<'gc>(this: DisplayObject<'gc>, context: &mut RenderContext<'_
     if this.maskee().is_some() {
         return;
     }
-    context.transform_stack.push(&*this.base().transform());
+    context.transform_stack.push(this.base().transform());
 
     let mask = this.masker();
     let mut mask_transform = crate::transform::Transform::default();
@@ -939,6 +986,31 @@ pub trait TDisplayObject<'gc>:
         self.base_mut(gc_context).set_visible(value);
     }
 
+    /// The blend mode used when rendering this display object.
+    /// Values other than the defualt `BlendMode::Normal` implicitly cause cache-as-bitmap behavior.
+    fn blend_mode(&self) -> BlendMode {
+        self.base().blend_mode()
+    }
+
+    /// Sets the blend mode used when rendering this display object.
+    /// Values other than the defualt `BlendMode::Normal` implicitly cause cache-as-bitmap behavior.
+    fn set_blend_mode(&mut self, gc_context: MutationContext<'gc, '_>, value: BlendMode) {
+        self.base_mut(gc_context).set_blend_mode(value);
+    }
+
+    /// The opaque background color of this display object.
+    fn opaque_background(&self) -> Option<Color> {
+        self.base().opaque_background()
+    }
+
+    /// Sets the opaque background color of this display object.
+    /// The bounding box of the display object will be filled with the given color. This also
+    /// triggers cache-as-bitmap behavior. Only solid backgrounds are supported; the alpha channel
+    /// is ignored.
+    fn set_opaque_background(&self, gc_context: MutationContext<'gc, '_>, value: Option<Color>) {
+        self.base_mut(gc_context).set_opaque_background(value);
+    }
+
     /// Whether this display object represents the root of loaded content.
     fn is_root(&self) -> bool {
         self.base().is_root()
@@ -982,6 +1054,19 @@ pub trait TDisplayObject<'gc>:
     /// When this flag is set, changes from SWF `PlaceObject` tags are ignored.
     fn set_transformed_by_script(&self, gc_context: MutationContext<'gc, '_>, value: bool) {
         self.base_mut(gc_context).set_transformed_by_script(value)
+    }
+
+    /// Whether this display object is cached into a bitmap rendering.
+    /// This is set implicitly when a filter or blend mode is applied, or explicitly by the user
+    /// via the `cacheAsBitmap` property.
+    fn is_bitmap_cached(&self) -> bool {
+        self.base().is_bitmap_cached()
+    }
+
+    /// Explicilty sets this display object to be cached into a bitmap rendering.
+    /// Note that the object will still be bitmap cached if a filter or blend mode is active.
+    fn set_is_bitmap_cached(&self, gc_context: MutationContext<'gc, '_>, value: bool) {
+        self.base_mut(gc_context).set_is_bitmap_cached(value)
     }
 
     /// Called whenever the focus tracker has deemed this display object worthy, or no longer worthy,
@@ -1178,7 +1263,6 @@ pub trait TDisplayObject<'gc>:
     fn apply_place_object(
         &self,
         context: &mut UpdateContext<'_, 'gc, '_>,
-        placing_movie: Option<Arc<SwfMovie>>,
         place_object: &swf::PlaceObject,
     ) {
         // PlaceObject tags only apply if this object has not been dynamically moved by AS code.
@@ -1189,17 +1273,6 @@ pub trait TDisplayObject<'gc>:
             if let Some(color_transform) = &place_object.color_transform {
                 self.set_color_transform(context.gc_context, &color_transform.clone().into());
             }
-            if let Some(name) = &place_object.name {
-                let encoding = swf::SwfStr::encoding_for_version(self.swf_version());
-                let name = name.to_str_lossy(encoding);
-                self.set_name(
-                    context.gc_context,
-                    AvmString::new_utf8(context.gc_context, name),
-                );
-            }
-            if let Some(clip_depth) = place_object.clip_depth {
-                self.set_clip_depth(context.gc_context, clip_depth.into());
-            }
             if let Some(ratio) = place_object.ratio {
                 if let Some(mut morph_shape) = self.as_morph_shape() {
                     morph_shape.set_ratio(context.gc_context, ratio);
@@ -1207,37 +1280,29 @@ pub trait TDisplayObject<'gc>:
                     video.seek(context, ratio.into());
                 }
             }
-            // Clip events only apply to movie clips.
-            if let (Some(clip_actions), Some(clip)) =
-                (&place_object.clip_actions, self.as_movie_clip())
-            {
-                // Convert from `swf::ClipAction` to Ruffle's `ClipEventHandler`.
-                use crate::display_object::movie_clip::ClipEventHandler;
-                if let Some(placing_movie) = placing_movie {
-                    clip.set_clip_event_handlers(
-                        context.gc_context,
-                        clip_actions
-                            .iter()
-                            .cloned()
-                            .map(|a| {
-                                ClipEventHandler::from_action_and_movie(
-                                    a,
-                                    Arc::clone(&placing_movie),
-                                )
-                            })
-                            .collect(),
-                    );
-                } else {
-                    // This probably shouldn't happen; we should always have a movie.
-                    log::error!("No movie when trying to set clip event");
-                }
+            if let Some(is_bitmap_cached) = place_object.is_bitmap_cached {
+                self.set_is_bitmap_cached(context.gc_context, is_bitmap_cached);
             }
             if self.swf_version() >= 11 {
                 if let Some(visible) = place_object.is_visible {
                     self.set_visible(context.gc_context, visible);
                 }
+                if let Some(mut color) = place_object.background_color.clone() {
+                    let color = if color.a > 0 {
+                        // Force opaque background to have no transpranecy.
+                        color.a = 255;
+                        Some(color)
+                    } else {
+                        None
+                    };
+                    self.set_opaque_background(context.gc_context, color);
+                }
             }
-            // TODO: Others will go here eventually.
+            // Purposely omitted properties:
+            // name, clip_depth, clip_actions
+            // These properties are only set on initial placement in `MovieClip::instantiate_child`
+            // and can not be modified by subsequent PlaceObject tags.
+            // TODO: Filters need to be applied here.
         }
     }
 
@@ -1440,7 +1505,7 @@ bitflags! {
     /// Bit flags used by `DisplayObject`.
     #[derive(Collect)]
     #[collect(no_drop)]
-    struct DisplayObjectFlags: u8 {
+    struct DisplayObjectFlags: u16 {
         /// Whether this object has been removed from the display list.
         /// Necessary in AVM1 to throw away queued actions from removed movie clips.
         const REMOVED                  = 1 << 0;
@@ -1470,6 +1535,9 @@ bitflags! {
         /// Whether this object has `_lockroot` set to true, in which case
         /// it becomes the _root of itself and of any children
         const LOCK_ROOT                = 1 << 7;
+
+        /// Whether this object will be cached to bitmap.
+        const CACHE_AS_BITMAP          = 1 << 8;
     }
 }
 

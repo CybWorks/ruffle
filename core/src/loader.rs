@@ -1,13 +1,21 @@
 //! Management of async loaders
 
 use crate::avm1::activation::{Activation, ActivationIdentifier};
+use crate::avm1::function::ExecutionReason;
 use crate::avm1::{Avm1, Object, TObject, Value};
-use crate::avm2::{Activation as Avm2Activation, Domain as Avm2Domain};
+use crate::avm2::bytearray::ByteArrayStorage;
+use crate::avm2::names::Namespace;
+use crate::avm2::object::ByteArrayObject;
+use crate::avm2::object::TObject as _;
+use crate::avm2::{
+    Activation as Avm2Activation, Avm2, Domain as Avm2Domain, Event as Avm2Event,
+    EventData as Avm2EventData, Object as Avm2Object, QName, Value as Avm2Value,
+};
 use crate::backend::navigator::{OwnedFuture, RequestOptions};
 use crate::backend::render::{determine_jpeg_tag_format, JpegTagFormat};
 use crate::context::{ActionQueue, ActionType, UpdateContext};
 use crate::display_object::{Bitmap, DisplayObject, TDisplayObject, TDisplayObjectContainer};
-use crate::player::{Player, NEWEST_PLAYER_VERSION};
+use crate::player::Player;
 use crate::string::AvmString;
 use crate::tag_utils::SwfMovie;
 use crate::vminterface::Instantiator;
@@ -25,7 +33,7 @@ pub type Handle = Index;
 /// Enumeration of all content types that `Loader` can handle.
 ///
 /// This is a superset of `JpegTagFormat`.
-#[derive(PartialEq, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ContentType {
     Swf,
     Jpeg,
@@ -76,7 +84,15 @@ impl ContentType {
     }
 }
 
-#[derive(Error, Debug)]
+#[derive(Clone, Collect, Copy)]
+#[collect(no_drop)]
+pub enum DataFormat {
+    Binary,
+    Text,
+    Variables,
+}
+
+#[derive(Debug, Error)]
 pub enum Error {
     #[error("Load cancelled")]
     Cancelled,
@@ -92,6 +108,9 @@ pub enum Error {
 
     #[error("Non-load vars loader spawned as load vars loader")]
     NotLoadVarsLoader,
+
+    #[error("Non-data loader spawned as data loader")]
+    NotLoadDataLoader,
 
     #[error("Could not fetch: {0}")]
     FetchError(String),
@@ -142,7 +161,8 @@ impl<'gc> LoadManager<'gc> {
             Loader::RootMovie { self_handle, .. }
             | Loader::Movie { self_handle, .. }
             | Loader::Form { self_handle, .. }
-            | Loader::LoadVars { self_handle, .. } => *self_handle = Some(handle),
+            | Loader::LoadVars { self_handle, .. }
+            | Loader::LoadURLLoader { self_handle, .. } => *self_handle = Some(handle),
         }
         handle
     }
@@ -254,6 +274,27 @@ impl<'gc> LoadManager<'gc> {
         let loader = self.get_loader_mut(handle).unwrap();
         loader.load_vars_loader(player, url.to_owned(), options)
     }
+
+    /// Kick off a data load into a `URLLoader`, updating
+    /// its `data` property when the load completes.
+    ///
+    /// Returns the loader's async process, which you will need to spawn.
+    pub fn load_data_into_url_loader(
+        &mut self,
+        player: Weak<Mutex<Player>>,
+        target_object: Avm2Object<'gc>,
+        url: &str,
+        options: RequestOptions,
+        data_format: DataFormat,
+    ) -> OwnedFuture<(), Error> {
+        let loader = Loader::LoadURLLoader {
+            self_handle: None,
+            target_object,
+        };
+        let handle = self.add_loader(loader);
+        let loader = self.get_loader_mut(handle).unwrap();
+        loader.load_url_loader(player, url.to_owned(), options, data_format)
+    }
 }
 
 impl<'gc> Default for LoadManager<'gc> {
@@ -263,7 +304,7 @@ impl<'gc> Default for LoadManager<'gc> {
 }
 
 /// The completion status of a `Loader` loading a movie.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Collect)]
+#[derive(Clone, Collect, Copy, Debug, Eq, PartialEq)]
 #[collect(require_static)]
 pub enum LoaderStatus {
     /// The movie hasn't been loaded yet.
@@ -328,6 +369,17 @@ pub enum Loader<'gc> {
         /// The target AVM1 object to load form data into.
         target_object: Object<'gc>,
     },
+
+    /// Loader that is loading data into a `URLLoader`'s `data` property
+    /// The `data` property is only updated after the data is loaded completely
+    LoadURLLoader {
+        /// The handle to refer to this loader instance.
+        #[collect(require_static)]
+        self_handle: Option<Handle>,
+
+        /// The target `URLLoader` to load data into.
+        target_object: Avm2Object<'gc>,
+    },
 }
 
 impl<'gc> Loader<'gc> {
@@ -352,18 +404,9 @@ impl<'gc> Loader<'gc> {
             .expect("Could not upgrade weak reference to player");
 
         Box::pin(async move {
-            // clippy reports a false positive for explicitly dropped guards:
-            // https://github.com/rust-lang/rust-clippy/issues/6446
-            // A workaround for this is to wrap the `.lock()` call in a block instead of explicitly dropping the guard.
-            let fetch;
-            let url = {
-                let player_lock = player.lock().unwrap();
-                let url = player_lock.navigator().resolve_relative_url(&url);
-                fetch = player_lock.navigator().fetch(&url, options);
-                url
-            };
+            let fetch = player.lock().unwrap().navigator().fetch(&url, options);
 
-            let data = fetch.await.map_err(|error| {
+            let response = fetch.await.map_err(|error| {
                 player
                     .lock()
                     .unwrap()
@@ -372,7 +415,7 @@ impl<'gc> Loader<'gc> {
                 error
             })?;
 
-            let mut movie = SwfMovie::from_data(&data, Some(url.into_owned()), None)?;
+            let mut movie = SwfMovie::from_data(&response.body, Some(response.url), None)?;
             on_metadata(movie.header());
             movie.append_parameters(parameters);
             player.lock().unwrap().set_root_movie(movie);
@@ -404,16 +447,7 @@ impl<'gc> Loader<'gc> {
             .expect("Could not upgrade weak reference to player");
 
         Box::pin(async move {
-            // clippy reports a false positive for explicitly dropped guards:
-            // https://github.com/rust-lang/rust-clippy/issues/6446
-            // A workaround for this is to wrap the `.lock()` call in a block instead of explicitly dropping the guard.
-            let fetch;
-            let url = {
-                let player_lock = player.lock().unwrap();
-                let url = player_lock.navigator().resolve_relative_url(&url);
-                fetch = player_lock.navigator().fetch(&url, options);
-                url
-            };
+            let fetch = player.lock().unwrap().navigator().fetch(&url, options);
 
             let mut replacing_root_movie = false;
             player.lock().unwrap().update(|uc| -> Result<(), Error> {
@@ -433,15 +467,15 @@ impl<'gc> Loader<'gc> {
                 Loader::movie_loader_start(handle, uc)
             })?;
 
-            if let Ok(data) = fetch.await {
-                let sniffed_type = ContentType::sniff(&data);
-                let mut length = data.len();
+            if let Ok(response) = fetch.await {
+                let sniffed_type = ContentType::sniff(&response.body);
+                let mut length = response.body.len();
 
                 if replacing_root_movie {
                     sniffed_type.expect(ContentType::Swf)?;
 
                     let movie =
-                        SwfMovie::from_data(&data, Some(url.into_owned()), loader_url.clone())?;
+                        SwfMovie::from_data(&response.body, Some(response.url), loader_url)?;
                     player.lock().unwrap().set_root_movie(movie);
                     return Ok(());
                 }
@@ -456,8 +490,8 @@ impl<'gc> Loader<'gc> {
                     match sniffed_type {
                         ContentType::Swf => {
                             let movie = Arc::new(SwfMovie::from_data(
-                                &data,
-                                Some(url.into_owned()),
+                                &response.body,
+                                Some(response.url),
                                 loader_url,
                             )?);
 
@@ -475,7 +509,7 @@ impl<'gc> Loader<'gc> {
                             }
                         }
                         ContentType::Gif | ContentType::Jpeg | ContentType::Png => {
-                            let bitmap = uc.renderer.register_bitmap_jpeg_2(&data)?;
+                            let bitmap = uc.renderer.register_bitmap_jpeg_2(&response.body)?;
                             let bitmap_obj =
                                 Bitmap::new(uc, 0, bitmap.handle, bitmap.width, bitmap.height);
 
@@ -521,17 +555,9 @@ impl<'gc> Loader<'gc> {
             .expect("Could not upgrade weak reference to player");
 
         Box::pin(async move {
-            // clippy reports a false positive for explicitly dropped guards:
-            // https://github.com/rust-lang/rust-clippy/issues/6446
-            // A workaround for this is to wrap the `.lock()` call in a block instead of explicitly dropping the guard.
-            let fetch;
-            {
-                let player_lock = player.lock().unwrap();
-                let url = player_lock.navigator().resolve_relative_url(&url);
-                fetch = player_lock.navigator().fetch(&url, options);
-            }
+            let fetch = player.lock().unwrap().navigator().fetch(&url, options);
 
-            let data = fetch.await?;
+            let response = fetch.await?;
 
             // Fire the load handler.
             player.lock().unwrap().update(|uc| {
@@ -547,7 +573,7 @@ impl<'gc> Loader<'gc> {
                     ActivationIdentifier::root("[Form Loader]"),
                 );
 
-                for (k, v) in form_urlencoded::parse(&data) {
+                for (k, v) in form_urlencoded::parse(&response.body) {
                     let k = AvmString::new_utf8(activation.context.gc_context, k);
                     let v = AvmString::new_utf8(activation.context.gc_context, v);
                     that.set(k, v.into(), &mut activation)?;
@@ -577,15 +603,7 @@ impl<'gc> Loader<'gc> {
             .expect("Could not upgrade weak reference to player");
 
         Box::pin(async move {
-            // clippy reports a false positive for explicitly dropped guards:
-            // https://github.com/rust-lang/rust-clippy/issues/6446
-            // A workaround for this is to wrap the `.lock()` call in a block instead of explicitly dropping the guard.
-            let fetch;
-            {
-                let player_lock = player.lock().unwrap();
-                let url = player_lock.navigator().resolve_relative_url(&url);
-                fetch = player_lock.navigator().fetch(&url, options);
-            }
+            let fetch = player.lock().unwrap().navigator().fetch(&url, options);
 
             let data = fetch.await;
 
@@ -602,31 +620,185 @@ impl<'gc> Loader<'gc> {
                     Activation::from_stub(uc.reborrow(), ActivationIdentifier::root("[Loader]"));
 
                 match data {
-                    Ok(data) => {
-                        let _ =
-                            that.call_method("onHTTPStatus".into(), &[200.into()], &mut activation);
+                    Ok(response) => {
+                        let _ = that.call_method(
+                            "onHTTPStatus".into(),
+                            &[200.into()],
+                            &mut activation,
+                            ExecutionReason::Special,
+                        );
 
                         // Fire the onData method with the loaded string.
                         let string_data = AvmString::new_utf8(
                             activation.context.gc_context,
-                            UTF_8.decode(&data).0,
+                            UTF_8.decode(&response.body).0,
                         );
                         let _ = that.call_method(
                             "onData".into(),
                             &[string_data.into()],
                             &mut activation,
+                            ExecutionReason::Special,
                         );
                     }
                     Err(_) => {
                         // TODO: Log "Error opening URL" trace similar to the Flash Player?
                         // Simulate 404 HTTP status. This should probably be fired elsewhere
                         // because a failed local load doesn't fire a 404.
-                        let _ =
-                            that.call_method("onHTTPStatus".into(), &[404.into()], &mut activation);
+                        let _ = that.call_method(
+                            "onHTTPStatus".into(),
+                            &[404.into()],
+                            &mut activation,
+                            ExecutionReason::Special,
+                        );
 
                         // Fire the onData method with no data to indicate an unsuccessful load.
-                        let _ =
-                            that.call_method("onData".into(), &[Value::Undefined], &mut activation);
+                        let _ = that.call_method(
+                            "onData".into(),
+                            &[Value::Undefined],
+                            &mut activation,
+                            ExecutionReason::Special,
+                        );
+                    }
+                }
+
+                Ok(())
+            })
+        })
+    }
+
+    /// Creates a future for a LoadURLLoader load call.
+    fn load_url_loader(
+        &mut self,
+        player: Weak<Mutex<Player>>,
+        url: String,
+        options: RequestOptions,
+        data_format: DataFormat,
+    ) -> OwnedFuture<(), Error> {
+        let handle = match self {
+            Loader::LoadURLLoader { self_handle, .. } => {
+                self_handle.expect("Loader not self-introduced")
+            }
+            _ => return Box::pin(async { Err(Error::NotLoadDataLoader) }),
+        };
+
+        let player = player
+            .upgrade()
+            .expect("Could not upgrade weak reference to player");
+
+        Box::pin(async move {
+            let fetch = player.lock().unwrap().navigator().fetch(&url, options);
+            let response = fetch.await;
+
+            player.lock().unwrap().update(|uc| {
+                let loader = uc.load_manager.get_loader(handle);
+                let target = match loader {
+                    Some(&Loader::LoadURLLoader { target_object, .. }) => target_object,
+                    // We would have already returned after the previous 'update' call
+                    _ => unreachable!(),
+                };
+
+                let mut activation = Avm2Activation::from_nothing(uc.reborrow());
+
+                fn set_data<'a, 'gc: 'a, 'gc_context: 'a>(
+                    body: Vec<u8>,
+                    activation: &mut Avm2Activation<'a, 'gc, 'gc_context>,
+                    mut target: Avm2Object<'gc>,
+                    data_format: DataFormat,
+                ) {
+                    let data_object = match data_format {
+                        DataFormat::Binary => {
+                            let storage = ByteArrayStorage::from_vec(body);
+                            let bytearray =
+                                ByteArrayObject::from_storage(activation, storage).unwrap();
+                            bytearray.into()
+                        }
+                        DataFormat::Text => {
+                            // FIXME - what do we do if the data is not UTF-8?
+                            Avm2Value::String(
+                                AvmString::new_utf8_bytes(activation.context.gc_context, body)
+                                    .unwrap(),
+                            )
+                        }
+                        DataFormat::Variables => {
+                            log::warn!(
+                                "Support for URLLoaderDataFormat.VARIABLES not yet implemented"
+                            );
+                            Avm2Value::Undefined
+                        }
+                    };
+
+                    target
+                        .set_property(
+                            &QName::new(Namespace::public(), "data").into(),
+                            data_object,
+                            activation,
+                        )
+                        .unwrap();
+                }
+
+                match response {
+                    Ok(response) => {
+                        // FIXME - the "open" event should be fired earlier, just before
+                        // we start to fetch the data.
+                        // However, the "open" event should not be fired if an IO error
+                        // occurs opening the connection (e.g. if a file does not exist on disk).
+                        // We currently have no way of detecting this, so we settle for firing
+                        // the event after the entire fetch is complete. This causes there
+                        // to a longer delay between the initial load triggered by the script
+                        // and the "load" event firing, but it ensures that we match
+                        // the Flash behavior w.r.t when an event is fired vs not fired.
+                        let mut open_evt = Avm2Event::new("open", Avm2EventData::Empty);
+                        open_evt.set_bubbles(false);
+                        open_evt.set_cancelable(false);
+
+                        if let Err(e) =
+                            Avm2::dispatch_event(&mut activation.context, open_evt, target)
+                        {
+                            log::error!(
+                                "Encountered AVM2 error when broadcasting `open` event: {}",
+                                e
+                            );
+                        }
+
+                        set_data(response.body, &mut activation, target, data_format);
+
+                        let mut complete_evt = Avm2Event::new("complete", Avm2EventData::Empty);
+                        complete_evt.set_bubbles(false);
+                        complete_evt.set_cancelable(false);
+
+                        if let Err(e) = Avm2::dispatch_event(uc, complete_evt, target) {
+                            log::error!(
+                                "Encountered AVM2 error when broadcasting `complete` event: {}",
+                                e
+                            );
+                        }
+                    }
+                    Err(_err) => {
+                        // Testing with Flash shoes that the 'data' property is cleared
+                        // when an error occurs
+
+                        set_data(Vec::new(), &mut activation, target, data_format);
+
+                        // FIXME - Match the exact error message generated by Flash
+                        let mut io_error_evt = Avm2Event::new(
+                            "ioError",
+                            Avm2EventData::IOError {
+                                text: AvmString::new_utf8(
+                                    activation.context.gc_context,
+                                    "Error #2032: Stream Error",
+                                ),
+                                error_id: 2032,
+                            },
+                        );
+                        io_error_evt.set_bubbles(false);
+                        io_error_evt.set_cancelable(false);
+
+                        if let Err(e) = Avm2::dispatch_event(uc, io_error_evt, target) {
+                            log::error!(
+                                "Encountered AVM2 error when broadcasting `ioError` event: {}",
+                                e
+                            );
+                        }
                     }
                 }
 
@@ -657,7 +829,6 @@ impl<'gc> Loader<'gc> {
             Avm1::run_stack_frame_for_method(
                 clip,
                 broadcaster,
-                NEWEST_PLAYER_VERSION,
                 uc,
                 "broadcastMessage".into(),
                 &["onLoadStart".into(), clip.object()],
@@ -694,7 +865,6 @@ impl<'gc> Loader<'gc> {
             Avm1::run_stack_frame_for_method(
                 clip,
                 broadcaster,
-                NEWEST_PLAYER_VERSION,
                 uc,
                 "broadcastMessage".into(),
                 &[
@@ -728,7 +898,6 @@ impl<'gc> Loader<'gc> {
             Avm1::run_stack_frame_for_method(
                 clip,
                 broadcaster,
-                NEWEST_PLAYER_VERSION,
                 uc,
                 "broadcastMessage".into(),
                 // TODO: Pass an actual httpStatus argument instead of 0.
@@ -768,7 +937,6 @@ impl<'gc> Loader<'gc> {
             Avm1::run_stack_frame_for_method(
                 clip,
                 broadcaster,
-                NEWEST_PLAYER_VERSION,
                 uc,
                 "broadcastMessage".into(),
                 &[

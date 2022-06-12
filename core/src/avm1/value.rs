@@ -1,7 +1,9 @@
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
+use crate::avm1::function::ExecutionReason;
 use crate::avm1::object::value_object::ValueObject;
 use crate::avm1::{Object, TObject};
+use crate::display_object::TDisplayObject;
 use crate::ecma_conversions::{
     f64_to_wrapping_i16, f64_to_wrapping_i32, f64_to_wrapping_u16, f64_to_wrapping_u32,
     f64_to_wrapping_u8,
@@ -127,16 +129,7 @@ impl<'gc> Value<'gc> {
         !matches!(self, Value::Object(_))
     }
 
-    pub fn into_number_v1(self) -> f64 {
-        match self {
-            Value::Bool(true) => 1.0,
-            Value::Number(v) => v,
-            Value::String(v) => v.parse().unwrap_or(0.0),
-            _ => 0.0,
-        }
-    }
-
-    /// ECMA-262 2nd edtion s. 9.3 ToNumber (after calling `to_primitive_num`)
+    /// ECMA-262 2nd edition s. 9.3 ToNumber (after calling `to_primitive_num`)
     ///
     /// Flash diverges from spec in a number of ways. These ways are, as far as
     /// we are aware, version-gated:
@@ -144,62 +137,20 @@ impl<'gc> Value<'gc> {
     /// * In SWF6 and lower, `undefined` is coerced to `0.0` (like `false`)
     /// rather than `NaN` as required by spec.
     /// * In SWF5 and lower, hexadecimal is unsupported.
+    /// * In SWF4 and lower, a string is coerced using the `parseFloat` function
+    /// and returns `0.0` rather than `NaN` if it cannot be converted to a number.
     fn primitive_as_number(&self, activation: &mut Activation<'_, 'gc, '_>) -> f64 {
-        let v = match self {
-            Value::Undefined if activation.swf_version() < 7 => return 0.0,
-            Value::Null if activation.swf_version() < 7 => return 0.0,
-            Value::Object(_) if activation.swf_version() < 5 => return 0.0,
-            Value::String(v) if activation.swf_version() < 5 => {
-                use crate::avm1::globals::parse_float_impl;
-                let result = parse_float_impl(v.trim_start(), true);
-                if result.is_nan() {
-                    return 0.0;
-                }
-                return result;
-            }
-            Value::Undefined => return f64::NAN,
-            Value::Null => return f64::NAN,
-            Value::Bool(false) => return 0.0,
-            Value::Bool(true) => return 1.0,
-            Value::Number(v) => return *v,
-            Value::Object(_) => return f64::NAN,
-            Value::String(v) => v,
-        };
-
-        if v.is_empty() {
-            return f64::NAN;
-        }
-
-        if activation.swf_version() >= 6 {
-            if let Some(v) = v.strip_prefix(WStr::from_units(b"0x")) {
-                // Flash allows the '-' sign here.
-                return match Wrapping::<i32>::from_wstr_radix(v, 16) {
-                    Ok(n) => f64::from(n.0 as i32),
-                    Err(_) => f64::NAN,
-                };
-            } else if v.starts_with(b'0')
-                || v.starts_with(WStr::from_units(b"+0"))
-                || v.starts_with(WStr::from_units(b"-0"))
-            {
-                // Flash allows the '-' sign here.
-                if let Ok(n) = Wrapping::<i32>::from_wstr_radix(v, 8) {
-                    return f64::from(n.0);
-                }
-            }
-        }
-
-        // Rust parses "inf" and "+inf" into Infinity, but Flash doesn't.
-        // (as of nightly 4/13, Rust also accepts "infinity")
-        // Check if the string starts with 'i' (ignoring any leading +/-).
-        if v.strip_prefix(&b"+-"[..])
-            .unwrap_or(v)
-            .starts_with(&b"iI"[..])
-        {
-            f64::NAN
-        } else {
-            v.trim_start_matches(&b"\t\n\r "[..])
-                .parse()
-                .unwrap_or(f64::NAN)
+        match self {
+            Value::Undefined if activation.swf_version() < 7 => 0.0,
+            Value::Null if activation.swf_version() < 7 => 0.0,
+            Value::Object(_) if activation.swf_version() < 5 => 0.0,
+            Value::Undefined => f64::NAN,
+            Value::Null => f64::NAN,
+            Value::Bool(false) => 0.0,
+            Value::Bool(true) => 1.0,
+            Value::Number(v) => *v,
+            Value::Object(_) => f64::NAN,
+            Value::String(v) => string_to_f64(&v, activation.swf_version()),
         }
     }
 
@@ -233,7 +184,7 @@ impl<'gc> Value<'gc> {
     ) -> Result<Value<'gc>, Error<'gc>> {
         Ok(match self {
             Value::Object(object) if object.as_display_object().is_none() => {
-                object.call_method("valueOf".into(), &[], activation)?
+                object.call_method("valueOf".into(), &[], activation, ExecutionReason::Special)?
             }
             val => val.to_owned(),
         })
@@ -258,10 +209,20 @@ impl<'gc> Value<'gc> {
             Value::Object(object) => {
                 let val = if activation.swf_version() > 5 && object.as_date_object().is_some() {
                     // In SWFv6 and higher, Date objects call `toString`.
-                    object.call_method("toString".into(), &[], activation)?
+                    object.call_method(
+                        "toString".into(),
+                        &[],
+                        activation,
+                        ExecutionReason::Special,
+                    )?
                 } else {
                     // Other objects call `valueOf`.
-                    object.call_method("valueOf".into(), &[], activation)?
+                    object.call_method(
+                        "valueOf".into(),
+                        &[],
+                        activation,
+                        ExecutionReason::Special,
+                    )?
                 };
 
                 if val.is_primitive() {
@@ -363,20 +324,6 @@ impl<'gc> Value<'gc> {
         Ok(result)
     }
 
-    /// Converts a bool value into the appropriate value for the platform.
-    /// This should be used when pushing a bool onto the stack.
-    /// This handles SWFv4 pushing a Number, 0 or 1.
-    pub fn from_bool(value: bool, swf_version: u8) -> Value<'gc> {
-        // SWF version 4 did not have true bools and will push bools as 0 or 1.
-        // e.g. SWF19 p. 72:
-        // "If the numbers are equal, true is pushed to the stack for SWF 5 and later. For SWF 4, 1 is pushed to the stack."
-        if swf_version >= 5 {
-            value.into()
-        } else {
-            (value as i32).into()
-        }
-    }
-
     pub fn coerce_to_u8(&self, activation: &mut Activation<'_, 'gc, '_>) -> Result<u8, Error<'gc>> {
         self.coerce_to_f64(activation).map(f64_to_wrapping_u8)
     }
@@ -436,13 +383,23 @@ impl<'gc> Value<'gc> {
             Value::Bool(true) if activation.swf_version() < 5 => "1".into(),
             Value::Bool(false) if activation.swf_version() < 5 => "0".into(),
             Value::Object(object) => {
-                match object.call_method("toString".into(), &[], activation)? {
-                    Value::String(s) => s,
-                    _ => {
-                        if object.as_executable().is_some() {
-                            "[type Function]".into()
-                        } else {
-                            "[type Object]".into()
+                if let Some(object) = object.as_display_object() {
+                    // StageObjects are special-cased to return their path.
+                    AvmString::new(activation.context.gc_context, object.path())
+                } else {
+                    match object.call_method(
+                        "toString".into(),
+                        &[],
+                        activation,
+                        ExecutionReason::Special,
+                    )? {
+                        Value::String(s) => s,
+                        _ => {
+                            if object.as_executable().is_some() {
+                                "[type Function]".into()
+                            } else {
+                                "[type Object]".into()
+                            }
                         }
                     }
                 }
@@ -467,8 +424,8 @@ impl<'gc> Value<'gc> {
                 if swf_version >= 7 {
                     !v.is_empty()
                 } else {
-                    let num = v.parse().unwrap_or(0.0);
-                    num != 0.0
+                    let num = string_to_f64(&v, swf_version);
+                    !num.is_nan() && num != 0.0
                 }
             }
             Value::Object(_) => true,
@@ -483,7 +440,17 @@ impl<'gc> Value<'gc> {
             Value::Number(_) => "number",
             Value::Bool(_) => "boolean",
             Value::String(_) => "string",
-            Value::Object(object) => object.type_of(),
+            Value::Object(object) if object.as_executable().is_some() => "function",
+            // MovieClips have a special typeof "movieclip", while others have the default "object".
+            Value::Object(object)
+                if object
+                    .as_display_object()
+                    .and_then(|o| o.as_movie_clip())
+                    .is_some() =>
+            {
+                "movieclip"
+            }
+            Value::Object(_) => "object",
         }
     }
 
@@ -701,6 +668,54 @@ fn f64_to_string(mut n: f64) -> Cow<'static, str> {
         // SAFETY: Buffer is guaranteed to only contain ASCII digits.
         let s = unsafe { std::str::from_utf8_unchecked(&buf[start..]) };
         s.to_string().into()
+    }
+}
+
+/// Converts a `WStr` to an f64 based on the SWF version.
+fn string_to_f64(str: &WStr, swf_version: u8) -> f64 {
+    if swf_version < 5 {
+        use crate::avm1::globals::parse_float_impl;
+        let v = parse_float_impl(str.trim_start(), true);
+        if v.is_nan() {
+            return 0.0;
+        }
+        return v;
+    }
+
+    if str.is_empty() {
+        return f64::NAN;
+    }
+
+    if swf_version >= 6 {
+        if let Some(v) = str.strip_prefix(WStr::from_units(b"0x")) {
+            // Flash allows the '-' sign here.
+            return match Wrapping::<i32>::from_wstr_radix(v, 16) {
+                Ok(n) => f64::from(n.0 as i32),
+                Err(_) => f64::NAN,
+            };
+        } else if str.starts_with(b'0')
+            || str.starts_with(WStr::from_units(b"+0"))
+            || str.starts_with(WStr::from_units(b"-0"))
+        {
+            // Flash allows the '-' sign here.
+            if let Ok(n) = Wrapping::<i32>::from_wstr_radix(str, 8) {
+                return f64::from(n.0);
+            }
+        }
+    }
+
+    // Rust parses "inf", "+inf" and "infinity" into Infinity, but Flash doesn't.
+    // Check if the string starts with 'i' (ignoring any leading +/-).
+    if str
+        .strip_prefix(&b"+-"[..])
+        .unwrap_or(str)
+        .starts_with(&b"iI"[..])
+    {
+        f64::NAN
+    } else {
+        str.trim_start_matches(&b"\t\n\r "[..])
+            .parse()
+            .unwrap_or(f64::NAN)
     }
 }
 

@@ -4,11 +4,13 @@ use crate::avm1::function::{Executable, FunctionObject};
 use crate::avm1::property::Attribute;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Object, ScriptObject, TObject, Value};
+use crate::display_object::{DisplayObject, Lists, TDisplayObject, TDisplayObjectContainer};
 use crate::string::{AvmString, WStr, WString};
 use gc_arena::Collect;
 use gc_arena::MutationContext;
 use std::str;
 
+mod accessibility;
 mod array;
 pub(crate) mod as_broadcaster;
 mod bevel_filter;
@@ -25,7 +27,6 @@ pub(crate) mod context_menu_item;
 pub mod convolution_filter;
 mod date;
 pub mod displacement_map_filter;
-pub(crate) mod display_object;
 pub mod drop_shadow_filter;
 pub(crate) mod error;
 mod external_interface;
@@ -35,6 +36,7 @@ pub mod gradient_bevel_filter;
 pub mod gradient_glow_filter;
 mod key;
 mod load_vars;
+mod local_connection;
 mod math;
 mod matrix;
 pub(crate) mod mouse;
@@ -612,6 +614,8 @@ pub fn create_globals<'gc>(
     let number_proto = number::create_proto(gc_context, object_proto, function_proto);
     let boolean_proto = boolean::create_proto(gc_context, object_proto, function_proto);
     let load_vars_proto = load_vars::create_proto(gc_context, object_proto, function_proto);
+    let local_connection_proto =
+        local_connection::create_proto(gc_context, object_proto, function_proto);
     let matrix_proto = matrix::create_proto(gc_context, object_proto, function_proto);
     let point_proto = point::create_proto(gc_context, object_proto, function_proto);
     let rectangle_proto = rectangle::create_proto(gc_context, object_proto, function_proto);
@@ -684,6 +688,13 @@ pub fn create_globals<'gc>(
         constructor_to_fn!(load_vars::constructor),
         Some(function_proto),
         load_vars_proto,
+    );
+    let local_connection = FunctionObject::constructor(
+        gc_context,
+        Executable::Native(local_connection::constructor),
+        constructor_to_fn!(local_connection::constructor),
+        Some(function_proto),
+        local_connection_proto,
     );
     let movie_clip = FunctionObject::constructor(
         gc_context,
@@ -1004,6 +1015,12 @@ pub fn create_globals<'gc>(
     );
     globals.define_value(
         gc_context,
+        "LocalConnection",
+        local_connection.into(),
+        Attribute::DONT_ENUM,
+    );
+    globals.define_value(
+        gc_context,
         "MovieClip",
         movie_clip.into(),
         Attribute::DONT_ENUM,
@@ -1150,6 +1167,16 @@ pub fn create_globals<'gc>(
         )),
         Attribute::DONT_ENUM,
     );
+    globals.define_value(
+        gc_context,
+        "Accessibility",
+        Value::Object(accessibility::create_accessibility_object(
+            gc_context,
+            Some(object_proto),
+            function_proto,
+        )),
+        Attribute::DONT_ENUM,
+    );
 
     define_properties_on(GLOBAL_DECLS, gc_context, globals, function_proto);
 
@@ -1216,6 +1243,51 @@ pub fn create_globals<'gc>(
         globals.into(),
         broadcaster_functions,
     )
+}
+
+/// Depths used/returned by ActionScript are offset by this amount from depths used inside the SWF/by the VM.
+/// The depth of objects placed on the timeline in the Flash IDE start from 0 in the SWF,
+/// but are negative when queried from MovieClip.getDepth().
+/// Add this to convert from AS -> SWF depth.
+const AVM_DEPTH_BIAS: i32 = 16384;
+
+/// The maximum depth that the AVM will allow you to swap or attach clips to.
+/// What is the derivation of this number...?
+const AVM_MAX_DEPTH: i32 = 2_130_706_428;
+
+/// The maximum depth that the AVM will allow you to remove clips from.
+/// What is the derivation of this number...?
+const AVM_MAX_REMOVE_DEPTH: i32 = 2_130_706_416;
+
+fn get_depth<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    this: Object<'gc>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    if let Some(display_object) = this.as_display_object() {
+        if activation.swf_version() >= 6 {
+            let depth = display_object.depth().wrapping_sub(AVM_DEPTH_BIAS);
+            return Ok(depth.into());
+        }
+    }
+    Ok(Value::Undefined)
+}
+
+pub fn remove_display_object<'gc>(
+    this: DisplayObject<'gc>,
+    activation: &mut Activation<'_, 'gc, '_>,
+) {
+    let depth = this.depth().wrapping_sub(0);
+    // Can only remove positive depths (when offset by the AVM depth bias).
+    // Generally this prevents you from removing non-dynamically created clips,
+    // although you can get around it with swapDepths.
+    // TODO: Figure out the derivation of this range.
+    if depth >= AVM_DEPTH_BIAS && depth < AVM_MAX_REMOVE_DEPTH && !this.removed() {
+        // Need a parent to remove from.
+        if let Some(mut parent) = this.avm1_parent().and_then(|o| o.as_movie_clip()) {
+            parent.remove_child(&mut activation.context, this, Lists::all());
+        }
+    }
 }
 
 #[cfg(test)]

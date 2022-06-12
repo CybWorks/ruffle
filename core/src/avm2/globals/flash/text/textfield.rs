@@ -101,6 +101,41 @@ pub fn set_autosize<'gc>(
     Ok(Value::Undefined)
 }
 
+pub fn background<'gc>(
+    _activation: &mut Activation<'_, 'gc, '_>,
+    this: Option<Object<'gc>>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error> {
+    if let Some(this) = this
+        .and_then(|this| this.as_display_object())
+        .and_then(|this| this.as_edit_text())
+    {
+        return Ok((this.has_background()).into());
+    }
+
+    Ok(Value::Undefined)
+}
+
+pub fn set_background<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    this: Option<Object<'gc>>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error> {
+    if let Some(this) = this
+        .and_then(|this| this.as_display_object())
+        .and_then(|this| this.as_edit_text())
+    {
+        let has_background = args
+            .get(0)
+            .cloned()
+            .unwrap_or(Value::Undefined)
+            .coerce_to_boolean();
+        this.set_has_background(activation.context.gc_context, has_background);
+    }
+
+    Ok(Value::Undefined)
+}
+
 pub fn background_color<'gc>(
     _activation: &mut Activation<'_, 'gc, '_>,
     this: Option<Object<'gc>>,
@@ -230,13 +265,13 @@ pub fn set_default_text_format<'gc>(
         .and_then(|this| this.as_display_object())
         .and_then(|this| this.as_edit_text())
     {
-        let new_text_format = args
-            .get(0)
-            .unwrap_or(&Value::Undefined)
-            .coerce_to_object(activation)?;
-        if let Some(new_text_format) = new_text_format.as_text_format() {
-            this.set_new_text_format(new_text_format.clone(), &mut activation.context);
-        };
+        let new_text_format = args.get(0).unwrap_or(&Value::Undefined).as_object();
+
+        if let Some(new_text_format) = new_text_format {
+            if let Some(new_text_format) = new_text_format.as_text_format() {
+                this.set_new_text_format(new_text_format.clone(), &mut activation.context);
+            }
+        }
     }
 
     Ok(Value::Undefined)
@@ -804,43 +839,42 @@ pub fn set_text_format<'gc>(
         .and_then(|this| this.as_display_object())
         .and_then(|this| this.as_edit_text())
     {
-        let tf = args
-            .get(0)
-            .unwrap_or(&Value::Undefined)
-            .coerce_to_object(activation)?;
-        if let Some(tf) = tf.as_text_format() {
-            let mut begin_index = args
-                .get(1)
-                .unwrap_or(&Value::Undefined)
-                .coerce_to_i32(activation)?;
-            let mut end_index = args
-                .get(2)
-                .unwrap_or(&Value::Undefined)
-                .coerce_to_i32(activation)?;
+        let tf = args.get(0).unwrap_or(&Value::Undefined).as_object();
+        if let Some(tf) = tf {
+            if let Some(tf) = tf.as_text_format() {
+                let mut begin_index = args
+                    .get(1)
+                    .unwrap_or(&Value::Undefined)
+                    .coerce_to_i32(activation)?;
+                let mut end_index = args
+                    .get(2)
+                    .unwrap_or(&Value::Undefined)
+                    .coerce_to_i32(activation)?;
 
-            if begin_index < 0 {
-                begin_index = 0;
+                if begin_index < 0 {
+                    begin_index = 0;
+                }
+
+                if begin_index as usize > this.text_length() {
+                    return Err("RangeError: The supplied index is out of bounds.".into());
+                }
+
+                if end_index < 0 {
+                    end_index = this.text_length() as i32;
+                }
+
+                if end_index as usize > this.text_length() {
+                    return Err("RangeError: The supplied index is out of bounds.".into());
+                }
+
+                this.set_text_format(
+                    begin_index as usize,
+                    end_index as usize,
+                    tf.clone(),
+                    &mut activation.context,
+                );
             }
-
-            if begin_index as usize > this.text_length() {
-                return Err("RangeError: The supplied index is out of bounds.".into());
-            }
-
-            if end_index < 0 {
-                end_index = this.text_length() as i32;
-            }
-
-            if end_index as usize > this.text_length() {
-                return Err("RangeError: The supplied index is out of bounds.".into());
-            }
-
-            this.set_text_format(
-                begin_index as usize,
-                end_index as usize,
-                tf.clone(),
-                &mut activation.context,
-            );
-        };
+        }
     }
 
     Ok(Value::Undefined)
@@ -866,6 +900,7 @@ pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>
         Option<NativeMethodImpl>,
     )] = &[
         ("autoSize", Some(autosize), Some(set_autosize)),
+        ("background", Some(background), Some(set_background)),
         (
             "backgroundColor",
             Some(background_color),

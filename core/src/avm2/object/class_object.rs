@@ -314,9 +314,10 @@ impl<'gc> ClassObject<'gc> {
                 return Err(format!("Could not resolve interface {:?}", interface_name).into());
             }
 
-            let interface = interface.unwrap().coerce_to_object(activation)?;
             let iface_class = interface
-                .as_class_object()
+                .unwrap()
+                .as_object()
+                .and_then(|o| o.as_class_object())
                 .ok_or_else(|| Error::from("Object is not an interface"))?;
             if !iface_class.inner_class_definition().read().is_interface() {
                 return Err(format!(
@@ -543,7 +544,7 @@ impl<'gc> ClassObject<'gc> {
             // todo: handle errors
             let (superclass_object, method) =
                 self.instance_vtable().get_full_method(disp_id).unwrap();
-            let scope = superclass_object.unwrap().class_scope();
+            let scope = superclass_object.unwrap().instance_scope();
             let callee = FunctionObject::from_method(
                 activation,
                 method.clone(),
@@ -840,7 +841,7 @@ impl<'gc> TObject<'gc> for ClassObject<'gc> {
         let object_param = match &nullable_params[0] {
             Value::Null => None,
             Value::Undefined => return Err("Undefined is not a valid type parameter".into()),
-            v => Some(v.coerce_to_object(activation)?),
+            v => Some(v.as_object().unwrap()),
         };
         let object_param = match object_param {
             None => None,

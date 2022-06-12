@@ -1,6 +1,7 @@
 //! `EditText` display object and support code.
 
 use crate::avm1::activation::{Activation as Avm1Activation, ActivationIdentifier};
+use crate::avm1::function::ExecutionReason;
 use crate::avm1::{
     Avm1, Object as Avm1Object, StageObject as Avm1StageObject, TObject as Avm1TObject,
     Value as Avm1Value,
@@ -705,10 +706,11 @@ impl<'gc> EditText<'gc> {
             let background_color = write.background_color;
 
             if write.has_border {
-                write.drawing.set_line_style(Some(swf::LineStyle::new_v1(
-                    Twips::new(1),
-                    swf::Color::from_rgb(border_color, 0xFF),
-                )));
+                write.drawing.set_line_style(Some(
+                    swf::LineStyle::new()
+                        .with_width(Twips::new(1))
+                        .with_color(swf::Color::from_rgb(border_color, 0xFF)),
+                ));
             } else {
                 write.drawing.set_line_style(None);
             }
@@ -948,9 +950,7 @@ impl<'gc> EditText<'gc> {
                                     x + Twips::from_pixels(-1.0),
                                     Twips::from_pixels(2.0),
                                 );
-                            context
-                                .renderer
-                                .draw_rect(Color::from_rgb(0x000000, 0xFF), &selection_box);
+                            context.renderer.draw_rect(Color::BLACK, &selection_box);
 
                             // Set text color to white
                             context.transform_stack.push(&Transform {
@@ -1289,11 +1289,9 @@ impl<'gc> EditText<'gc> {
 
             if changed {
                 let globals = context.avm1.global_object_cell();
-                let swf_version = context.swf.version();
                 let mut activation = Avm1Activation::from_nothing(
                     context.reborrow(),
                     ActivationIdentifier::root("[Propagate Text Binding]"),
-                    swf_version,
                     globals,
                     self.into(),
                 );
@@ -1385,6 +1383,7 @@ impl<'gc> EditText<'gc> {
                 "broadcastMessage".into(),
                 &["onChanged".into(), object.into()],
                 activation,
+                ExecutionReason::Special,
             );
         }
     }
@@ -1404,21 +1403,16 @@ impl<'gc> EditText<'gc> {
         }
         drop(text);
 
-        Avm1::run_with_stack_frame_for_display_object(
-            (*self).into(),
-            context.swf.version(),
-            context,
-            |activation| {
-                // If this text field has a variable set, initialize text field binding.
-                if !self.try_bind_text_field_variable(activation, true) {
-                    activation.context.unbound_text_fields.push(*self);
-                }
-                // People can bind to properties of TextFields the same as other display objects.
-                self.bind_text_field_variables(activation);
+        Avm1::run_with_stack_frame_for_display_object((*self).into(), context, |activation| {
+            // If this text field has a variable set, initialize text field binding.
+            if !self.try_bind_text_field_variable(activation, true) {
+                activation.context.unbound_text_fields.push(*self);
+            }
+            // People can bind to properties of TextFields the same as other display objects.
+            self.bind_text_field_variables(activation);
 
-                self.initialize_as_broadcaster(activation);
-            },
-        );
+            self.initialize_as_broadcaster(activation);
+        });
 
         if run_frame {
             self.run_frame(context);
@@ -1627,11 +1621,7 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
 
         let edit_text = self.0.read();
         context.transform_stack.push(&Transform {
-            matrix: Matrix {
-                tx: edit_text.bounds.x_min,
-                ty: edit_text.bounds.y_min,
-                ..Default::default()
-            },
+            matrix: Matrix::translate(edit_text.bounds.x_min, edit_text.bounds.y_min),
             ..Default::default()
         });
 
@@ -1646,7 +1636,7 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
             Twips::ZERO,
         );
         context.renderer.draw_rect(
-            Color::from_rgb(0, 0xff),
+            Color::BLACK,
             &(context.transform_stack.transform().matrix * mask),
         );
         context.renderer.activate_mask();
@@ -1665,12 +1655,10 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
         // TODO: Where does this come from? How is this different than INTERNAL_PADDING? Does this apply to y as well?
         // If this is actually right, offset the border in `redraw_border` instead of doing an extra push.
         context.transform_stack.push(&Transform {
-            matrix: Matrix {
-                tx: Twips::from_pixels(Self::INTERNAL_PADDING)
-                    - Twips::from_pixels(edit_text.hscroll),
-                ty: Twips::from_pixels(Self::INTERNAL_PADDING) - scroll_offset,
-                ..Default::default()
-            },
+            matrix: Matrix::translate(
+                Twips::from_pixels(Self::INTERNAL_PADDING) - Twips::from_pixels(edit_text.hscroll),
+                Twips::from_pixels(Self::INTERNAL_PADDING) - scroll_offset,
+            ),
             ..Default::default()
         });
 
@@ -1693,9 +1681,7 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
                             Twips::from_pixels(-1.0),
                             Twips::from_pixels(2.0),
                         );
-                    context
-                        .renderer
-                        .draw_rect(Color::from_rgb(0x000000, 0xFF), &caret);
+                    context.renderer.draw_rect(Color::BLACK, &caret);
                 }
             }
         } else {
@@ -1708,7 +1694,7 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
 
         context.renderer.deactivate_mask();
         context.renderer.draw_rect(
-            Color::from_rgb(0, 0xff),
+            Color::BLACK,
             &(context.transform_stack.transform().matrix * mask),
         );
         context.renderer.pop_mask();

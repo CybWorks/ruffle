@@ -95,6 +95,11 @@ pub struct StageData<'gc> {
     /// The bounds of the current viewport in twips, used for culling.
     view_bounds: BoundingBox,
 
+    /// The window mode of the viewport.
+    ///
+    /// Only used on web to control how the Flash content layers with other content on the page.
+    window_mode: WindowMode,
+
     /// Whether to show default context menu items
     show_menu: bool,
 
@@ -103,7 +108,12 @@ pub struct StageData<'gc> {
 }
 
 impl<'gc> Stage<'gc> {
-    pub fn empty(gc_context: MutationContext<'gc, '_>, width: u32, height: u32) -> Stage<'gc> {
+    pub fn empty(
+        gc_context: MutationContext<'gc, '_>,
+        width: u32,
+        height: u32,
+        fullscreen: bool,
+    ) -> Stage<'gc> {
         let stage = Self(GcCell::allocate(
             gc_context,
             StageData {
@@ -115,12 +125,17 @@ impl<'gc> Stage<'gc> {
                 quality: Default::default(),
                 stage_size: (width, height),
                 scale_mode: Default::default(),
-                display_state: Default::default(),
+                display_state: if fullscreen {
+                    StageDisplayState::FullScreen
+                } else {
+                    StageDisplayState::Normal
+                },
                 align: Default::default(),
                 use_bitmap_downsampling: false,
                 viewport_size: (width, height),
                 viewport_scale_factor: 1.0,
                 view_bounds: Default::default(),
+                window_mode: Default::default(),
                 show_menu: true,
                 avm2_object: Avm2ScriptObject::bare_object(gc_context),
             },
@@ -319,6 +334,22 @@ impl<'gc> Stage<'gc> {
         self.build_matrices(context);
     }
 
+    /// Get the stage mode.
+    /// This controls how the content layers with other content on the page.
+    /// Only used on web.
+    pub fn window_mode(self) -> WindowMode {
+        self.0.read().window_mode
+    }
+
+    /// Sets the window mode.
+    pub fn set_window_mode(
+        self,
+        context: &mut UpdateContext<'_, 'gc, '_>,
+        window_mode: WindowMode,
+    ) {
+        self.0.write(context.gc_context).window_mode = window_mode;
+    }
+
     pub fn view_bounds(self) -> BoundingBox {
         self.0.read().view_bounds.clone()
     }
@@ -334,12 +365,13 @@ impl<'gc> Stage<'gc> {
 
     /// Determine if we should letterbox the stage content.
     fn should_letterbox(self) -> bool {
-        // Only enable letterbox is the default `ShowAll` scale mode.
+        // Only enable letterbox in the default `ShowAll` scale mode.
         // If content changes the scale mode or alignment, it signals that it is size-aware.
         // For example, `NoScale` is used to make responsive layouts; don't letterbox over it.
         let stage = self.0.read();
         stage.scale_mode == StageScaleMode::ShowAll
             && stage.align.is_empty()
+            && stage.window_mode != WindowMode::Transparent
             && (stage.letterbox == Letterbox::On
                 || (stage.letterbox == Letterbox::Fullscreen && self.is_fullscreen()))
     }
@@ -464,7 +496,6 @@ impl<'gc> Stage<'gc> {
 
     /// Draw the stage's letterbox.
     fn draw_letterbox(&self, context: &mut RenderContext<'_, 'gc>) {
-        let black = Color::from_rgb(0, 255);
         let (viewport_width, viewport_height) = self.0.read().viewport_size;
         let viewport_width = viewport_width as f32;
         let viewport_height = viewport_height as f32;
@@ -486,7 +517,7 @@ impl<'gc> Stage<'gc> {
             // Top + bottom
             if margin_top > 0.0 {
                 context.renderer.draw_rect(
-                    black.clone(),
+                    Color::BLACK,
                     &Matrix::create_box(
                         viewport_width,
                         margin_top,
@@ -498,7 +529,7 @@ impl<'gc> Stage<'gc> {
             }
             if margin_bottom > 0.0 {
                 context.renderer.draw_rect(
-                    black,
+                    Color::BLACK,
                     &Matrix::create_box(
                         viewport_width,
                         margin_bottom,
@@ -512,7 +543,7 @@ impl<'gc> Stage<'gc> {
             // Left + right
             if margin_left > 0.0 {
                 context.renderer.draw_rect(
-                    black.clone(),
+                    Color::BLACK,
                     &Matrix::create_box(
                         margin_left,
                         viewport_height,
@@ -524,7 +555,7 @@ impl<'gc> Stage<'gc> {
             }
             if margin_right > 0.0 {
                 context.renderer.draw_rect(
-                    black,
+                    Color::BLACK,
                     &Matrix::create_box(
                         margin_right,
                         viewport_height,
@@ -553,7 +584,6 @@ impl<'gc> Stage<'gc> {
         if library.avm_type() == AvmType::Avm1 {
             crate::avm1::Avm1::notify_system_listeners(
                 self.root_clip(),
-                context.swf.version(),
                 context,
                 "Stage".into(),
                 "onResize".into(),
@@ -575,7 +605,6 @@ impl<'gc> Stage<'gc> {
         if library.avm_type() == AvmType::Avm1 {
             crate::avm1::Avm1::notify_system_listeners(
                 self.root_clip(),
-                context.swf.version(),
                 context,
                 "Stage".into(),
                 "onFullScreen".into(),
@@ -673,9 +702,12 @@ impl<'gc> TDisplayObject<'gc> for Stage<'gc> {
     }
 
     fn render(&self, context: &mut RenderContext<'_, 'gc>) {
-        let background_color = self
-            .background_color()
-            .unwrap_or_else(|| Color::from_rgb(0xffffff, 255));
+        let background_color =
+            if self.window_mode() != WindowMode::Transparent || self.is_fullscreen() {
+                self.background_color().unwrap_or(Color::WHITE)
+            } else {
+                Color::from_rgba(0)
+            };
 
         context.renderer.begin_frame(background_color);
 
@@ -1058,5 +1090,75 @@ impl FromWStr for StageQuality {
         } else {
             Err(ParseEnumError)
         }
+    }
+}
+
+/// The window mode of the Ruffle player.
+///
+/// This setting controls how the Ruffle container is layered and rendered with other content on
+/// the page. This setting is only used on web.
+///
+/// [Apply OBJECT and EMBED tag attributes in Adobe Flash Professional](https://helpx.adobe.com/flash/kb/flash-object-embed-tag-attributes.html)
+#[derive(Clone, Collect, Copy, Debug, Eq, PartialEq)]
+#[collect(require_static)]
+pub enum WindowMode {
+    /// The Flash content is rendered in its own window and layering is done with the browser's
+    /// default behavior.
+    ///
+    /// In Ruffle, this mode functions like `WindowMode::Opaque` and will layer the Flash content
+    /// together with other HTML elements.
+    Window,
+
+    /// The Flash content is layered together with other HTML elements, and the stage color is
+    /// opaque. Content can render above or below Ruffle based on CSS rendering order.
+    Opaque,
+
+    /// The Flash content is layered together with other HTML elements, and the stage color is
+    /// transparent. Content beneath Ruffle will be visible through transparent areas.
+    Transparent,
+
+    /// Request compositing with hardware acceleration when possible.
+    ///
+    /// This mode has no effect in Ruffle and will function like `WindowMode::Opaque`.
+    Gpu,
+
+    /// Request a direct rendering path, bypassing browser compositing when possible.
+    ///
+    /// This mode has no effect in Ruffle and will function like `WindowMode::Opaque`.
+    Direct,
+}
+
+impl Default for WindowMode {
+    fn default() -> WindowMode {
+        WindowMode::Window
+    }
+}
+
+impl Display for WindowMode {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let s = match *self {
+            WindowMode::Window => "window",
+            WindowMode::Opaque => "opaque",
+            WindowMode::Transparent => "transparent",
+            WindowMode::Direct => "direct",
+            WindowMode::Gpu => "gpu",
+        };
+        f.write_str(s)
+    }
+}
+
+impl FromStr for WindowMode {
+    type Err = ParseEnumError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let window_mode = match s.to_ascii_lowercase().as_str() {
+            "window" => WindowMode::Window,
+            "opaque" => WindowMode::Opaque,
+            "transparent" => WindowMode::Transparent,
+            "direct" => WindowMode::Direct,
+            "gpu" => WindowMode::Gpu,
+            _ => return Err(ParseEnumError),
+        };
+        Ok(window_mode)
     }
 }

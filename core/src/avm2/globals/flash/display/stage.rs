@@ -334,9 +334,7 @@ pub fn color<'gc>(
         .and_then(|this| this.as_display_object())
         .and_then(|this| this.as_stage())
     {
-        let color = dobj
-            .background_color()
-            .unwrap_or_else(|| Color::from_rgb(0xffffff, 255));
+        let color = dobj.background_color().unwrap_or(Color::WHITE);
         return Ok(color.to_rgba().into());
     }
 
@@ -435,7 +433,7 @@ pub fn focus<'gc>(
         .context
         .focus_tracker
         .get()
-        .and_then(|focus_dobj| focus_dobj.object2().coerce_to_object(activation).ok())
+        .and_then(|focus_dobj| focus_dobj.object2().as_object())
         .map(|o| o.into())
         .unwrap_or(Value::Null))
 }
@@ -450,7 +448,7 @@ pub fn set_focus<'gc>(
     match args.get(0).cloned().unwrap_or(Value::Undefined) {
         Value::Null => focus.set(None, &mut activation.context),
         val => {
-            if let Some(dobj) = val.coerce_to_object(activation)?.as_display_object() {
+            if let Some(dobj) = val.as_object().and_then(|o| o.as_display_object()) {
                 focus.set(Some(dobj), &mut activation.context);
             } else {
                 return Err("Cannot set focus to non-DisplayObject".into());

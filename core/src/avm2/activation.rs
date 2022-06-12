@@ -238,6 +238,15 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         }
     }
 
+    /// Resolves a class definition as per `resolve_definition`, and yield an
+    /// error relating to types if the class does not exist.
+    pub fn resolve_class(&mut self, name: &Multiname<'gc>) -> Result<ClassObject<'gc>, Error> {
+        self.resolve_definition(name)?
+            .and_then(|maybe| maybe.as_object())
+            .and_then(|o| o.as_class_object())
+            .ok_or_else(|| format!("Attempted to resolve nonexistent type {:?}", name).into())
+    }
+
     /// Resolve a type name to a class.
     ///
     /// This returns an error if a type is named but does not exist; or if the
@@ -252,12 +261,14 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
         let class = self
             .resolve_definition(type_name)?
-            .ok_or_else(|| format!("Could not resolve parameter type {:?}", type_name))?
-            .coerce_to_object(self)?;
-
-        let class = class
-            .as_class_object()
-            .ok_or_else(|| format!("Resolved parameter type {:?} is not a class", type_name))?;
+            .and_then(|o| o.as_object())
+            .and_then(|c| c.as_class_object())
+            .ok_or_else(|| {
+                format!(
+                    "Resolved parameter type {} is unresolvable, not a class, null, or undefined",
+                    type_name.to_qualified_name(self.context.gc_context)
+                )
+            })?;
 
         // Type parameters should specialize the returned class.
         // Unresolvable parameter types are treated as Any, which is treated as
@@ -626,6 +637,25 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     /// this yields `None`.
     pub fn subclass_object(&self) -> Option<ClassObject<'gc>> {
         self.subclass_object
+    }
+
+    /// Get the superclass of the class that defined the currently-executing
+    /// method, if it exists.
+    ///
+    /// If the currently-executing method is not part of an ES4 class, or the
+    /// class does not have a superclass, then this yields an error. The `name`
+    /// parameter allows you to provide the name of a property you were
+    /// attempting to access on the object.
+    pub fn superclass_object(&self, name: &Multiname<'gc>) -> Result<ClassObject<'gc>, Error> {
+        self.subclass_object
+            .and_then(|bc| bc.superclass_object())
+            .ok_or_else(|| {
+                format!(
+                    "Cannot call supermethod (void) {} without a superclass",
+                    name.to_qualified_name(self.context.gc_context)
+                )
+                .into()
+            })
     }
 
     /// Retrieve a int from the current constant pool.
@@ -1109,8 +1139,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
     fn op_call(&mut self, arg_count: u32) -> Result<FrameControl<'gc>, Error> {
         let args = self.context.avm2.pop_args(arg_count);
-        let receiver = self.context.avm2.pop().coerce_to_object(self).ok();
-        let function = self.context.avm2.pop().coerce_to_object(self)?;
+        let receiver = self.context.avm2.pop().as_object();
+        let function = self.context.avm2.pop().as_callable(self, None, receiver)?;
         let value = function.call(receiver, &args, self)?;
 
         self.context.avm2.push(value);
@@ -1135,7 +1165,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         #[allow(unreachable_code)]
         {
             let args = self.context.avm2.pop_args(arg_count);
-            let receiver = self.context.avm2.pop().coerce_to_object(self)?;
+            let receiver = self.context.avm2.pop().as_callable(self, None, None)?;
 
             let value = receiver.call_method(index.0, &args, self)?;
 
@@ -1153,7 +1183,11 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     ) -> Result<FrameControl<'gc>, Error> {
         let args = self.context.avm2.pop_args(arg_count);
         let multiname = self.pool_multiname(method, index)?;
-        let receiver = self.context.avm2.pop().coerce_to_object(self)?;
+        let receiver = self
+            .context
+            .avm2
+            .pop()
+            .coerce_to_receiver(self, Some(&multiname))?;
 
         let value = receiver.call_property(&multiname, &args, self)?;
 
@@ -1170,10 +1204,16 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     ) -> Result<FrameControl<'gc>, Error> {
         let args = self.context.avm2.pop_args(arg_count);
         let multiname = self.pool_multiname(method, index)?;
-        let receiver = self.context.avm2.pop().coerce_to_object(self)?;
-        let function = receiver
-            .get_property(&multiname, self)?
-            .coerce_to_object(self)?;
+        let receiver = self
+            .context
+            .avm2
+            .pop()
+            .coerce_to_receiver(self, Some(&multiname))?;
+        let function = receiver.get_property(&multiname, self)?.as_callable(
+            self,
+            Some(&multiname),
+            Some(receiver),
+        )?;
         let value = function.call(None, &args, self)?;
 
         self.context.avm2.push(value);
@@ -1189,7 +1229,11 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     ) -> Result<FrameControl<'gc>, Error> {
         let args = self.context.avm2.pop_args(arg_count);
         let multiname = self.pool_multiname(method, index)?;
-        let receiver = self.context.avm2.pop().coerce_to_object(self)?;
+        let receiver = self
+            .context
+            .avm2
+            .pop()
+            .coerce_to_receiver(self, Some(&multiname))?;
 
         receiver.call_property(&multiname, &args, self)?;
 
@@ -1203,12 +1247,12 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         arg_count: u32,
     ) -> Result<FrameControl<'gc>, Error> {
         let args = self.context.avm2.pop_args(arg_count);
-        let receiver = self.context.avm2.pop().coerce_to_object(self)?;
+        let receiver = self.context.avm2.pop().as_object();
         let method = self.table_method(method, index, false)?;
         // TODO: What scope should the function be executed with?
         let scope = self.create_scopechain();
         let function = FunctionObject::from_method(self, method, scope, None, None);
-        let value = function.call(Some(receiver), &args, self)?;
+        let value = function.call(receiver, &args, self)?;
 
         self.context.avm2.push(value);
 
@@ -1223,12 +1267,13 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     ) -> Result<FrameControl<'gc>, Error> {
         let args = self.context.avm2.pop_args(arg_count);
         let multiname = self.pool_multiname(method, index)?;
-        let receiver = self.context.avm2.pop().coerce_to_object(self)?;
+        let receiver = self
+            .context
+            .avm2
+            .pop()
+            .coerce_to_receiver(self, Some(&multiname))?;
 
-        let superclass_object = self
-            .subclass_object()
-            .and_then(|bc| bc.superclass_object())
-            .ok_or_else(|| Error::from("Attempted to call super method without a superclass."))?;
+        let superclass_object = self.superclass_object(&multiname)?;
 
         let value = superclass_object.call_super(&multiname, receiver, &args, self)?;
 
@@ -1245,12 +1290,13 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     ) -> Result<FrameControl<'gc>, Error> {
         let args = self.context.avm2.pop_args(arg_count);
         let multiname = self.pool_multiname(method, index)?;
-        let receiver = self.context.avm2.pop().coerce_to_object(self)?;
+        let receiver = self
+            .context
+            .avm2
+            .pop()
+            .coerce_to_receiver(self, Some(&multiname))?;
 
-        let superclass_object = self
-            .subclass_object()
-            .and_then(|bc| bc.superclass_object())
-            .ok_or_else(|| Error::from("Attempted to call super method without a superclass."))?;
+        let superclass_object = self.superclass_object(&multiname)?;
 
         superclass_object.call_super(&multiname, receiver, &args, self)?;
 
@@ -1284,11 +1330,10 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             // rather than it's string representation.
 
             let name_value = self.context.avm2.pop();
-            let object = self.context.avm2.pop().coerce_to_object(self)?;
+            let object = self.context.avm2.pop().coerce_to_receiver(self, None)?;
             if !name_value.is_primitive() {
                 if let Some(dictionary) = object.as_dictionary_object() {
-                    let value =
-                        dictionary.get_property_by_object(name_value.coerce_to_object(self)?);
+                    let value = dictionary.get_property_by_object(name_value.as_object().unwrap());
                     self.context.avm2.push(value);
 
                     return Ok(FrameControl::Continue);
@@ -1301,7 +1346,11 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             )
         } else {
             let multiname = self.pool_multiname(method, index)?;
-            let object = self.context.avm2.pop().coerce_to_object(self)?;
+            let object = self
+                .context
+                .avm2
+                .pop()
+                .coerce_to_receiver(self, Some(&multiname))?;
 
             (multiname, object)
         };
@@ -1330,11 +1379,11 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             // rather than it's string representation.
 
             let name_value = self.context.avm2.pop();
-            let object = self.context.avm2.pop().coerce_to_object(self)?;
+            let object = self.context.avm2.pop().coerce_to_receiver(self, None)?;
             if !name_value.is_primitive() {
                 if let Some(dictionary) = object.as_dictionary_object() {
                     dictionary.set_property_by_object(
-                        name_value.coerce_to_object(self)?,
+                        name_value.as_object().unwrap(),
                         value,
                         self.context.gc_context,
                     );
@@ -1349,7 +1398,11 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             )
         } else {
             let multiname = self.pool_multiname(method, index)?;
-            let object = self.context.avm2.pop().coerce_to_object(self)?;
+            let object = self
+                .context
+                .avm2
+                .pop()
+                .coerce_to_receiver(self, Some(&multiname))?;
 
             (multiname, object)
         };
@@ -1366,7 +1419,11 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     ) -> Result<FrameControl<'gc>, Error> {
         let value = self.context.avm2.pop();
         let multiname = self.pool_multiname(method, index)?;
-        let mut object = self.context.avm2.pop().coerce_to_object(self)?;
+        let mut object = self
+            .context
+            .avm2
+            .pop()
+            .coerce_to_receiver(self, Some(&multiname))?;
 
         object.init_property(&multiname, value, self)?;
 
@@ -1390,11 +1447,11 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             // rather than it's string representation.
 
             let name_value = self.context.avm2.pop();
-            let object = self.context.avm2.pop().coerce_to_object(self)?;
+            let object = self.context.avm2.pop().coerce_to_receiver(self, None)?;
             if !name_value.is_primitive() {
                 if let Some(dictionary) = object.as_dictionary_object() {
                     dictionary.delete_property_by_object(
-                        name_value.coerce_to_object(self)?,
+                        name_value.as_object().unwrap(),
                         self.context.gc_context,
                     );
 
@@ -1409,7 +1466,11 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             )
         } else {
             let multiname = self.pool_multiname(method, index)?;
-            let object = self.context.avm2.pop().coerce_to_object(self)?;
+            let object = self
+                .context
+                .avm2
+                .pop()
+                .coerce_to_receiver(self, Some(&multiname))?;
 
             (multiname, object)
         };
@@ -1427,12 +1488,13 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         index: Index<AbcMultiname>,
     ) -> Result<FrameControl<'gc>, Error> {
         let multiname = self.pool_multiname(method, index)?;
-        let object = self.context.avm2.pop().coerce_to_object(self)?;
+        let object = self
+            .context
+            .avm2
+            .pop()
+            .coerce_to_receiver(self, Some(&multiname))?;
 
-        let superclass_object = self
-            .subclass_object()
-            .and_then(|bc| bc.superclass_object())
-            .ok_or_else(|| Error::from("Attempted to call super method without a superclass."))?;
+        let superclass_object = self.superclass_object(&multiname)?;
 
         let value = superclass_object.get_super(&multiname, object, self)?;
 
@@ -1448,12 +1510,13 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     ) -> Result<FrameControl<'gc>, Error> {
         let value = self.context.avm2.pop();
         let multiname = self.pool_multiname(method, index)?;
-        let object = self.context.avm2.pop().coerce_to_object(self)?;
+        let object = self
+            .context
+            .avm2
+            .pop()
+            .coerce_to_receiver(self, Some(&multiname))?;
 
-        let superclass_object = self
-            .subclass_object()
-            .and_then(|bc| bc.superclass_object())
-            .ok_or_else(|| Error::from("Attempted to call super method without a superclass."))?;
+        let superclass_object = self.superclass_object(&multiname)?;
 
         superclass_object.set_super(&multiname, value, object, self)?;
 
@@ -1466,7 +1529,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
         if let Some(dictionary) = obj.as_dictionary_object() {
             if !name_value.is_primitive() {
-                let obj_key = name_value.coerce_to_object(self)?;
+                let obj_key = name_value.as_object().unwrap();
                 self.context
                     .avm2
                     .push(dictionary.has_property_by_object(obj_key));
@@ -1590,7 +1653,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn op_get_slot(&mut self, index: u32) -> Result<FrameControl<'gc>, Error> {
-        let object = self.context.avm2.pop().coerce_to_object(self)?;
+        let object = self.context.avm2.pop().coerce_to_receiver(self, None)?;
         let value = object.get_slot(index)?;
 
         self.context.avm2.push(value);
@@ -1600,7 +1663,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
     fn op_set_slot(&mut self, index: u32) -> Result<FrameControl<'gc>, Error> {
         let value = self.context.avm2.pop();
-        let object = self.context.avm2.pop().coerce_to_object(self)?;
+        let object = self.context.avm2.pop().coerce_to_receiver(self, None)?;
 
         object.set_slot(index, value, self.context.gc_context)?;
 
@@ -1631,7 +1694,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
     fn op_construct(&mut self, arg_count: u32) -> Result<FrameControl<'gc>, Error> {
         let args = self.context.avm2.pop_args(arg_count);
-        let ctor = self.context.avm2.pop().coerce_to_object(self)?;
+        let ctor = self.context.avm2.pop().as_callable(self, None, None)?;
 
         let object = ctor.construct(self, &args)?;
 
@@ -1648,7 +1711,11 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     ) -> Result<FrameControl<'gc>, Error> {
         let args = self.context.avm2.pop_args(arg_count);
         let multiname = self.pool_multiname(method, index)?;
-        let source = self.context.avm2.pop().coerce_to_object(self)?;
+        let source = self
+            .context
+            .avm2
+            .pop()
+            .coerce_to_receiver(self, Some(&multiname))?;
 
         let object = source.construct_prop(&multiname, &args, self)?;
 
@@ -1659,7 +1726,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
     fn op_construct_super(&mut self, arg_count: u32) -> Result<FrameControl<'gc>, Error> {
         let args = self.context.avm2.pop_args(arg_count);
-        let receiver = self.context.avm2.pop().coerce_to_object(self)?;
+        let receiver = self.context.avm2.pop().coerce_to_receiver(self, None)?;
 
         self.super_init(receiver, &args)?;
 
@@ -1738,7 +1805,12 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
     fn op_apply_type(&mut self, num_types: u32) -> Result<FrameControl<'gc>, Error> {
         let args = self.context.avm2.pop_args(num_types);
-        let base = self.context.avm2.pop().coerce_to_object(self)?;
+        let base = self
+            .context
+            .avm2
+            .pop()
+            .as_object()
+            .ok_or("Cannot specialize null or undefined")?;
 
         if args.len() > 1 {
             return Err(format!(
@@ -1839,7 +1911,12 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn op_convert_o(&mut self) -> Result<FrameControl<'gc>, Error> {
-        let value = self.context.avm2.pop().coerce_to_object(self)?;
+        let value = self
+            .context
+            .avm2
+            .pop()
+            .coerce_to_object(self)
+            .map_err(|_| "Cannot convert null or undefined to object")?;
 
         self.context.avm2.push(value);
 
@@ -2428,7 +2505,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
     fn op_has_next(&mut self) -> Result<FrameControl<'gc>, Error> {
         let cur_index = self.context.avm2.pop().coerce_to_u32(self)?;
-        let object = self.context.avm2.pop().coerce_to_object(self)?;
+        let object = self.context.avm2.pop().coerce_to_receiver(self, None)?;
 
         if let Some(next_index) = object.get_next_enumerant(cur_index, self)? {
             self.context.avm2.push(next_index);
@@ -2447,7 +2524,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let mut cur_index = self.local_register(index_register)?.coerce_to_u32(self)?;
         let mut object = Some(
             self.local_register(object_register)?
-                .coerce_to_object(self)?,
+                .coerce_to_receiver(self, None)?,
         );
 
         while let Some(cur_object) = object {
@@ -2477,7 +2554,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
     fn op_next_name(&mut self) -> Result<FrameControl<'gc>, Error> {
         let cur_index = self.context.avm2.pop().coerce_to_number(self)?;
-        let object = self.context.avm2.pop().coerce_to_object(self)?;
+        let object = self.context.avm2.pop().coerce_to_receiver(self, None)?;
 
         let name = object.get_enumerant_name(cur_index as u32, self)?;
 
@@ -2488,7 +2565,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
     fn op_next_value(&mut self) -> Result<FrameControl<'gc>, Error> {
         let cur_index = self.context.avm2.pop().coerce_to_number(self)?;
-        let object = self.context.avm2.pop().coerce_to_object(self)?;
+        let object = self.context.avm2.pop().coerce_to_receiver(self, None)?;
 
         let value = object.get_enumerant_value(cur_index as u32, self)?;
 
@@ -2505,23 +2582,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let value = self.context.avm2.pop();
 
         let multiname = self.pool_multiname_static(method, type_name_index)?;
-        let found: Result<Value<'gc>, Error> =
-            self.resolve_definition(&multiname)?.ok_or_else(|| {
-                format!(
-                    "Attempted to check against nonexistent type {:?}",
-                    multiname
-                )
-                .into()
-            });
-        let type_object = found?
-            .coerce_to_object(self)?
-            .as_class_object()
-            .ok_or_else(|| {
-                Error::from(format!(
-                    "Attempted to check against nonexistent type {:?}",
-                    multiname
-                ))
-            })?;
+        let type_object = self.resolve_class(&multiname)?;
 
         let is_instance_of = value.is_of_type(self, type_object)?;
         self.context.avm2.push(is_instance_of);
@@ -2530,12 +2591,14 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn op_is_type_late(&mut self) -> Result<FrameControl<'gc>, Error> {
-        let type_object = self.context.avm2.pop().coerce_to_object(self)?;
+        let type_object = self
+            .context
+            .avm2
+            .pop()
+            .as_object()
+            .and_then(|o| o.as_class_object())
+            .ok_or("Cannot check if value is of a type that is null, undefined, or not a class")?;
         let value = self.context.avm2.pop();
-
-        let type_object = type_object
-            .as_class_object()
-            .ok_or_else(|| Error::from("Attempted to check against non-type"))?;
 
         let is_instance_of = value.is_of_type(self, type_object)?;
 
@@ -2552,20 +2615,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let value = self.context.avm2.pop().coerce_to_object(self)?;
 
         let multiname = self.pool_multiname_static(method, type_name_index)?;
-        let found: Result<Value<'gc>, Error> =
-            self.resolve_definition(&multiname)?.ok_or_else(|| {
-                format!(
-                    "Attempted to check against nonexistent type {:?}",
-                    multiname
-                )
-                .into()
-            });
-        let class = found?
-            .coerce_to_object(self)?
-            .as_class_object()
-            .ok_or_else(|| {
-                Error::from("TypeError: The right-hand side of operator must be a class.")
-            })?;
+        let class = self.resolve_class(&multiname)?;
 
         if value.is_of_type(class, self)? {
             self.context.avm2.push(value);
@@ -2577,12 +2627,14 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn op_as_type_late(&mut self) -> Result<FrameControl<'gc>, Error> {
-        let class = self.context.avm2.pop().coerce_to_object(self)?;
+        let class = self
+            .context
+            .avm2
+            .pop()
+            .as_object()
+            .and_then(|c| c.as_class_object())
+            .ok_or("Cannot coerce a value to a type that is null, undefined, or not a class")?;
         let value = self.context.avm2.pop().coerce_to_object(self)?;
-
-        let class = class.as_class_object().ok_or_else(|| {
-            Error::from("TypeError: The right-hand side of operator must be a class.")
-        })?;
 
         if value.is_of_type(class, self)? {
             self.context.avm2.push(value);
@@ -2594,7 +2646,10 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn op_instance_of(&mut self) -> Result<FrameControl<'gc>, Error> {
-        let type_object = self.context.avm2.pop().coerce_to_object(self)?;
+        let type_object =
+            self.context.avm2.pop().as_object().ok_or(
+                "Cannot check if value is of a type that is null, undefined, or not a class",
+            )?;
         let value = self.context.avm2.pop().coerce_to_object(self).ok();
 
         if let Some(value) = value {

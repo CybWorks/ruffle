@@ -1,7 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 use ruffle_core::backend::render::{
-    Bitmap, BitmapFormat, BitmapHandle, BitmapInfo, BitmapSource, Color, NullBitmapSource,
-    RenderBackend, ShapeHandle, Transform,
+    Bitmap, BitmapFormat, BitmapHandle, BitmapSource, Color, NullBitmapSource, RenderBackend,
+    ShapeHandle, Transform,
 };
 use ruffle_core::shape_utils::DistilledShape;
 use ruffle_core::swf;
@@ -84,6 +84,7 @@ pub struct WebGlRenderBackend {
     mask_state: MaskState,
     num_masks: u32,
     mask_state_dirty: bool,
+    is_transparent: bool,
 
     active_program: *const ShaderProgram,
     blend_func: (u32, u32),
@@ -100,14 +101,22 @@ pub struct WebGlRenderBackend {
 const MAX_GRADIENT_COLORS: usize = 15;
 
 impl WebGlRenderBackend {
-    pub fn new(canvas: &HtmlCanvasElement) -> Result<Self, Error> {
+    pub fn new(canvas: &HtmlCanvasElement, is_transparent: bool) -> Result<Self, Error> {
         // Create WebGL context.
         let options = [
             ("stencil", JsValue::TRUE),
-            ("alpha", JsValue::FALSE),
+            (
+                "alpha",
+                if is_transparent {
+                    JsValue::TRUE
+                } else {
+                    JsValue::FALSE
+                },
+            ),
             ("antialias", JsValue::FALSE),
             ("depth", JsValue::FALSE),
             ("failIfMajorPerformanceCaveat", JsValue::TRUE), // fail if no GPU available
+            ("premultipliedAlpha", JsValue::TRUE),
         ];
         let context_options = js_sys::Object::new();
         for (name, value) in options.iter() {
@@ -202,7 +211,7 @@ impl WebGlRenderBackend {
         let gradient_program = ShaderProgram::new(&gl, &texture_vertex, &gradient_fragment)?;
 
         gl.enable(Gl::BLEND);
-        gl.blend_func(Gl::SRC_ALPHA, Gl::ONE_MINUS_SRC_ALPHA);
+        gl.blend_func(Gl::ONE, Gl::ONE_MINUS_SRC_ALPHA);
 
         // Necessary to load RGB textures (alignment defaults to 4).
         gl.pixel_storei(Gl::UNPACK_ALIGNMENT, 1);
@@ -232,9 +241,10 @@ impl WebGlRenderBackend {
             mask_state: MaskState::NoMask,
             num_masks: 0,
             mask_state_dirty: true,
+            is_transparent,
 
             active_program: std::ptr::null(),
-            blend_func: (Gl::SRC_ALPHA, Gl::ONE_MINUS_SRC_ALPHA),
+            blend_func: (Gl::ONE, Gl::ONE_MINUS_SRC_ALPHA),
             mult_color: None,
             add_color: None,
             bitmap_registry: HashMap::new(),
@@ -390,7 +400,7 @@ impl WebGlRenderBackend {
         gl.renderbuffer_storage_multisample(
             Gl2::RENDERBUFFER,
             self.msaa_sample_count as i32,
-            Gl2::RGB8,
+            Gl2::RGBA8,
             self.renderbuffer_width,
             self.renderbuffer_height,
         );
@@ -440,11 +450,11 @@ impl WebGlRenderBackend {
         gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
             Gl2::TEXTURE_2D,
             0,
-            Gl2::RGB as i32,
+            Gl2::RGBA as i32,
             self.renderbuffer_width,
             self.renderbuffer_height,
             0,
-            Gl2::RGB,
+            Gl2::RGBA,
             Gl2::UNSIGNED_BYTE,
             None,
         )
@@ -638,56 +648,6 @@ impl WebGlRenderBackend {
             }
         }
     }
-
-    fn register_bitmap(&mut self, bitmap: Bitmap) -> Result<BitmapInfo, Error> {
-        let (format, data) = match &bitmap.data {
-            BitmapFormat::Rgb(data) => (Gl::RGB, data),
-            BitmapFormat::Rgba(data) => (Gl::RGBA, data),
-        };
-
-        let texture = self.gl.create_texture().unwrap();
-        self.gl.bind_texture(Gl::TEXTURE_2D, Some(&texture));
-        self.gl
-            .tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
-                Gl::TEXTURE_2D,
-                0,
-                format as i32,
-                bitmap.width as i32,
-                bitmap.height as i32,
-                0,
-                format,
-                Gl::UNSIGNED_BYTE,
-                Some(data),
-            )
-            .into_js_result()?;
-
-        // You must set the texture parameters for non-power-of-2 textures to function in WebGL1.
-        self.gl
-            .tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_WRAP_S, Gl::CLAMP_TO_EDGE as i32);
-        self.gl
-            .tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_WRAP_T, Gl::CLAMP_TO_EDGE as i32);
-        self.gl
-            .tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_MIN_FILTER, Gl::LINEAR as i32);
-        self.gl
-            .tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_MAG_FILTER, Gl::LINEAR as i32);
-
-        let handle = BitmapHandle(self.textures.len());
-        let width = bitmap.width;
-        let height = bitmap.height;
-        self.bitmap_registry.insert(handle, bitmap);
-
-        self.textures.push(Texture {
-            width,
-            height,
-            texture,
-        });
-
-        Ok(BitmapInfo {
-            handle,
-            width: width as u16,
-            height: height as u16,
-        })
-    }
 }
 
 impl RenderBackend for WebGlRenderBackend {
@@ -739,38 +699,6 @@ impl RenderBackend for WebGlRenderBackend {
         handle
     }
 
-    fn register_bitmap_jpeg(
-        &mut self,
-        data: &[u8],
-        jpeg_tables: Option<&[u8]>,
-    ) -> Result<BitmapInfo, Error> {
-        let data = ruffle_core::backend::render::glue_tables_to_jpeg(data, jpeg_tables);
-        self.register_bitmap_jpeg_2(&data[..])
-    }
-
-    fn register_bitmap_jpeg_2(&mut self, data: &[u8]) -> Result<BitmapInfo, Error> {
-        let bitmap = ruffle_core::backend::render::decode_define_bits_jpeg(data, None)?;
-        self.register_bitmap(bitmap)
-    }
-
-    fn register_bitmap_jpeg_3_or_4(
-        &mut self,
-        jpeg_data: &[u8],
-        alpha_data: &[u8],
-    ) -> Result<BitmapInfo, Error> {
-        let bitmap =
-            ruffle_core::backend::render::decode_define_bits_jpeg(jpeg_data, Some(alpha_data))?;
-        self.register_bitmap(bitmap)
-    }
-
-    fn register_bitmap_png(
-        &mut self,
-        swf_tag: &swf::DefineBitsLossless,
-    ) -> Result<BitmapInfo, Error> {
-        let bitmap = ruffle_core::backend::render::decode_define_bits_lossless(swf_tag)?;
-        self.register_bitmap(bitmap)
-    }
-
     fn begin_frame(&mut self, clear: Color) {
         self.active_program = std::ptr::null();
         self.mask_state = MaskState::NoMask;
@@ -790,12 +718,16 @@ impl RenderBackend for WebGlRenderBackend {
             .viewport(0, 0, self.renderbuffer_width, self.renderbuffer_height);
 
         self.set_stencil_state();
-        self.gl.clear_color(
-            clear.r as f32 / 255.0,
-            clear.g as f32 / 255.0,
-            clear.b as f32 / 255.0,
-            clear.a as f32 / 255.0,
-        );
+        if self.is_transparent {
+            self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
+        } else {
+            self.gl.clear_color(
+                clear.r as f32 / 255.0,
+                clear.g as f32 / 255.0,
+                clear.b as f32 / 255.0,
+                clear.a as f32 / 255.0,
+            );
+        }
         self.gl.stencil_mask(0xff);
         self.gl.clear(Gl::COLOR_BUFFER_BIT | Gl::STENCIL_BUFFER_BIT);
     }
@@ -1012,13 +944,8 @@ impl RenderBackend for WebGlRenderBackend {
             self.bind_vertex_array(Some(&draw.vao));
 
             let (program, src_blend, dst_blend) = match &draw.draw_type {
-                DrawType::Color => (&self.color_program, Gl::SRC_ALPHA, Gl::ONE_MINUS_SRC_ALPHA),
-                DrawType::Gradient(_) => (
-                    &self.gradient_program,
-                    Gl::SRC_ALPHA,
-                    Gl::ONE_MINUS_SRC_ALPHA,
-                ),
-                // Bitmaps use pre-multiplied alpha.
+                DrawType::Color => (&self.color_program, Gl::ONE, Gl::ONE_MINUS_SRC_ALPHA),
+                DrawType::Gradient(_) => (&self.gradient_program, Gl::ONE, Gl::ONE_MINUS_SRC_ALPHA),
                 DrawType::Bitmap { .. } => (&self.bitmap_program, Gl::ONE, Gl::ONE_MINUS_SRC_ALPHA),
             };
 
@@ -1163,7 +1090,7 @@ impl RenderBackend for WebGlRenderBackend {
         self.set_stencil_state();
 
         let program = &self.color_program;
-        let src_blend = Gl::SRC_ALPHA;
+        let src_blend = Gl::ONE;
         let dst_blend = Gl::ONE_MINUS_SRC_ALPHA;
 
         // Set common render state, while minimizing unnecessary state changes.
@@ -1244,19 +1171,50 @@ impl RenderBackend for WebGlRenderBackend {
         self.bitmap_registry.get(&bitmap).cloned()
     }
 
-    fn register_bitmap_raw(
-        &mut self,
-        width: u32,
-        height: u32,
-        rgba: Vec<u8>,
-    ) -> Result<BitmapHandle, Error> {
-        Ok(self
-            .register_bitmap(Bitmap {
-                data: BitmapFormat::Rgba(rgba),
-                width,
-                height,
-            })?
-            .handle)
+    fn register_bitmap(&mut self, bitmap: Bitmap) -> Result<BitmapHandle, Error> {
+        let format = match bitmap.format() {
+            BitmapFormat::Rgb => Gl::RGB,
+            BitmapFormat::Rgba => Gl::RGBA,
+        };
+
+        let texture = self.gl.create_texture().unwrap();
+        self.gl.bind_texture(Gl::TEXTURE_2D, Some(&texture));
+        self.gl
+            .tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
+                Gl::TEXTURE_2D,
+                0,
+                format as i32,
+                bitmap.width() as i32,
+                bitmap.height() as i32,
+                0,
+                format,
+                Gl::UNSIGNED_BYTE,
+                Some(bitmap.data()),
+            )
+            .into_js_result()?;
+
+        // You must set the texture parameters for non-power-of-2 textures to function in WebGL1.
+        self.gl
+            .tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_WRAP_S, Gl::CLAMP_TO_EDGE as i32);
+        self.gl
+            .tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_WRAP_T, Gl::CLAMP_TO_EDGE as i32);
+        self.gl
+            .tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_MIN_FILTER, Gl::LINEAR as i32);
+        self.gl
+            .tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_MAG_FILTER, Gl::LINEAR as i32);
+
+        let handle = BitmapHandle(self.textures.len());
+        let width = bitmap.width();
+        let height = bitmap.height();
+        self.bitmap_registry.insert(handle, bitmap);
+
+        self.textures.push(Texture {
+            width,
+            height,
+            texture,
+        });
+
+        Ok(handle)
     }
 
     fn update_texture(

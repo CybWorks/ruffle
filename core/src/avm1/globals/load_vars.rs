@@ -3,6 +3,7 @@
 
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
+use crate::avm1::function::ExecutionReason;
 use crate::avm1::property::Attribute;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Object, ScriptObject, TObject, Value};
@@ -115,13 +116,23 @@ fn on_data<'gc>(
     let success = match args.get(0).unwrap_or(&Value::Undefined) {
         Value::Undefined | Value::Null => false,
         val => {
-            this.call_method("decode".into(), &[*val], activation)?;
+            this.call_method(
+                "decode".into(),
+                &[*val],
+                activation,
+                ExecutionReason::FunctionCall,
+            )?;
             this.set("loaded", true.into(), activation)?;
             true
         }
     };
 
-    this.call_method("onLoad".into(), &[success.into()], activation)?;
+    this.call_method(
+        "onLoad".into(),
+        &[success.into()],
+        activation,
+        ExecutionReason::FunctionCall,
+    )?;
 
     Ok(Value::Undefined)
 }
@@ -255,7 +266,7 @@ fn spawn_load_var_fetch<'gc>(
     };
 
     let future = activation.context.load_manager.load_form_into_load_vars(
-        activation.context.player.clone().unwrap(),
+        activation.context.player.clone(),
         loader_object,
         &url,
         request_options,

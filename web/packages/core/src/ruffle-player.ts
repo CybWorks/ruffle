@@ -10,6 +10,7 @@ import {
     URLLoadOptions,
     AutoPlay,
     UnmuteOverlay,
+    WindowMode,
 } from "./load-options";
 import { MovieMetadata } from "./movie-metadata";
 import { InternalContextMenuItem } from "./context-menu";
@@ -52,9 +53,9 @@ declare global {
         webkitExitFullscreen?: () => void;
         webkitCancelFullScreen?: () => void;
     }
-    interface HTMLElement {
-        webkitRequestFullscreen?: (arg0: unknown) => unknown;
-        webkitRequestFullScreen?: (arg0: unknown) => unknown;
+    interface Element {
+        webkitRequestFullscreen?: (options: unknown) => unknown;
+        webkitRequestFullScreen?: (options: unknown) => unknown;
     }
 }
 
@@ -364,11 +365,11 @@ export class RufflePlayer extends HTMLElement {
      * @private
      */
     private isUnusedFallbackObject(): boolean {
-        let parent = this.parentNode;
         const element = lookupElement("ruffle-object");
 
         if (element !== null) {
-            while (parent != document && parent != null) {
+            let parent = this.parentNode;
+            while (parent !== document && parent !== null) {
                 if (parent.nodeName === element.name) {
                     return true;
                 }
@@ -577,7 +578,10 @@ export class RufflePlayer extends HTMLElement {
             this.hasContextMenu = config.contextMenu !== false;
 
             // Pre-emptively set background color of container while Ruffle/SWF loads.
-            if (config.backgroundColor) {
+            if (
+                config.backgroundColor &&
+                config.wmode !== WindowMode.Transparent
+            ) {
                 this.container.style.backgroundColor = config.backgroundColor;
             }
 
@@ -976,7 +980,7 @@ export class RufflePlayer extends HTMLElement {
      * @param elem The element to copy all attributes from.
      * @protected
      */
-    protected copyElement(elem: HTMLElement): void {
+    protected copyElement(elem: Element): void {
         if (elem) {
             for (let i = 0; i < elem.attributes.length; i++) {
                 const attrib = elem.attributes[i];
@@ -1124,8 +1128,11 @@ export class RufflePlayer extends HTMLElement {
         if (this.swfUrl) errorArray.push(`SWF URL: ${this.swfUrl}\n`);
 
         errorArray.push("\n# Browser Info\n");
-        errorArray.push(`Useragent: ${window.navigator.userAgent}\n`);
-        errorArray.push(`OS: ${window.navigator.platform}\n`);
+        errorArray.push(`User Agent: ${window.navigator.userAgent}\n`);
+        errorArray.push(`Platform: ${window.navigator.platform}\n`);
+        errorArray.push(
+            `Has touch support: ${window.navigator.maxTouchPoints > 0}\n`
+        );
 
         errorArray.push("\n# Ruffle Info\n");
         errorArray.push(`Version: %VERSION_NUMBER%\n`);
@@ -1137,23 +1144,36 @@ export class RufflePlayer extends HTMLElement {
 
         const errorText = errorArray.join("");
 
-        // Remove query params for the issue title.
-        const pageUrl = document.location.href.split(/[?#]/)[0];
-        const issueTitle = `Error on ${pageUrl}`;
-        let issueLink = `https://github.com/ruffle-rs/ruffle/issues/new?title=${encodeURIComponent(
-            issueTitle
-        )}&template=error_report.md&labels=error-report&body=`;
-        let issueBody = encodeURIComponent(errorText);
-        if (
-            errorArray.stackIndex > -1 &&
-            String(issueLink + issueBody).length > 8195
-        ) {
-            // Strip the stack error from the array when the produced URL is way too long.
-            // This should prevent "414 Request-URI Too Large" errors on Github.
-            errorArray[errorArray.stackIndex] = null;
-            issueBody = encodeURIComponent(errorArray.join(""));
+        const buildDate = new Date("%BUILD_DATE%");
+        const monthsPrior = new Date();
+        monthsPrior.setMonth(monthsPrior.getMonth() - 6); // 6 months prior
+        const isBuildOutdated = monthsPrior > buildDate;
+
+        // Create a link to GitHub with all of the error data, if the build is not outdated.
+        // Otherwise, create a link to the downloads section on the Ruffle website.
+        let actionTag;
+        if (!isBuildOutdated) {
+            // Remove query params for the issue title.
+            const pageUrl = document.location.href.split(/[?#]/)[0];
+            const issueTitle = `Error on ${pageUrl}`;
+            let issueLink = `https://github.com/ruffle-rs/ruffle/issues/new?title=${encodeURIComponent(
+                issueTitle
+            )}&template=error_report.md&labels=error-report&body=`;
+            let issueBody = encodeURIComponent(errorText);
+            if (
+                errorArray.stackIndex > -1 &&
+                String(issueLink + issueBody).length > 8195
+            ) {
+                // Strip the stack error from the array when the produced URL is way too long.
+                // This should prevent "414 Request-URI Too Large" errors on GitHub.
+                errorArray[errorArray.stackIndex] = null;
+                issueBody = encodeURIComponent(errorArray.join(""));
+            }
+            issueLink += issueBody;
+            actionTag = `<a target="_top" href="${issueLink}">Report Bug</a>`;
+        } else {
+            actionTag = `<a target="_top" href="${RUFFLE_ORIGIN}#downloads">Update Ruffle</a>`;
         }
-        issueLink += issueBody;
 
         // Clears out any existing content (ie play button or canvas) and replaces it with the error screen
         let errorBody, errorFooter;
@@ -1272,8 +1292,11 @@ export class RufflePlayer extends HTMLElement {
                     <p>It seems like this page uses JavaScript code that conflicts with Ruffle.</p>
                     <p>If you are the server administrator, we invite you to try loading the file on a blank page.</p>
                 `;
+                if (isBuildOutdated) {
+                    errorBody += `<p>You can also try to upload a more recent version of Ruffle that may circumvent the issue (current build is outdated: %BUILD_DATE%).</p>`;
+                }
                 errorFooter = `
-                    <li><a target="_top" href="${issueLink}">Report Bug</a></li>
+                    <li>${actionTag}</li>
                     <li><a href="#" id="panic-view-details">View Error Details</a></li>
                 `;
                 break;
@@ -1291,12 +1314,14 @@ export class RufflePlayer extends HTMLElement {
                 break;
             default:
                 // Unknown error
-                errorBody = `
-                    <p>Ruffle has encountered a major issue whilst trying to display this Flash content.</p>
-                    <p>This isn't supposed to happen, so we'd really appreciate if you could file a bug!</p>
-                `;
+                errorBody = `<p>Ruffle has encountered a major issue whilst trying to display this Flash content.</p>`;
+                if (!isBuildOutdated) {
+                    errorBody += `<p>This isn't supposed to happen, so we'd really appreciate if you could file a bug!</p>`;
+                } else {
+                    errorBody += `<p>If you are the server administrator, please try to upload a more recent version of Ruffle (current build is outdated: %BUILD_DATE%).</p>`;
+                }
                 errorFooter = `
-                    <li><a target="_top" href="${issueLink}">Report Bug</a></li>
+                    <li>${actionTag}</li>
                     <li><a href="#" id="panic-view-details">View Error Details</a></li>
                 `;
                 break;
@@ -1330,7 +1355,7 @@ export class RufflePlayer extends HTMLElement {
 
     displayRootMovieDownloadFailedMessage(): void {
         if (
-            window.location.origin == this.swfUrl!.origin ||
+            window.location.origin === this.swfUrl!.origin ||
             !this.isExtension ||
             !window.location.protocol.includes("http")
         ) {
@@ -1358,8 +1383,8 @@ export class RufflePlayer extends HTMLElement {
         // TODO: Change link to https://ruffle.rs/faq or similar
         // TODO: Pause content until message is dismissed
         div.innerHTML = `<div class="message">
-            <p>Flash Player has been removed from browsers in 2021.</p>
-            <p>This content is not yet supported by the Ruffle emulator and will likely not run as intended.</p>
+            <p>The Ruffle emulator does not yet support ActionScript 3, required by this content.</p>
+            <p>If you choose to run it anyway, interactivity will be missing or limited.</p>
             <div>
                 <a target="_blank" class="more-info-link" href="https://github.com/ruffle-rs/ruffle/wiki/Frequently-Asked-Questions-For-Users">More info</a>
                 <button id="run-anyway-btn">Run anyway</button>
@@ -1512,7 +1537,7 @@ export function isYoutubeFlashSource(filename: string | null): boolean {
  * @param attr The attribute to adjust.
  */
 export function workaroundYoutubeMixedContent(
-    elem: HTMLElement,
+    elem: Element,
     attr: string
 ): void {
     const elem_attr = elem.getAttribute(attr);
@@ -1567,7 +1592,7 @@ export function isSwfFilename(filename: string | null): boolean {
  * @param elem The element to test.
  * @returns True if the element is inside an <audio> or <video> node.
  */
-export function isFallbackElement(elem: HTMLElement): boolean {
+export function isFallbackElement(elem: Element): boolean {
     let parent = elem.parentElement;
     while (parent !== null) {
         switch (parent.tagName) {

@@ -23,7 +23,6 @@ use crate::avm1::object::gradient_bevel_filter::GradientBevelFilterObject;
 use crate::avm1::object::gradient_glow_filter::GradientGlowFilterObject;
 use crate::avm1::object::text_format_object::TextFormatObject;
 use crate::avm1::object::transform_object::TransformObject;
-use crate::avm1::object::xml_attributes_object::XmlAttributesObject;
 use crate::avm1::object::xml_node_object::XmlNodeObject;
 use crate::avm1::object::xml_object::XmlObject;
 use crate::avm1::{AvmString, ScriptObject, SoundObject, StageObject, Value};
@@ -55,7 +54,6 @@ pub mod super_object;
 pub mod text_format_object;
 pub mod transform_object;
 pub mod value_object;
-pub mod xml_attributes_object;
 pub mod xml_node_object;
 pub mod xml_object;
 
@@ -73,7 +71,6 @@ pub mod xml_object;
         SuperObject(SuperObject<'gc>),
         XmlObject(XmlObject<'gc>),
         XmlNodeObject(XmlNodeObject<'gc>),
-        XmlAttributesObject(XmlAttributesObject<'gc>),
         ValueObject(ValueObject<'gc>),
         FunctionObject(FunctionObject<'gc>),
         SharedObject(SharedObject<'gc>),
@@ -251,6 +248,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         name: AvmString<'gc>,
         args: &[Value<'gc>],
         activation: &mut Activation<'_, 'gc, '_>,
+        reason: ExecutionReason,
     ) -> Result<Value<'gc>, Error<'gc>> {
         let this = (*self).into();
         let (method, depth) = match search_prototype(Value::Object(this), name, activation, this)? {
@@ -269,7 +267,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
                 this.into(),
                 depth,
                 args,
-                ExecutionReason::FunctionCall,
+                reason,
                 method,
             ),
             None => method.call(name, activation, this.into(), args),
@@ -441,9 +439,6 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
 
     /// Enumerate the object.
     fn get_keys(&self, activation: &mut Activation<'_, 'gc, '_>) -> Vec<AvmString<'gc>>;
-
-    /// Get the object's type string.
-    fn type_of(&self) -> &'static str;
 
     /// Enumerate all interfaces implemented by this object.
     fn interfaces(&self) -> Vec<Object<'gc>>;

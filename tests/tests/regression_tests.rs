@@ -3,23 +3,18 @@
 //! Trace output can be compared with correct output from the official Flash Player.
 
 use approx::assert_relative_eq;
-use ruffle_core::backend::render::RenderBackend;
-use ruffle_core::backend::video::SoftwareVideoBackend;
-use ruffle_core::backend::video::VideoBackend;
 use ruffle_core::backend::{
-    audio::NullAudioBackend,
     log::LogBackend,
     navigator::{NullExecutor, NullNavigatorBackend},
-    render::NullRenderer,
     storage::{MemoryStorageBackend, StorageBackend},
-    ui::NullUiBackend,
-    video::NullVideoBackend,
 };
 use ruffle_core::context::UpdateContext;
+use ruffle_core::events::MouseButton as RuffleMouseButton;
 use ruffle_core::external::Value as ExternalValue;
 use ruffle_core::external::{ExternalInterfaceMethod, ExternalInterfaceProvider};
 use ruffle_core::tag_utils::SwfMovie;
-use ruffle_core::Player;
+use ruffle_core::{Player, PlayerBuilder, PlayerEvent};
+use ruffle_input_format::{AutomatedEvent, InputInjector, MouseButton as InputMouseButton};
 use ruffle_render_wgpu::target::TextureTarget;
 use ruffle_render_wgpu::wgpu;
 use ruffle_render_wgpu::WgpuRenderBackend;
@@ -67,6 +62,7 @@ macro_rules! swf_tests {
             test_swf(
                 concat!("tests/swfs/", $path, "/test.swf"),
                 $num_frames,
+                concat!("tests/swfs/", $path, "/input.json"),
                 concat!("tests/swfs/", $path, "/output.txt"),
                 val_or_false!($($img)?)
             )
@@ -86,6 +82,7 @@ macro_rules! swf_tests_approx {
             test_swf_approx(
                 concat!("tests/swfs/", $path, "/test.swf"),
                 $num_frames,
+                concat!("tests/swfs/", $path, "/input.json"),
                 concat!("tests/swfs/", $path, "/output.txt"),
                 |actual, expected| assert_relative_eq!(actual, expected $(, $opt = $val)*),
             )
@@ -100,6 +97,9 @@ macro_rules! swf_tests_approx {
 // Inside the folder is expected to be "test.swf" and "output.txt" with the correct output.
 swf_tests! {
     (action_to_integer, "avm1/action_to_integer", 1),
+    (add_swf4, "avm1/add_swf4", 1),
+    (add_swf5, "avm1/add_swf5", 1),
+    (add, "avm1/add", 1),
     (add2, "avm1/add2", 1),
     (add_property, "avm1/add_property", 1),
     (arguments, "avm1/arguments", 1),
@@ -117,6 +117,12 @@ swf_tests! {
     (as_broadcaster_initialize, "avm1/as_broadcaster_initialize", 1),
     (as_broadcaster, "avm1/as_broadcaster", 1),
     (as_set_prop_flags, "avm1/as_set_prop_flags", 1),
+    (as_set_prop_flags_version, "avm1/as_set_prop_flags_version", 1),
+    (as_set_prop_flags_version_swf5, "avm1/as_set_prop_flags_version_swf5", 1),
+    (as_set_prop_flags_version_swf6, "avm1/as_set_prop_flags_version_swf6", 1),
+    (as_set_prop_flags_version_swf7, "avm1/as_set_prop_flags_version_swf7", 1),
+    (as_set_prop_flags_version_swf8, "avm1/as_set_prop_flags_version_swf8", 1),
+    (as_set_prop_flags_version_swf9, "avm1/as_set_prop_flags_version_swf9", 1),
     (as_transformed_flag, "avm1/as_transformed_flag", 3),
     (as1_constructor_v6, "avm1/as1_constructor_v6", 1),
     (as1_constructor_v7, "avm1/as1_constructor_v7", 1),
@@ -350,6 +356,7 @@ swf_tests! {
     (as3_movieclip_goto_during_frame_script, "avm2/movieclip_goto_during_frame_script", 1),
     (as3_movieclip_gotoandplay, "avm2/movieclip_gotoandplay", 5),
     (as3_movieclip_gotoandstop, "avm2/movieclip_gotoandstop", 5),
+    (as3_movieclip_gotoandstop_queueing, "avm2/movieclip_gotoandstop_queueing", 2),
     (as3_movieclip_next_frame, "avm2/movieclip_next_frame", 5),
     (as3_movieclip_next_scene, "avm2/movieclip_next_scene", 5),
     (as3_movieclip_play, "avm2/movieclip_play", 5),
@@ -453,6 +460,8 @@ swf_tests! {
     (as3_uint_tofixed, "avm2/uint_tofixed", 1),
     #[ignore] (as3_uint_toprecision, "avm2/uint_toprecision", 1), //Ignored because Flash Player has a print routine that adds extraneous zeros to things
     (as3_uint_tostring, "avm2/uint_tostring", 1),
+    (as3_unchecked_function, "avm2/unchecked_function", 1),
+    (as3_url_loader, "avm2/url_loader", 1),
     (as3_urshift, "avm2/urshift", 1),
     (as3_vector_coercion, "avm2/vector_coercion", 1),
     (as3_vector_concat, "avm2/vector_concat", 1),
@@ -550,7 +559,11 @@ swf_tests! {
     (edittext_scroll, "avm1/edittext_scroll", 1),
     (edittext_width_height, "avm1/edittext_width_height", 1),
     (empty_movieclip_can_attach_movies, "avm1/empty_movieclip_can_attach_movies", 1),
+    (enumerate, "avm1/enumerate", 1),
     (equals_swf4, "avm1/equals_swf4", 1),
+    (equals_swf4_alt, "avm1/equals_swf4_alt", 1),
+    (equals_swf5, "avm1/equals_swf5", 1),
+    (equals, "avm1/equals", 1),
     (equals2_swf5, "avm1/equals2_swf5", 1),
     (equals2_swf6, "avm1/equals2_swf6", 1),
     (equals2_swf7, "avm1/equals2_swf7", 1),
@@ -568,6 +581,9 @@ swf_tests! {
     (function_base_clip, "avm1/function_base_clip", 2),
     (funky_function_calls, "avm1/funky_function_calls", 1),
     (get_bytes_total, "avm1/get_bytes_total", 1),
+    (getproperty_swf4, "avm1/getproperty_swf4", 1),
+    (getproperty_swf5, "avm1/getproperty_swf5", 1),
+    (getproperty, "avm1/getproperty", 1),
     (get_variable_in_scope, "avm1/get_variable_in_scope", 1),
     (global_array, "avm1/global_array", 1),
     (global_is_bare, "avm1/global_is_bare", 1),
@@ -614,7 +630,11 @@ swf_tests! {
     (issue_3522, "avm1/issue_3522", 2),
     (issue_4377, "avm1/issue_4377", 1),
     (issue_710, "avm1/issue_710", 1),
+    (issue_768, "avm1/issue_768", 1),
     (lessthan_swf4, "avm1/lessthan_swf4", 1),
+    (lessthan_swf4_alt, "avm1/lessthan_swf4_alt", 1),
+    (lessthan_swf5, "avm1/lessthan_swf5", 1),
+    (lessthan, "avm1/lessthan", 1),
     (lessthan2_swf5, "avm1/lessthan2_swf5", 1),
     (lessthan2_swf6, "avm1/lessthan2_swf6", 1),
     (lessthan2_swf7, "avm1/lessthan2_swf7", 1),
@@ -642,6 +662,7 @@ swf_tests! {
     (mcl_pngtarget, "avm1/mcl_pngtarget", 11),
     (mcl_unloadclip, "avm1/mcl_unloadclip", 11),
     (mouse_listeners, "avm1/mouse_listeners", 1),
+    (mouse_events, "avm1/mouse_events", 8),
     (movieclip_depth_methods, "avm1/movieclip_depth_methods", 3),
     (movieclip_get_instance_at_depth, "avm1/movieclip_get_instance_at_depth", 1),
     (movieclip_hittest_shapeflag, "avm1/movieclip_hittest_shapeflag", 10),
@@ -695,9 +716,14 @@ swf_tests! {
     (string_methods_negative_args, "avm1/string_methods_negative_args", 1),
     (string_methods, "avm1/string_methods", 1),
     (string_ops_swf6, "avm1/string_ops_swf6", 1),
+    (swf4_actions_bool, "avm1/swf4_actions_bool", 1),
     (swf4_bool, "avm1/swf4_bool", 1),
     (swf5_encoding, "avm1/swf5_encoding", 1),
+    (swf5_no_closure, "avm1/swf5_no_closure", 1),
+    (swf5_to_6_cross_call, "avm1/swf5_to_6_cross_call", 2),
+    (swf6_string_as_bool, "avm1/swf6_string_as_bool", 1),
     (swf6_case_insensitive, "avm1/swf6_case_insensitive", 1),
+    (swf6_to_5_cross_call, "avm1/swf6_to_5_cross_call", 2),
     (swf7_case_sensitive, "avm1/swf7_case_sensitive", 1),
     (target_clip_removed, "avm1/target_clip_removed", 1),
     (target_clip_swf5, "avm1/target_clip_swf5", 2),
@@ -750,11 +776,9 @@ swf_tests! {
     (xml_inspect_createmethods, "avm1/xml_inspect_createmethods", 1),
     (xml_inspect_doctype, "avm1/xml_inspect_doctype", 1),
     (xml_inspect_parsexml, "avm1/xml_inspect_parsexml", 1),
-    #[ignore] (xml_inspect_xmldecl, "avm1/xml_inspect_xmldecl", 1),
+    (xml_inspect_xmldecl, "avm1/xml_inspect_xmldecl", 1),
     (xml_load, "avm1/xml_load", 1),
     (xml_namespaces, "avm1/xml_namespaces", 1),
-    (xml_node_namespaceuri, "avm1/xml_node_namespaceuri", 1),
-    (xml_node_weirdnamespace, "avm1/xml_node_weirdnamespace", 1),
     (xml_parent_and_child, "avm1/xml_parent_and_child", 1),
     (xml_remove_node, "avm1/xml_remove_node", 1),
     (xml_reparenting, "avm1/xml_reparenting", 1),
@@ -809,6 +833,7 @@ fn external_interface_avm1() -> Result<(), Error> {
     test_swf_with_hooks(
         "tests/swfs/avm1/external_interface/test.swf",
         1,
+        "tests/swfs/avm1/external_interface/input.json",
         "tests/swfs/avm1/external_interface/output.txt",
         |player| {
             player
@@ -864,6 +889,7 @@ fn external_interface_avm2() -> Result<(), Error> {
     test_swf_with_hooks(
         "tests/swfs/avm2/external_interface/test.swf",
         1,
+        "tests/swfs/avm2/external_interface/input.json",
         "tests/swfs/avm2/external_interface/output.txt",
         |player| {
             player
@@ -916,6 +942,7 @@ fn shared_object_avm1() -> Result<(), Error> {
     test_swf_with_hooks(
         "tests/swfs/avm1/shared_object/test.swf",
         1,
+        "tests/swfs/avm1/shared_object/input1.json",
         "tests/swfs/avm1/shared_object/output1.txt",
         |_player| Ok(()),
         |player| {
@@ -940,6 +967,7 @@ fn shared_object_avm1() -> Result<(), Error> {
     test_swf_with_hooks(
         "tests/swfs/avm1/shared_object/test.swf",
         1,
+        "tests/swfs/avm1/shared_object/input2.json",
         "tests/swfs/avm1/shared_object/output2.txt",
         |player| {
             // Swap in the previous storage backend.
@@ -960,6 +988,7 @@ fn timeout_avm1() -> Result<(), Error> {
     test_swf_with_hooks(
         "tests/swfs/avm1/timeout/test.swf",
         1,
+        "tests/swfs/avm1/timeout/input.json",
         "tests/swfs/avm1/timeout/output.txt",
         |player| {
             player
@@ -979,6 +1008,7 @@ fn stage_scale_mode() -> Result<(), Error> {
     test_swf_with_hooks(
         "tests/swfs/avm1/stage_scale_mode/test.swf",
         1,
+        "tests/swfs/avm1/stage_scale_mode/input.json",
         "tests/swfs/avm1/stage_scale_mode/output.txt",
         |player| {
             // Simulate a large viewport to test stage size.
@@ -1026,12 +1056,14 @@ macro_rules! assert_eq {
 fn test_swf(
     swf_path: &str,
     num_frames: u32,
+    simulated_input_path: &str,
     expected_output_path: &str,
     check_img: bool,
 ) -> Result<(), Error> {
     test_swf_with_hooks(
         swf_path,
         num_frames,
+        simulated_input_path,
         expected_output_path,
         |_| Ok(()),
         |_| Ok(()),
@@ -1044,11 +1076,14 @@ fn test_swf(
 fn test_swf_with_hooks(
     swf_path: &str,
     num_frames: u32,
+    simulated_input_path: &str,
     expected_output_path: &str,
     before_start: impl FnOnce(Arc<Mutex<Player>>) -> Result<(), Error>,
     before_end: impl FnOnce(Arc<Mutex<Player>>) -> Result<(), Error>,
     check_img: bool,
 ) -> Result<(), Error> {
+    let injector =
+        InputInjector::from_file(simulated_input_path).unwrap_or_else(|_| InputInjector::empty());
     let mut expected_output = std::fs::read_to_string(expected_output_path)?.replace("\r\n", "\n");
 
     // Strip a trailing newline if it has one.
@@ -1056,7 +1091,14 @@ fn test_swf_with_hooks(
         expected_output = expected_output[0..expected_output.len() - "\n".len()].to_string();
     }
 
-    let trace_log = run_swf(swf_path, num_frames, before_start, before_end, check_img)?;
+    let trace_log = run_swf(
+        swf_path,
+        num_frames,
+        before_start,
+        injector,
+        before_end,
+        check_img,
+    )?;
     assert_eq!(
         trace_log, expected_output,
         "ruffle output != flash player output"
@@ -1071,10 +1113,20 @@ fn test_swf_with_hooks(
 fn test_swf_approx(
     swf_path: &str,
     num_frames: u32,
+    simulated_input_path: &str,
     expected_output_path: &str,
     approx_assert_fn: impl Fn(f64, f64),
 ) -> Result<(), Error> {
-    let trace_log = run_swf(swf_path, num_frames, |_| Ok(()), |_| Ok(()), false)?;
+    let injector =
+        InputInjector::from_file(simulated_input_path).unwrap_or_else(|_| InputInjector::empty());
+    let trace_log = run_swf(
+        swf_path,
+        num_frames,
+        |_| Ok(()),
+        injector,
+        |_| Ok(()),
+        false,
+    )?;
     let mut expected_data = std::fs::read_to_string(expected_output_path)?;
 
     // Strip a trailing newline if it has one.
@@ -1121,6 +1173,7 @@ fn run_swf(
     swf_path: &str,
     num_frames: u32,
     before_start: impl FnOnce(Arc<Mutex<Player>>) -> Result<(), Error>,
+    mut injector: InputInjector,
     before_end: impl FnOnce(Arc<Mutex<Player>>) -> Result<(), Error>,
     mut check_img: bool,
 ) -> Result<String, Error> {
@@ -1135,51 +1188,39 @@ fn run_swf(
     let mut platform_id = None;
     let backend_bit = wgpu::Backends::PRIMARY;
 
-    let (render_backend, video_backend): (Box<dyn RenderBackend>, Box<dyn VideoBackend>) =
-        if check_img {
-            let instance = wgpu::Instance::new(backend_bit);
+    let mut builder = PlayerBuilder::new();
+    if check_img {
+        let instance = wgpu::Instance::new(backend_bit);
 
-            let descriptors = futures::executor::block_on(
-                WgpuRenderBackend::<TextureTarget>::build_descriptors(
-                    backend_bit,
-                    instance,
-                    None,
-                    Default::default(),
-                    None,
-                ),
-            )?;
+        let descriptors =
+            futures::executor::block_on(WgpuRenderBackend::<TextureTarget>::build_descriptors(
+                backend_bit,
+                instance,
+                None,
+                Default::default(),
+                None,
+            ))?;
 
-            platform_id = Some(get_img_platform_suffix(&descriptors.info));
+        platform_id = Some(get_img_platform_suffix(&descriptors.info));
 
-            let target = TextureTarget::new(
-                &descriptors.device,
-                (
-                    movie.width().to_pixels() as u32,
-                    movie.height().to_pixels() as u32,
-                ),
-            );
+        let target = TextureTarget::new(
+            &descriptors.device,
+            (
+                movie.width().to_pixels() as u32,
+                movie.height().to_pixels() as u32,
+            ),
+        );
 
-            let render_backend = Box::new(WgpuRenderBackend::new(descriptors, target)?);
-            let video_backend = Box::new(SoftwareVideoBackend::new());
-            (render_backend, video_backend)
-        } else {
-            (Box::new(NullRenderer), Box::new(NullVideoBackend::new()))
-        };
-
-    let player = Player::new(
-        render_backend,
-        Box::new(NullAudioBackend::new()),
-        Box::new(NullNavigatorBackend::with_base_path(base_path, &executor)),
-        Box::new(MemoryStorageBackend::default()),
-        video_backend,
-        Box::new(TestLogBackend::new(trace_output.clone())),
-        Box::new(NullUiBackend::new()),
-    )?;
-    player.lock().unwrap().set_root_movie(movie);
-    player
-        .lock()
-        .unwrap()
-        .set_max_execution_duration(Duration::from_secs(300));
+        builder = builder
+            .with_renderer(WgpuRenderBackend::new(descriptors, target)?)
+            .with_software_video();
+    };
+    let player = builder
+        .with_log(TestLogBackend::new(trace_output.clone()))
+        .with_navigator(NullNavigatorBackend::with_base_path(base_path, &executor))
+        .with_max_execution_duration(Duration::from_secs(300))
+        .with_movie(movie)
+        .build();
 
     before_start(player.clone())?;
 
@@ -1187,6 +1228,31 @@ fn run_swf(
         player.lock().unwrap().run_frame();
         player.lock().unwrap().update_timers(frame_time);
         executor.run();
+
+        injector.next(|evt, _btns_down| {
+            player.lock().unwrap().handle_event(match evt {
+                AutomatedEvent::MouseDown { pos, btn } => PlayerEvent::MouseDown {
+                    x: pos.0,
+                    y: pos.1,
+                    button: match btn {
+                        InputMouseButton::Left => RuffleMouseButton::Left,
+                        InputMouseButton::Middle => RuffleMouseButton::Middle,
+                        InputMouseButton::Right => RuffleMouseButton::Right,
+                    },
+                },
+                AutomatedEvent::MouseMove { pos } => PlayerEvent::MouseMove { x: pos.0, y: pos.1 },
+                AutomatedEvent::MouseUp { pos, btn } => PlayerEvent::MouseUp {
+                    x: pos.0,
+                    y: pos.1,
+                    button: match btn {
+                        InputMouseButton::Left => RuffleMouseButton::Left,
+                        InputMouseButton::Middle => RuffleMouseButton::Middle,
+                        InputMouseButton::Right => RuffleMouseButton::Right,
+                    },
+                },
+                AutomatedEvent::Wait => unreachable!(),
+            });
+        });
     }
 
     // Render the image to disk

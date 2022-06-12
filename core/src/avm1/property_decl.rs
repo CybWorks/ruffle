@@ -27,7 +27,7 @@ pub struct Declaration {
     // This should be an `Attribute`, but because of `const` shenanigans
     // we need to store the raw flags.
     // See the comment in the `declare_properties!` macro.
-    pub attributes: u8,
+    pub attributes: u16,
 }
 
 /// All the possible types of a [`Declaration`].
@@ -114,7 +114,7 @@ impl Declaration {
 ///
 /// # Usage:
 ///
-/// ```rust,ignored
+/// ```rust,ignore
 /// const DECLS: &'static [Declaration] = declare_properties! {
 ///     "length" => property(get_length);
 ///     "filters" => property(get_filters, set_filters);
@@ -126,8 +126,9 @@ impl Declaration {
 ///     "scale" => float(0.85);
 ///     // all declarations can also specify attributes
 ///     "hidden" => string("shh!"; DONT_ENUM | DONT_DELETE | READ_ONLY);
-/// }
+/// };
 /// ```
+#[allow(unused_macro_rules)]
 macro_rules! declare_properties {
     ( $($name:literal => $kind:ident($($args:tt)*);)* ) => {
         &[ $(
@@ -141,7 +142,7 @@ macro_rules! declare_properties {
             attributes: 0,
         }
     };
-    (@__prop $kind:ident($name:literal $(,$args:expr)*; $($attributes:ident)|*) ) => {
+    (@__prop $kind:ident($name:literal $(,$args:expr)*; $($attributes:ident)|*$(; version($version:tt))?) ) => {
         crate::avm1::property_decl::Declaration {
             name: $name,
             kind: declare_properties!(@__kind $kind ($($args),*)),
@@ -167,7 +168,7 @@ macro_rules! declare_properties {
 
                 TODO: use the `B)` desugaring once the above ICE is fixed.
             */
-            attributes: 0 $(| declare_properties!(@__attr $attributes))*,
+            attributes: 0 $(| declare_properties!(@__attr $attributes))* $(| declare_properties!(@__version $version))*,
         }
     };
     // MAKE SURE THESE VALUES ARE IN SYNC WITH THE `Attribute` DEFINITION!
@@ -179,6 +180,24 @@ macro_rules! declare_properties {
     };
     (@__attr READ_ONLY) => {
         (1 << 2)
+    };
+    (@__version 5) => {
+        0b0000_0000_0000_0000
+    };
+    (@__version 6) => {
+        0b0000_0000_1000_0000
+    };
+    (@__version 7) => {
+        0b0000_0101_0000_0000
+    };
+    (@__version 8) => {
+        0b0001_0000_0000_0000
+    };
+    (@__version 9) => {
+        0b0010_0000_0000_0000
+    };
+    (@__version 10) => {
+        0b0100_0000_0000_0000
     };
     (@__kind property($getter:expr)) => {
         crate::avm1::property_decl::DeclKind::Property {

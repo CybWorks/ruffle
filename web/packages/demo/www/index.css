@@ -102,6 +102,32 @@ body {
     vertical-align: middle;
 }
 
+#local-file {
+    display: none;
+}
+
+#local-file-label {
+    color: var(--ruffle-blue);
+    padding: 3px 10px;
+    margin: 5px 2px;
+    cursor: pointer;
+    border-radius: 50px;
+    background-color: white;
+}
+
+#local-file-name {
+    min-width: 150px;
+    display: inline-block;
+    font-size: smaller;
+}
+
+#sample-swfs {
+    background-color: white;
+    color: var(--ruffle-blue);
+    border: 1px solid white;
+    border-radius: 5px;
+}
+
 #author-container {
     font-size: small;
 }
@@ -119,15 +145,17 @@ body {
     #sample-swfs-container {
         display: block;
     }
+
+    #local-file-container {
+        margin-bottom: 10px;
+    }
 }
 
 @media only screen and (max-width: 600px) {
-    #local-file-container span {
-        display: block;
-    }
-
+    #local-file-static-label,
     #sample-swfs-label {
         display: block;
+        margin-bottom: 5px;
     }
 
     #author-container {

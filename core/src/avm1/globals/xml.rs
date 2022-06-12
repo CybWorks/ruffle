@@ -2,12 +2,13 @@
 
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
+use crate::avm1::function::ExecutionReason;
 use crate::avm1::object::xml_object::XmlObject;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Object, TObject, Value};
 use crate::avm_warn;
 use crate::backend::navigator::RequestOptions;
-use crate::string::{AvmString, WStr};
+use crate::string::WStr;
 use crate::xml::{XmlNode, ELEMENT_NODE, TEXT_NODE};
 use gc_arena::MutationContext;
 
@@ -167,14 +168,29 @@ fn on_data<'gc>(
     let src = args.get(0).cloned().unwrap_or(Value::Undefined);
 
     if let Value::Undefined = src {
-        this.call_method("onLoad".into(), &[false.into()], activation)?;
+        this.call_method(
+            "onLoad".into(),
+            &[false.into()],
+            activation,
+            ExecutionReason::FunctionCall,
+        )?;
     } else {
         let src = src.coerce_to_string(activation)?;
-        this.call_method("parseXML".into(), &[src.into()], activation)?;
+        this.call_method(
+            "parseXML".into(),
+            &[src.into()],
+            activation,
+            ExecutionReason::FunctionCall,
+        )?;
 
         this.set("loaded", true.into(), activation)?;
 
-        this.call_method("onLoad".into(), &[true.into()], activation)?;
+        this.call_method(
+            "onLoad".into(),
+            &[true.into()],
+            activation,
+            ExecutionReason::FunctionCall,
+        )?;
     }
 
     Ok(Value::Undefined)
@@ -195,21 +211,13 @@ fn doc_type_decl<'gc>(
 }
 
 fn xml_decl<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc, '_>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(document) = this.as_xml() {
-        let result = document.xmldecl_string();
-
-        if let Err(e) = result {
-            avm_warn!(
-                activation,
-                "Could not generate XML declaration for document: {}",
-                e
-            );
-        } else if let Ok(Some(result_str)) = result {
-            return Ok(AvmString::new_utf8(activation.context.gc_context, result_str).into());
+        if let Some(xml_decl) = document.xml_decl() {
+            return Ok(xml_decl.into());
         }
     }
 
@@ -249,8 +257,9 @@ fn spawn_xml_fetch<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let request_options = if let Some(node) = send_object {
         // Send `node` as string.
+        let string = node.into_string(activation)?;
         RequestOptions::post(Some((
-            node.into_string().to_utf8_lossy().into_owned().into_bytes(),
+            string.to_utf8_lossy().into_owned().into_bytes(),
             "application/x-www-form-urlencoded".to_string(),
         )))
     } else {
@@ -261,7 +270,7 @@ fn spawn_xml_fetch<'gc>(
     this.set("loaded", false.into(), activation)?;
 
     let future = activation.context.load_manager.load_form_into_load_vars(
-        activation.context.player.clone().unwrap(),
+        activation.context.player.clone(),
         loader_object,
         &url.to_utf8_lossy(),
         request_options,

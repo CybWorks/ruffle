@@ -3,52 +3,11 @@
 use crate::loader::Error;
 use crate::string::WStr;
 use indexmap::IndexMap;
-use std::borrow::Cow;
-use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use swf::avm1::types::SendVarsMethod;
 use url::{ParseError, Url};
-
-/// Attempt to convert a relative filesystem path into an absolute `file:///`
-/// URL.
-///
-/// If the relative path is an absolute path, the base will not be used, but it
-/// will still be parsed into a `Url`.
-///
-/// This is the desktop version of this function, which actually carries out
-/// the above instructions. On non-Unix, non-Windows, non-Redox environments,
-/// this function always yields an error.
-#[cfg(any(unix, windows, target_os = "redox"))]
-pub fn url_from_relative_path<P: AsRef<Path>>(base: P, relative: &str) -> Result<Url, ParseError> {
-    let parsed = Url::from_file_path(relative);
-    if let Err(()) = parsed {
-        let base =
-            Url::from_directory_path(base).map_err(|_| ParseError::RelativeUrlWithoutBase)?;
-
-        return base.join(relative);
-    }
-
-    Ok(parsed.unwrap())
-}
-
-/// Attempt to convert a relative filesystem path into an absolute `file:///`
-/// URL.
-///
-/// If the relative path is an absolute path, the base will not be used, but it
-/// will still be parsed into a `Url`.
-///
-/// This is the web version of this function, which always yields an error. On
-/// Unix, Windows, or Redox, this function actually carries out the above
-/// instructions.
-#[cfg(not(any(unix, windows, target_os = "redox")))]
-pub fn url_from_relative_path<P: AsRef<Path>>(
-    _base: P,
-    _relative: &str,
-) -> Result<Url, ParseError> {
-    Err(ParseError::RelativeUrlWithoutBase)
-}
 
 /// Attempt to convert a relative URL into an absolute URL, using the base URL
 /// if necessary.
@@ -135,6 +94,15 @@ impl RequestOptions {
     }
 }
 
+/// A response to a fetch request.
+pub struct Response {
+    /// The final URL obtained after any redirects.
+    pub url: String,
+
+    /// The contents of the response body.
+    pub body: Vec<u8>,
+}
+
 /// Type alias for pinned, boxed, and owned futures that output a falliable
 /// result of type `Result<T, E>`.
 pub type OwnedFuture<T, E> = Pin<Box<dyn Future<Output = Result<T, E>> + 'static>>;
@@ -171,7 +139,7 @@ pub trait NavigatorBackend {
     );
 
     /// Fetch data at a given URL and return it some time in the future.
-    fn fetch(&self, url: &str, request_options: RequestOptions) -> OwnedFuture<Vec<u8>, Error>;
+    fn fetch(&self, url: &str, request_options: RequestOptions) -> OwnedFuture<Response, Error>;
 
     /// Arrange for a future to be run at some point in the... well, future.
     ///
@@ -182,16 +150,6 @@ pub trait NavigatorBackend {
     /// TODO: For some reason, `wasm_bindgen_futures` wants unpinnable futures.
     /// This seems highly limiting.
     fn spawn_future(&mut self, future: OwnedFuture<(), Error>);
-
-    /// Resolve a relative URL.
-    ///
-    /// This function must not change URLs which are already protocol, domain,
-    /// and path absolute. For URLs that are relative, the implementer of
-    /// this function may opt to convert them to absolute using an implementor
-    /// defined base. For a web browser, the most obvious base would be the
-    /// current document's base URL, while the most obvious base for a desktop
-    /// client would be the file-URL form of the current path.
-    fn resolve_relative_url<'a>(&self, url: &'a str) -> Cow<'a, str>;
 
     /// Handle any context specific pre-processing
     ///
@@ -292,8 +250,18 @@ impl NullNavigatorBackend {
     pub fn with_base_path(path: &Path, executor: &NullExecutor) -> Self {
         Self {
             spawner: executor.spawner(),
-            relative_base_path: path.to_path_buf(),
+            relative_base_path: path.canonicalize().unwrap(),
         }
+    }
+
+    #[cfg(any(unix, windows, target_os = "redox"))]
+    fn url_from_file_path(path: &Path) -> Result<Url, ()> {
+        Url::from_file_path(path)
+    }
+
+    #[cfg(not(any(unix, windows, target_os = "redox")))]
+    fn url_from_file_path(_path: &Path) -> Result<Url, ()> {
+        Err(())
     }
 }
 
@@ -312,24 +280,23 @@ impl NavigatorBackend for NullNavigatorBackend {
     ) {
     }
 
-    fn fetch(&self, url: &str, _opts: RequestOptions) -> OwnedFuture<Vec<u8>, Error> {
+    fn fetch(&self, url: &str, _opts: RequestOptions) -> OwnedFuture<Response, Error> {
         let mut path = self.relative_base_path.clone();
         path.push(url);
 
-        Box::pin(async move { fs::read(path).map_err(|e| Error::FetchError(e.to_string())) })
+        Box::pin(async move {
+            let url = Self::url_from_file_path(&path)
+                .map_err(|()| Error::FetchError("Invalid URL".to_string()))?
+                .into();
+
+            let body = std::fs::read(path).map_err(|e| Error::FetchError(e.to_string()))?;
+
+            Ok(Response { url, body })
+        })
     }
 
     fn spawn_future(&mut self, future: OwnedFuture<(), Error>) {
         self.spawner.spawn_local(future);
-    }
-
-    fn resolve_relative_url<'a>(&self, url: &'a str) -> Cow<'a, str> {
-        let relative = url_from_relative_path(&self.relative_base_path, url);
-        if let Ok(relative) = relative {
-            String::from(relative).into()
-        } else {
-            url.into()
-        }
     }
 
     fn pre_process_url(&self, url: Url) -> Url {

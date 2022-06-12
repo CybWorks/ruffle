@@ -5,6 +5,7 @@ members = [
     "desktop",
     "swf",
     "web",
+    "web/packages/extension/safari",
     "wstr",
     "scanner",
     "exporter",
@@ -15,6 +16,7 @@ members = [
     "render/webgl",
 
     "tests",
+    "tests/input-format",
 ]
 resolver = "2"
 

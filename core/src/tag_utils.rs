@@ -1,7 +1,5 @@
-use crate::backend::navigator::url_from_relative_path;
 use crate::vminterface::AvmType;
 use gc_arena::Collect;
-use std::path::Path;
 use std::sync::Arc;
 use swf::{Fixed8, HeaderExt, Rectangle, TagCode, Twips};
 
@@ -52,15 +50,17 @@ impl SwfMovie {
     }
 
     /// Utility method to construct a movie from a file on disk.
-    pub fn from_path<P: AsRef<Path>>(path: P, loader_url: Option<String>) -> Result<Self, Error> {
-        let mut url = path.as_ref().to_string_lossy().to_owned().to_string();
-        let cwd = std::env::current_dir()?;
-        if let Ok(abs_url) = url_from_relative_path(cwd, &url) {
-            url = abs_url.into();
-        }
+    #[cfg(any(unix, windows, target_os = "redox"))]
+    pub fn from_path<P: AsRef<std::path::Path>>(
+        path: P,
+        loader_url: Option<String>,
+    ) -> Result<Self, Error> {
+        let data = std::fs::read(&path)?;
 
-        let data = std::fs::read(path)?;
-        Self::from_data(&data, Some(url), loader_url)
+        let abs_path = path.as_ref().canonicalize()?;
+        let url = url::Url::from_file_path(abs_path).map_err(|()| "Invalid SWF URL")?;
+
+        Self::from_data(&data, Some(url.into()), loader_url)
     }
 
     /// Construct a movie based on the contents of the SWF datastream.

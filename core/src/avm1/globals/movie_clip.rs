@@ -2,8 +2,8 @@
 
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
-use crate::avm1::globals::display_object::{self, AVM_DEPTH_BIAS, AVM_MAX_DEPTH};
 use crate::avm1::globals::matrix::gradient_object_to_matrix;
+use crate::avm1::globals::{self, AVM_DEPTH_BIAS, AVM_MAX_DEPTH};
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{self, Object, ScriptObject, TObject, Value};
 use crate::avm_error;
@@ -64,15 +64,16 @@ macro_rules! mc_setter {
 
 const PROTO_DECLS: &[Declaration] = declare_properties! {
     "attachMovie" => method(mc_method!(attach_movie); DONT_ENUM | DONT_DELETE);
-    "createEmptyMovieClip" => method(mc_method!(create_empty_movie_clip); DONT_ENUM | DONT_DELETE);
+    "createEmptyMovieClip" => method(mc_method!(create_empty_movie_clip); DONT_ENUM | DONT_DELETE; version(6));
     "createTextField" => method(mc_method!(create_text_field); DONT_ENUM | DONT_DELETE);
     "duplicateMovieClip" => method(mc_method!(duplicate_movie_clip); DONT_ENUM | DONT_DELETE);
     "getBounds" => method(mc_method!(get_bounds); DONT_ENUM | DONT_DELETE);
     "getBytesLoaded" => method(mc_method!(get_bytes_loaded); DONT_ENUM | DONT_DELETE);
     "getBytesTotal" => method(mc_method!(get_bytes_total); DONT_ENUM | DONT_DELETE);
-    "getInstanceAtDepth" => method(mc_method!(get_instance_at_depth); DONT_ENUM | DONT_DELETE);
-    "getNextHighestDepth" => method(mc_method!(get_next_highest_depth); DONT_ENUM | DONT_DELETE);
-    "getRect" => method(mc_method!(get_rect); DONT_ENUM | DONT_DELETE);
+    "getDepth" => method(globals::get_depth; DONT_ENUM | DONT_DELETE | READ_ONLY; version(6));
+    "getInstanceAtDepth" => method(mc_method!(get_instance_at_depth); DONT_ENUM | DONT_DELETE; version(7));
+    "getNextHighestDepth" => method(mc_method!(get_next_highest_depth); DONT_ENUM | DONT_DELETE; version(7));
+    "getRect" => method(mc_method!(get_rect); DONT_ENUM | DONT_DELETE; version(8));
     "getURL" => method(mc_method!(get_url); DONT_ENUM | DONT_DELETE);
     "globalToLocal" => method(mc_method!(global_to_local); DONT_ENUM | DONT_DELETE);
     "gotoAndPlay" => method(mc_method!(goto_and_play); DONT_ENUM | DONT_DELETE);
@@ -84,24 +85,24 @@ const PROTO_DECLS: &[Declaration] = declare_properties! {
     "nextFrame" => method(mc_method!(next_frame); DONT_ENUM | DONT_DELETE);
     "play" => method(mc_method!(play); DONT_ENUM | DONT_DELETE);
     "prevFrame" => method(mc_method!(prev_frame); DONT_ENUM | DONT_DELETE);
-    "setMask" => method(mc_method!(set_mask); DONT_ENUM | DONT_DELETE);
+    "setMask" => method(mc_method!(set_mask); DONT_ENUM | DONT_DELETE; version(6));
     "startDrag" => method(mc_method!(start_drag); DONT_ENUM | DONT_DELETE);
     "stop" => method(mc_method!(stop); DONT_ENUM | DONT_DELETE);
     "stopDrag" => method(mc_method!(stop_drag); DONT_ENUM | DONT_DELETE);
     "swapDepths" => method(mc_method!(swap_depths); DONT_ENUM | DONT_DELETE);
     "unloadMovie" => method(mc_method!(unload_movie); DONT_ENUM | DONT_DELETE);
-    "beginFill" => method(mc_method!(begin_fill); DONT_ENUM | DONT_DELETE);
-    "beginBitmapFill" => method(mc_method!(begin_bitmap_fill); DONT_ENUM | DONT_DELETE);
-    "beginGradientFill" => method(mc_method!(begin_gradient_fill); DONT_ENUM | DONT_DELETE);
-    "moveTo" => method(mc_method!(move_to); DONT_ENUM | DONT_DELETE);
-    "lineTo" => method(mc_method!(line_to); DONT_ENUM | DONT_DELETE);
-    "curveTo" => method(mc_method!(curve_to); DONT_ENUM | DONT_DELETE);
-    "endFill" => method(mc_method!(end_fill); DONT_ENUM | DONT_DELETE);
-    "lineStyle" => method(mc_method!(line_style); DONT_ENUM | DONT_DELETE);
-    "clear" => method(mc_method!(clear); DONT_ENUM | DONT_DELETE);
-    "attachBitmap" => method(mc_method!(attach_bitmap); DONT_ENUM | DONT_DELETE);
+    "beginFill" => method(mc_method!(begin_fill); DONT_ENUM | DONT_DELETE; version(6));
+    "beginBitmapFill" => method(mc_method!(begin_bitmap_fill); DONT_ENUM | DONT_DELETE; version(8));
+    "beginGradientFill" => method(mc_method!(begin_gradient_fill); DONT_ENUM | DONT_DELETE; version(6));
+    "moveTo" => method(mc_method!(move_to); DONT_ENUM | DONT_DELETE; version(6));
+    "lineTo" => method(mc_method!(line_to); DONT_ENUM | DONT_DELETE; version(6));
+    "curveTo" => method(mc_method!(curve_to); DONT_ENUM | DONT_DELETE; version(6));
+    "endFill" => method(mc_method!(end_fill); DONT_ENUM | DONT_DELETE; version(6));
+    "lineStyle" => method(mc_method!(line_style); DONT_ENUM | DONT_DELETE; version(6));
+    "clear" => method(mc_method!(clear); DONT_ENUM | DONT_DELETE; version(6));
+    "attachBitmap" => method(mc_method!(attach_bitmap); DONT_ENUM | DONT_DELETE; version(8));
     "removeMovieClip" => method(remove_movie_clip; DONT_ENUM | DONT_DELETE);
-    "transform" => property(mc_getter!(transform), mc_setter!(set_transform); DONT_ENUM);
+    "transform" => property(mc_getter!(transform), mc_setter!(set_transform); DONT_ENUM; version(8));
     "enabled" => property(mc_getter!(enabled), mc_setter!(set_enabled); DONT_DELETE | DONT_ENUM);
     "focusEnabled" => property(mc_getter!(focus_enabled), mc_setter!(set_focus_enabled); DONT_DELETE | DONT_ENUM);
     "_lockroot" => property(mc_getter!(lock_root), mc_setter!(set_lock_root); DONT_DELETE | DONT_ENUM);
@@ -167,7 +168,6 @@ pub fn create_proto<'gc>(
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
     let object = ScriptObject::object(gc_context, Some(proto));
-    display_object::define_display_object_proto(gc_context, object, fn_proto);
     define_properties_on(PROTO_DECLS, gc_context, object, fn_proto);
     object.into()
 }
@@ -251,7 +251,7 @@ fn line_style<'gc>(
                 * 255.0;
             Color::from_rgb(rgb, alpha as u8)
         } else {
-            Color::from_rgb(0, 255)
+            Color::BLACK
         };
         let is_pixel_hinted = args
             .get(3)
@@ -291,21 +291,20 @@ fn line_style<'gc>(
             Some(v) if v == b"bevel" => LineJoinStyle::Bevel,
             _ => LineJoinStyle::Round,
         };
+        let line_style = LineStyle::new()
+            .with_width(width)
+            .with_color(color)
+            .with_start_cap(cap_style)
+            .with_end_cap(cap_style)
+            .with_join_style(join_style)
+            .with_allow_scale_x(allow_scale_x)
+            .with_allow_scale_y(allow_scale_y)
+            .with_is_pixel_hinted(is_pixel_hinted)
+            .with_allow_close(false);
         movie_clip
             .as_drawing(activation.context.gc_context)
             .unwrap()
-            .set_line_style(Some(LineStyle {
-                width,
-                color,
-                start_cap: cap_style,
-                end_cap: cap_style,
-                join_style,
-                fill_style: None,
-                allow_scale_x,
-                allow_scale_y,
-                is_pixel_hinted,
-                allow_close: false,
-            }));
+            .set_line_style(Some(line_style));
     } else {
         movie_clip
             .as_drawing(activation.context.gc_context)
@@ -817,10 +816,10 @@ pub fn duplicate_movie_clip_with_bias<'gc>(
         parent.replace_at_depth(&mut activation.context, new_clip, depth);
 
         // Copy display properties from previous clip to new clip.
-        new_clip.set_matrix(activation.context.gc_context, &*movie_clip.base().matrix());
+        new_clip.set_matrix(activation.context.gc_context, movie_clip.base().matrix());
         new_clip.set_color_transform(
             activation.context.gc_context,
-            &*movie_clip.base().color_transform(),
+            movie_clip.base().color_transform(),
         );
         new_clip.as_movie_clip().unwrap().set_clip_event_handlers(
             activation.context.gc_context,
@@ -1043,7 +1042,7 @@ fn remove_movie_clip<'gc>(
     // `removeMovieClip` can remove all types of display object,
     // e.g. `MovieClip.prototype.removeMovieClip.apply(textField);`
     if let Some(this) = this.as_display_object() {
-        crate::avm1::globals::display_object::remove_display_object(this, activation);
+        crate::avm1::globals::remove_display_object(this, activation);
     }
 
     Ok(Value::Undefined)
@@ -1323,7 +1322,7 @@ fn load_movie<'gc>(
     let method = NavigationMethod::from_method_str(&method.coerce_to_string(activation)?);
     let (url, opts) = activation.locals_into_request_options(&url, method);
     let future = activation.context.load_manager.load_movie_into_clip(
-        activation.context.player.clone().unwrap(),
+        activation.context.player.clone(),
         DisplayObject::MovieClip(target),
         &url,
         opts,
@@ -1347,7 +1346,7 @@ fn load_variables<'gc>(
     let (url, opts) = activation.locals_into_request_options(&url, method);
     let target = target.object().coerce_to_object(activation);
     let future = activation.context.load_manager.load_form_into_object(
-        activation.context.player.clone().unwrap(),
+        activation.context.player.clone(),
         target,
         &url,
         opts,

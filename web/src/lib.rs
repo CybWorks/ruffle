@@ -7,12 +7,6 @@ mod ui;
 
 use generational_arena::{Arena, Index};
 use js_sys::{Array, Function, Object, Promise, Uint8Array};
-use ruffle_core::backend::{
-    audio::{AudioBackend, NullAudioBackend},
-    render::RenderBackend,
-    storage::{MemoryStorageBackend, StorageBackend},
-    video::SoftwareVideoBackend,
-};
 use ruffle_core::config::Letterbox;
 use ruffle_core::context::UpdateContext;
 use ruffle_core::events::{KeyCode, MouseButton, MouseWheelDelta};
@@ -20,7 +14,7 @@ use ruffle_core::external::{
     ExternalInterfaceMethod, ExternalInterfaceProvider, Value as ExternalValue, Value,
 };
 use ruffle_core::tag_utils::SwfMovie;
-use ruffle_core::{Color, Player, PlayerEvent};
+use ruffle_core::{Color, Player, PlayerBuilder, PlayerEvent};
 use ruffle_web_common::JsResult;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -145,6 +139,8 @@ pub struct Config {
 
     scale: Option<String>,
 
+    wmode: Option<String>,
+
     #[serde(rename = "warnOnUnsupportedContent")]
     warn_on_unsupported_content: bool,
 
@@ -163,6 +159,7 @@ impl Default for Config {
             salign: Some("".to_owned()),
             quality: Some("high".to_owned()),
             scale: Some("showAll".to_owned()),
+            wmode: Some("opaque".to_owned()),
             background_color: Default::default(),
             letterbox: Default::default(),
             upgrade_to_https: true,
@@ -465,48 +462,53 @@ impl Ruffle {
         let window = web_sys::window().ok_or("Expected window")?;
         let document = window.document().ok_or("Expected document")?;
 
-        let (canvas, renderer) = create_renderer(&document).await?;
+        let (mut builder, canvas) =
+            create_renderer(PlayerBuilder::new(), &document, &config).await?;
+
         parent
             .append_child(&canvas.clone().into())
             .into_js_result()?;
-        let audio: Box<dyn AudioBackend> = if let Ok(audio) = audio::WebAudioBackend::new() {
-            Box::new(audio)
+
+        if let Ok(audio) = audio::WebAudioBackend::new() {
+            builder = builder.with_audio(audio);
         } else {
             log::error!("Unable to create audio backend. No audio will be played.");
-            Box::new(NullAudioBackend::new())
-        };
-        let navigator = Box::new(navigator::WebNavigatorBackend::new(
+        }
+        builder = builder.with_navigator(navigator::WebNavigatorBackend::new(
             allow_script_access,
             config.upgrade_to_https,
             config.base_url,
         ));
-        let storage = match window.local_storage() {
+
+        match window.local_storage() {
             Ok(Some(s)) => {
-                Box::new(storage::LocalStorageBackend::new(s)) as Box<dyn StorageBackend>
+                builder = builder.with_storage(storage::LocalStorageBackend::new(s));
             }
             err => {
                 log::warn!("Unable to use localStorage: {:?}\nData will not save.", err);
-                Box::new(MemoryStorageBackend::default())
             }
         };
-        let trace_observer = Arc::new(RefCell::new(JsValue::UNDEFINED));
-        let video = Box::new(SoftwareVideoBackend::new());
-        let log = Box::new(log_adapter::WebLogBackend::new(trace_observer.clone()));
-        let ui = Box::new(ui::WebUiBackend::new(js_player.clone(), &canvas));
 
-        let core = ruffle_core::Player::new(renderer, audio, navigator, storage, video, log, ui)?;
+        let trace_observer = Arc::new(RefCell::new(JsValue::UNDEFINED));
+        let core = builder
+            .with_log(log_adapter::WebLogBackend::new(trace_observer.clone()))
+            .with_ui(ui::WebUiBackend::new(js_player.clone(), &canvas))
+            .with_software_video()
+            .with_letterbox(config.letterbox)
+            .with_max_execution_duration(config.max_execution_duration)
+            .with_warn_on_unsupported_content(config.warn_on_unsupported_content)
+            .build();
+
         if let Ok(mut core) = core.try_lock() {
             // Set config parameters.
             if let Some(color) = config.background_color.and_then(parse_html_color) {
                 core.set_background_color(Some(color));
             }
-            core.set_letterbox(config.letterbox);
-            core.set_warn_on_unsupported_content(config.warn_on_unsupported_content);
-            core.set_max_execution_duration(config.max_execution_duration);
             core.set_show_menu(config.show_menu);
             core.set_stage_align(config.salign.as_deref().unwrap_or(""));
             core.set_quality(config.quality.as_deref().unwrap_or("high"));
             core.set_scale_mode(config.scale.as_deref().unwrap_or("showAll"));
+            core.set_window_mode(config.wmode.as_deref().unwrap_or("window"));
 
             // Create the external interface.
             if allow_script_access {
@@ -1203,15 +1205,19 @@ fn external_to_js_value(external: ExternalValue) -> JsValue {
 }
 
 async fn create_renderer(
+    builder: PlayerBuilder,
     document: &web_sys::Document,
-) -> Result<(HtmlCanvasElement, Box<dyn RenderBackend>), Box<dyn Error>> {
-    #[cfg(not(any(feature = "canvas", feature = "webgl")))]
+    config: &Config,
+) -> Result<(PlayerBuilder, HtmlCanvasElement), Box<dyn Error>> {
+    #[cfg(not(any(feature = "canvas", feature = "webgl", feature = "wgpu")))]
     std::compile_error!("You must enable one of the render backend features (e.g., webgl).");
+
+    let _is_transparent = config.wmode.as_deref() == Some("transparent");
 
     // Try to create a backend, falling through to the next backend on failure.
     // We must recreate the canvas each attempt, as only a single context may be created per canvas
     // with `getContext`.
-    #[cfg(feature = "wgpu")]
+    #[cfg(all(feature = "wgpu", target_arch = "wasm32"))]
     {
         // Check that we have access to WebGPU (navigator.gpu should exist).
         if web_sys::window()
@@ -1227,7 +1233,9 @@ async fn create_renderer(
                 .map_err(|_| "Expected HtmlCanvasElement")?;
 
             match ruffle_render_wgpu::WgpuRenderBackend::for_canvas(&canvas).await {
-                Ok(renderer) => return Ok((canvas, Box::new(renderer))),
+                Ok(renderer) => {
+                    return Ok((builder.with_renderer(renderer), canvas));
+                }
                 Err(error) => log::error!("Error creating wgpu renderer: {}", error),
             }
         }
@@ -1244,8 +1252,10 @@ async fn create_renderer(
             .into_js_result()?
             .dyn_into()
             .map_err(|_| "Expected HtmlCanvasElement")?;
-        match ruffle_render_webgl::WebGlRenderBackend::new(&canvas) {
-            Ok(renderer) => return Ok((canvas, Box::new(renderer))),
+        match ruffle_render_webgl::WebGlRenderBackend::new(&canvas, _is_transparent) {
+            Ok(renderer) => {
+                return Ok((builder.with_renderer(renderer), canvas));
+            }
             Err(error) => log::error!("Error creating WebGL renderer: {}", error),
         }
     }
@@ -1258,8 +1268,10 @@ async fn create_renderer(
             .into_js_result()?
             .dyn_into()
             .map_err(|_| "Expected HtmlCanvasElement")?;
-        match ruffle_render_canvas::WebCanvasRenderBackend::new(&canvas) {
-            Ok(renderer) => return Ok((canvas, Box::new(renderer))),
+        match ruffle_render_canvas::WebCanvasRenderBackend::new(&canvas, _is_transparent) {
+            Ok(renderer) => {
+                return Ok((builder.with_renderer(renderer), canvas));
+            }
             Err(error) => log::error!("Error creating canvas renderer: {}", error),
         }
     }

@@ -377,8 +377,12 @@ impl<'a> Reader<'a> {
                 let jpeg_data = tag_reader.read_slice_to_end();
                 Tag::DefineBitsJpeg2 { id, jpeg_data }
             }
-            TagCode::DefineBitsJpeg3 => tag_reader.read_define_bits_jpeg_3(3)?,
-            TagCode::DefineBitsJpeg4 => tag_reader.read_define_bits_jpeg_3(4)?,
+            TagCode::DefineBitsJpeg3 => {
+                Tag::DefineBitsJpeg3(tag_reader.read_define_bits_jpeg_3(3)?)
+            }
+            TagCode::DefineBitsJpeg4 => {
+                Tag::DefineBitsJpeg3(tag_reader.read_define_bits_jpeg_3(4)?)
+            }
             TagCode::DefineButton => {
                 Tag::DefineButton(Box::new(tag_reader.read_define_button_1()?))
             }
@@ -399,8 +403,12 @@ impl<'a> Reader<'a> {
             TagCode::DefineFont3 => Tag::DefineFont2(Box::new(tag_reader.read_define_font_2(3)?)),
             TagCode::DefineFont4 => Tag::DefineFont4(tag_reader.read_define_font_4()?),
             TagCode::DefineFontAlignZones => tag_reader.read_define_font_align_zones()?,
-            TagCode::DefineFontInfo => tag_reader.read_define_font_info(1)?,
-            TagCode::DefineFontInfo2 => tag_reader.read_define_font_info(2)?,
+            TagCode::DefineFontInfo => {
+                Tag::DefineFontInfo(Box::new(tag_reader.read_define_font_info(1)?))
+            }
+            TagCode::DefineFontInfo2 => {
+                Tag::DefineFontInfo(Box::new(tag_reader.read_define_font_info(2)?))
+            }
             TagCode::DefineFontName => tag_reader.read_define_font_name()?,
             TagCode::DefineMorphShape => {
                 Tag::DefineMorphShape(Box::new(tag_reader.read_define_morph_shape(1)?))
@@ -415,7 +423,9 @@ impl<'a> Reader<'a> {
             TagCode::DefineSound => Tag::DefineSound(Box::new(tag_reader.read_define_sound()?)),
             TagCode::DefineText => Tag::DefineText(Box::new(tag_reader.read_define_text(1)?)),
             TagCode::DefineText2 => Tag::DefineText(Box::new(tag_reader.read_define_text(2)?)),
-            TagCode::DefineVideoStream => tag_reader.read_define_video_stream()?,
+            TagCode::DefineVideoStream => {
+                Tag::DefineVideoStream(tag_reader.read_define_video_stream()?)
+            }
             TagCode::EnableTelemetry => {
                 tag_reader.read_u16()?; // Reserved
                 let password_hash = if length > 2 {
@@ -565,7 +575,7 @@ impl<'a> Reader<'a> {
 
             TagCode::FrameLabel => Tag::FrameLabel(tag_reader.read_frame_label(length)?),
 
-            TagCode::DefineSprite => tag_reader.read_define_sprite()?,
+            TagCode::DefineSprite => Tag::DefineSprite(tag_reader.read_define_sprite()?),
 
             TagCode::PlaceObject => {
                 Tag::PlaceObject(Box::new(tag_reader.read_place_object(length)?))
@@ -584,7 +594,7 @@ impl<'a> Reader<'a> {
 
             TagCode::RemoveObject2 => Tag::RemoveObject(tag_reader.read_remove_object_2()?),
 
-            TagCode::VideoFrame => tag_reader.read_video_frame()?,
+            TagCode::VideoFrame => Tag::VideoFrame(tag_reader.read_video_frame()?),
             TagCode::ProductInfo => Tag::ProductInfo(tag_reader.read_product_info()?),
             TagCode::NameCharacter => Tag::NameCharacter(tag_reader.read_name_character()?),
         };
@@ -1206,7 +1216,7 @@ impl<'a> Reader<'a> {
         Ok(zone)
     }
 
-    fn read_define_font_info(&mut self, version: u8) -> Result<Tag<'a>> {
+    fn read_define_font_info(&mut self, version: u8) -> Result<FontInfo<'a>> {
         let id = self.read_u16()?;
         let name = self.read_str_with_len()?;
         let flags = FontInfoFlag::from_bits_truncate(self.read_u8()?);
@@ -1230,14 +1240,14 @@ impl<'a> Reader<'a> {
         }
 
         // SWF19 has ANSI and Shift-JIS backwards?
-        Ok(Tag::DefineFontInfo(Box::new(FontInfo {
+        Ok(FontInfo {
             id,
             version,
             name,
             flags,
             language,
             code_table,
-        })))
+        })
     }
 
     fn read_define_font_name(&mut self) -> Result<Tag<'a>> {
@@ -1354,78 +1364,53 @@ impl<'a> Reader<'a> {
             let end_color = self.read_rgba()?;
 
             Ok((
-                LineStyle::new_v1(start_width, start_color),
-                LineStyle::new_v1(end_width, end_color),
+                LineStyle::new()
+                    .with_width(start_width)
+                    .with_color(start_color),
+                LineStyle::new().with_width(end_width).with_color(end_color),
             ))
         } else {
             // MorphLineStyle2 in DefineMorphShape2.
-            let flags = LineStyleFlag::from_bits_truncate(self.read_u16()?);
-            let is_pixel_hinted = flags.contains(LineStyleFlag::PIXEL_HINTING);
-            let allow_scale_y = !flags.contains(LineStyleFlag::NO_V_SCALE);
-            let allow_scale_x = !flags.contains(LineStyleFlag::NO_H_SCALE);
-            let has_fill = flags.contains(LineStyleFlag::HAS_FILL);
-            let join_style = match flags & LineStyleFlag::JOIN_STYLE {
-                LineStyleFlag::ROUND => LineJoinStyle::Round,
-                LineStyleFlag::BEVEL => LineJoinStyle::Bevel,
-                LineStyleFlag::MITER => LineJoinStyle::Miter(self.read_fixed8()?),
-                _ => return Err(Error::invalid_data("Invalid line cap type.")),
+            let mut flags = LineStyleFlag::from_bits_truncate(self.read_u16()?);
+            // Verify valid cap and join styles.
+            if flags.contains(LineStyleFlag::JOIN_STYLE) {
+                log::warn!("Invalid line join style");
+                flags -= LineStyleFlag::JOIN_STYLE;
+            }
+            if flags.contains(LineStyleFlag::START_CAP_STYLE) {
+                log::warn!("Invalid line start cap style");
+                flags -= LineStyleFlag::START_CAP_STYLE;
+            }
+            if flags.contains(LineStyleFlag::END_CAP_STYLE) {
+                log::warn!("Invalid line end cap style");
+                flags -= LineStyleFlag::END_CAP_STYLE;
+            }
+            let miter_limit = if flags & LineStyleFlag::JOIN_STYLE == LineStyleFlag::MITER {
+                self.read_fixed8()?
+            } else {
+                Fixed8::ZERO
             };
-            let start_cap =
-                LineCapStyle::from_u8(((flags & LineStyleFlag::START_CAP_STYLE).bits() >> 6) as u8)
-                    .ok_or_else(|| Error::invalid_data("Invalid line cap type."))?;
-            let end_cap =
-                LineCapStyle::from_u8(((flags & LineStyleFlag::END_CAP_STYLE).bits() >> 8) as u8)
-                    .ok_or_else(|| Error::invalid_data("Invalid line cap type."))?;
-            let allow_close = !flags.contains(LineStyleFlag::ALLOW_CLOSE);
-
-            let (start_color, end_color) = if !has_fill {
-                (self.read_rgba()?, self.read_rgba()?)
+            let (start_fill_style, end_fill_style) = if flags.contains(LineStyleFlag::HAS_FILL) {
+                let (start, end) = self.read_morph_fill_style()?;
+                (start, end)
             } else {
                 (
-                    Color {
-                        r: 0,
-                        g: 0,
-                        b: 0,
-                        a: 0,
-                    },
-                    Color {
-                        r: 0,
-                        g: 0,
-                        b: 0,
-                        a: 0,
-                    },
+                    FillStyle::Color(self.read_rgba()?),
+                    FillStyle::Color(self.read_rgba()?),
                 )
-            };
-            let (start_fill_style, end_fill_style) = if has_fill {
-                let (start, end) = self.read_morph_fill_style()?;
-                (Some(start), Some(end))
-            } else {
-                (None, None)
             };
             Ok((
                 LineStyle {
                     width: start_width,
-                    color: start_color,
-                    start_cap,
-                    end_cap,
-                    join_style,
-                    allow_scale_x,
-                    allow_scale_y,
-                    is_pixel_hinted,
-                    allow_close,
                     fill_style: start_fill_style,
+                    flags,
+                    miter_limit,
                 },
                 LineStyle {
                     width: end_width,
-                    color: end_color,
-                    start_cap,
-                    end_cap,
-                    join_style,
-                    allow_scale_x,
-                    allow_scale_y,
-                    is_pixel_hinted,
-                    allow_close,
                     fill_style: end_fill_style,
+                    flags,
+                    miter_limit,
                 },
             ))
         }
@@ -1682,54 +1667,39 @@ impl<'a> Reader<'a> {
             } else {
                 self.read_rgb()?
             };
-            Ok(LineStyle::new_v1(width, color))
+            Ok(LineStyle::new().with_width(width).with_color(color))
         } else {
             // LineStyle2 in DefineShape4
-            let flags = LineStyleFlag::from_bits_truncate(self.read_u16()?);
-            let is_pixel_hinted = flags.contains(LineStyleFlag::PIXEL_HINTING);
-            let allow_scale_y = !flags.contains(LineStyleFlag::NO_V_SCALE);
-            let allow_scale_x = !flags.contains(LineStyleFlag::NO_H_SCALE);
-            let has_fill = flags.contains(LineStyleFlag::HAS_FILL);
-            let join_style = match flags & LineStyleFlag::JOIN_STYLE {
-                LineStyleFlag::ROUND => LineJoinStyle::Round,
-                LineStyleFlag::BEVEL => LineJoinStyle::Bevel,
-                LineStyleFlag::MITER => LineJoinStyle::Miter(self.read_fixed8()?),
-                _ => return Err(Error::invalid_data("Invalid line cap type.")),
+            let mut flags = LineStyleFlag::from_bits_truncate(self.read_u16()?);
+            // Verify valid cap and join styles.
+            if flags.contains(LineStyleFlag::JOIN_STYLE) {
+                log::warn!("Invalid line join style");
+                flags -= LineStyleFlag::JOIN_STYLE;
+            }
+            if flags.contains(LineStyleFlag::START_CAP_STYLE) {
+                log::warn!("Invalid line start cap style");
+                flags -= LineStyleFlag::START_CAP_STYLE;
+            }
+            if flags.contains(LineStyleFlag::END_CAP_STYLE) {
+                log::warn!("Invalid line end cap style");
+                flags -= LineStyleFlag::END_CAP_STYLE;
+            }
+            let miter_limit = if flags & LineStyleFlag::JOIN_STYLE == LineStyleFlag::MITER {
+                self.read_fixed8()?
+            } else {
+                Fixed8::ZERO
             };
-            let start_cap =
-                LineCapStyle::from_u8(((flags & LineStyleFlag::START_CAP_STYLE).bits() >> 6) as u8)
-                    .ok_or_else(|| Error::invalid_data("Invalid line cap type."))?;
-            let end_cap =
-                LineCapStyle::from_u8(((flags & LineStyleFlag::END_CAP_STYLE).bits() >> 8) as u8)
-                    .ok_or_else(|| Error::invalid_data("Invalid line cap type."))?;
-            let allow_close = !flags.contains(LineStyleFlag::ALLOW_CLOSE);
 
-            let color = if !has_fill {
-                self.read_rgba()?
+            let fill_style = if flags.contains(LineStyleFlag::HAS_FILL) {
+                self.read_fill_style(shape_version)?
             } else {
-                Color {
-                    r: 0,
-                    g: 0,
-                    b: 0,
-                    a: 0,
-                }
-            };
-            let fill_style = if has_fill {
-                Some(self.read_fill_style(shape_version)?)
-            } else {
-                None
+                FillStyle::Color(self.read_rgba()?)
             };
             Ok(LineStyle {
                 width,
-                color,
-                start_cap,
-                end_cap,
-                join_style,
                 fill_style,
-                allow_scale_x,
-                allow_scale_y,
-                is_pixel_hinted,
-                allow_close,
+                flags,
+                miter_limit,
             })
         }
     }
@@ -1848,12 +1818,12 @@ impl<'a> Reader<'a> {
         Ok(shape_record)
     }
 
-    pub fn read_define_sprite(&mut self) -> Result<Tag<'a>> {
-        Ok(Tag::DefineSprite(Sprite {
+    pub fn read_define_sprite(&mut self) -> Result<Sprite<'a>> {
+        Ok(Sprite {
             id: self.read_u16()?,
             num_frames: self.read_u16()?,
             tags: self.read_tag_list()?,
-        }))
+        })
     }
 
     pub fn read_file_attributes(&mut self) -> Result<FileAttributes> {
@@ -1987,7 +1957,13 @@ impl<'a> Reader<'a> {
             None
         };
         let is_bitmap_cached = if flags.contains(PlaceFlag::HAS_CACHE_AS_BITMAP) {
-            Some(self.read_u8()? != 0)
+            // Some incorrect SWFs appear to end the tag here, without
+            // the expected 'u8'.
+            if self.as_slice().is_empty() {
+                Some(true)
+            } else {
+                Some(self.read_u8()? != 0)
+            }
         } else {
             None
         };
@@ -2499,7 +2475,7 @@ impl<'a> Reader<'a> {
         })
     }
 
-    pub fn read_define_video_stream(&mut self) -> Result<Tag<'a>> {
+    pub fn read_define_video_stream(&mut self) -> Result<DefineVideoStream> {
         let id = self.read_character_id()?;
         let num_frames = self.read_u16()?;
         let width = self.read_u16()?;
@@ -2508,7 +2484,7 @@ impl<'a> Reader<'a> {
         // TODO(Herschel): Check SWF version.
         let codec = VideoCodec::from_u8(self.read_u8()?)
             .ok_or_else(|| Error::invalid_data("Invalid video codec."))?;
-        Ok(Tag::DefineVideoStream(DefineVideoStream {
+        Ok(DefineVideoStream {
             id,
             num_frames,
             width,
@@ -2517,21 +2493,21 @@ impl<'a> Reader<'a> {
             codec,
             deblocking: VideoDeblocking::from_u8((flags >> 1) & 0b111)
                 .ok_or_else(|| Error::invalid_data("Invalid video deblocking value."))?,
-        }))
+        })
     }
 
-    pub fn read_video_frame(&mut self) -> Result<Tag<'a>> {
+    pub fn read_video_frame(&mut self) -> Result<VideoFrame<'a>> {
         let stream_id = self.read_character_id()?;
         let frame_num = self.read_u16()?;
         let data = self.read_slice_to_end();
-        Ok(Tag::VideoFrame(VideoFrame {
+        Ok(VideoFrame {
             stream_id,
             frame_num,
             data,
-        }))
+        })
     }
 
-    fn read_define_bits_jpeg_3(&mut self, version: u8) -> Result<Tag<'a>> {
+    fn read_define_bits_jpeg_3(&mut self, version: u8) -> Result<DefineBitsJpeg3<'a>> {
         let id = self.read_character_id()?;
         let data_size = self.read_u32()? as usize;
         let deblocking = if version >= 4 {
@@ -2541,13 +2517,13 @@ impl<'a> Reader<'a> {
         };
         let data = self.read_slice(data_size)?;
         let alpha_data = self.read_slice_to_end();
-        Ok(Tag::DefineBitsJpeg3(DefineBitsJpeg3 {
+        Ok(DefineBitsJpeg3 {
             id,
             version,
             deblocking,
             data,
             alpha_data,
-        }))
+        })
     }
 
     pub fn read_define_bits_lossless(&mut self, version: u8) -> Result<DefineBitsLossless<'a>> {
@@ -2995,15 +2971,9 @@ pub mod tests {
     #[test]
     fn read_line_style() {
         // DefineShape1 and 2 read RGB colors.
-        let line_style = LineStyle::new_v1(
-            Twips::from_pixels(0.0),
-            Color {
-                r: 255,
-                g: 0,
-                b: 0,
-                a: 255,
-            },
-        );
+        let line_style = LineStyle::new()
+            .with_width(Twips::from_pixels(0.0))
+            .with_color(Color::from_rgba(0xffff0000));
         assert_eq!(
             reader(&[0, 0, 255, 0, 0]).read_line_style(2).unwrap(),
             line_style
@@ -3101,5 +3071,44 @@ pub mod tests {
                 panic!("Expected SwfParseError, got {:?}", result);
             }
         }
+    }
+
+    /// Ensure that we can read a PlaceObject3 tag that
+    /// inccorrectly omits the 'is_bitmap_cached' u8
+    /// Extracted from #7098
+    #[test]
+    fn read_incorrect_place_object_3() {
+        let place_object = Tag::PlaceObject(Box::new(PlaceObject {
+            version: 3,
+            action: PlaceObjectAction::Place(161),
+            depth: 1,
+            matrix: Some(Matrix {
+                a: Fixed16::ONE,
+                b: Fixed16::ZERO,
+                c: Fixed16::ZERO,
+                d: Fixed16::ONE,
+                tx: Twips::from_pixels(0.0),
+                ty: Twips::from_pixels(0.0),
+            }),
+            color_transform: None,
+            ratio: None,
+            name: None,
+            clip_depth: None,
+            class_name: None,
+            filters: None,
+            background_color: None,
+            blend_mode: None,
+            clip_actions: None,
+            has_image: false,
+            is_bitmap_cached: Some(true),
+            is_visible: None,
+            amf_data: None,
+        }));
+        assert_eq!(
+            reader(&[0x88, 0x11, 0x06, 0x4, 0x01, 0x00, 0xA1, 0x00, 0x02, 0x00])
+                .read_tag()
+                .unwrap(),
+            place_object
+        );
     }
 }

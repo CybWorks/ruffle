@@ -6,6 +6,7 @@
 //!
 //! TODO: Could we use this for AVM2 timers as well?
 
+use crate::avm1::function::ExecutionReason;
 use crate::avm1::{Activation, ActivationIdentifier, AvmString, Object, TObject, Value};
 use crate::context::UpdateContext;
 use gc_arena::Collect;
@@ -36,14 +37,12 @@ impl<'gc> Timers<'gc> {
             return None;
         }
 
-        let version = context.swf.version();
         let globals = context.avm1.global_object_cell();
         let level0 = context.stage.root_clip();
 
         let mut activation = Activation::from_nothing(
             context.reborrow(),
             ActivationIdentifier::root("[Timer Callback]"),
-            version,
             globals,
             level0,
         );
@@ -93,7 +92,12 @@ impl<'gc> Timers<'gc> {
                     );
                 }
                 TimerCallback::Method { this, method_name } => {
-                    let _ = this.call_method(method_name, &params, &mut activation);
+                    let _ = this.call_method(
+                        method_name,
+                        &params,
+                        &mut activation,
+                        ExecutionReason::Special,
+                    );
                 }
             }
 

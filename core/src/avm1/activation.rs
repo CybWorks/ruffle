@@ -306,11 +306,11 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     pub fn from_nothing(
         context: UpdateContext<'a, 'gc, 'gc_context>,
         id: ActivationIdentifier<'a>,
-        swf_version: u8,
         globals: Object<'gc>,
         base_clip: DisplayObject<'gc>,
     ) -> Self {
         let global_scope = GcCell::allocate(context.gc_context, Scope::from_global_object(globals));
+        let swf_version = base_clip.swf_version();
         let child_scope = GcCell::allocate(
             context.gc_context,
             Scope::new_local_scope(global_scope, context.gc_context),
@@ -341,11 +341,10 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         context: UpdateContext<'a, 'gc, 'gc_context>,
         id: ActivationIdentifier<'a>,
     ) -> Self {
-        let version = context.swf.version();
         let globals = context.avm1.global_object_cell();
         let level0 = context.stage.root_clip();
 
-        Self::from_nothing(context, id, version, globals, level0)
+        Self::from_nothing(context, id, globals, level0)
     }
 
     /// Add a stack frame that executes code in timeline scope
@@ -353,14 +352,12 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         &mut self,
         name: S,
         active_clip: DisplayObject<'gc>,
-        swf_version: u8,
         code: SwfSlice,
     ) -> Result<ReturnType<'gc>, Error<'gc>> {
         let globals = self.context.avm1.globals;
         let mut parent_activation = Activation::from_nothing(
             self.context.reborrow(),
             self.id.child("[Actions Parent]"),
-            swf_version,
             globals,
             active_clip,
         );
@@ -380,7 +377,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let mut child_activation = Activation::from_action(
             parent_activation.context.reborrow(),
             child_name,
-            swf_version,
+            active_clip.swf_version(),
             child_scope,
             constant_pool,
             active_clip,
@@ -577,7 +574,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     fn action_add(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
         let a = self.context.avm1.pop();
         let b = self.context.avm1.pop();
-        let result = b.into_number_v1() + a.into_number_v1();
+        let result = b.coerce_to_f64(self)? + a.coerce_to_f64(self)?;
         self.context.avm1.push(result.into());
         Ok(FrameControl::Continue)
     }
@@ -607,9 +604,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let a = self.context.avm1.pop();
         let b = self.context.avm1.pop();
         let result = b.as_bool(self.swf_version()) && a.as_bool(self.swf_version());
-        self.context
-            .avm1
-            .push(Value::from_bool(result, self.swf_version()));
+        self.context.avm1.push(result.into()); // Diverges from spec: returns a boolean even in SWF 4
         Ok(FrameControl::Continue)
     }
 
@@ -745,12 +740,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         if let Some((clip, frame)) = call_frame {
             if frame <= u16::MAX.into() {
                 for action in clip.actions_on_frame(&mut self.context, frame as u16) {
-                    let _ = self.run_child_frame_for_action(
-                        "[Frame Call]",
-                        clip.into(),
-                        self.swf_version(),
-                        action,
-                    )?;
+                    let _ = self.run_child_frame_for_action("[Frame Call]", clip.into(), action)?;
                 }
             }
         } else {
@@ -814,7 +804,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             object.call("[Anonymous]".into(), self, Value::Undefined, &args)?
         } else {
             // Call `this[method_name]`.
-            object.call_method(method_name, &args, self)?
+            object.call_method(method_name, &args, self, ExecutionReason::FunctionCall)?
         };
         self.context.avm1.push(result);
 
@@ -957,8 +947,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let name_val = self.context.avm1.pop();
         let name = name_val.coerce_to_string(self)?;
 
-        //Fun fact: This isn't in the Adobe SWF19 spec, but this opcode returns
-        //a boolean based on if the delete actually deleted something.
+        // Fun fact: This isn't in the Adobe SWF19 spec, but this opcode returns
+        // a boolean based on if the delete actually deleted something.
         let success = self.scope_cell().read().delete(self, name);
         self.context.avm1.push(success.into());
 
@@ -994,7 +984,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let name_value = self.context.avm1.pop();
         let name = name_value.coerce_to_string(self)?;
         self.context.avm1.push(Value::Null); // Sentinel that indicates end of enumeration
-        let object: Value<'gc> = self.resolve(name)?.into();
+        let object: Value<'gc> = self.get_variable(name)?.into();
 
         match object {
             Value::Object(ob) => {
@@ -1027,12 +1017,12 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     #[allow(clippy::float_cmp)]
     fn action_equals(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
         // AS1 equality
-        let a = self.context.avm1.pop();
-        let b = self.context.avm1.pop();
-        let result = b.into_number_v1() == a.into_number_v1();
-        self.context
-            .avm1
-            .push(Value::from_bool(result, self.swf_version()));
+        // If both of the values to compare coerce to `NaN`, the result will always be false.
+        // This differs from the behavior used in `Action::Equals2`.
+        let a = self.context.avm1.pop().coerce_to_f64(self)?;
+        let b = self.context.avm1.pop().coerce_to_f64(self)?;
+        let result = b == a;
+        self.context.avm1.push(result.into()); // Diverges from spec: returns a boolean even in SWF 4
         Ok(FrameControl::Continue)
     }
 
@@ -1092,9 +1082,14 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn action_get_property(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let prop_index = self.context.avm1.pop().into_number_v1() as usize;
+        let prop_value = self.context.avm1.pop();
+        let prop_index = prop_value.coerce_to_f64(self)?;
         let path = self.context.avm1.pop();
-        let result = if let Some(target) = self.target_clip() {
+        let result = if prop_index.is_nan() || prop_index <= -1.0 {
+            avm_warn!(self, "GetProperty: Invalid property {:?}", prop_value);
+            Value::Undefined
+        } else if let Some(target) = self.target_clip() {
+            let prop_index = prop_index as usize;
             if let Some(clip) = self.resolve_target_display_object(target, path, true)? {
                 let display_properties = self.context.avm1.display_properties;
                 let props = display_properties.read();
@@ -1105,7 +1100,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
                     Value::Undefined
                 }
             } else {
-                //avm_warn!(self, "GetProperty: Invalid target {}", path);
+                avm_warn!(self, "GetProperty: Invalid target {:?}", path);
                 Value::Undefined
             }
         } else {
@@ -1157,7 +1152,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
                         }
                     } else {
                         let future = self.context.load_manager.load_movie_into_clip(
-                            self.context.player.clone().unwrap(),
+                            self.context.player.clone(),
                             level,
                             &url,
                             RequestOptions::get(),
@@ -1256,7 +1251,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
                         NavigationMethod::from_send_vars_method(action.send_vars_method()),
                     );
                     let future = self.context.load_manager.load_form_into_object(
-                        self.context.player.clone().unwrap(),
+                        self.context.player.clone(),
                         target_obj,
                         &url,
                         opts,
@@ -1280,7 +1275,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
                     }
                 } else {
                     let future = self.context.load_manager.load_movie_into_clip(
-                        self.context.player.clone().unwrap(),
+                        self.context.player.clone(),
                         clip_target,
                         &url,
                         opts,
@@ -1295,7 +1290,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             // `loadMovieNum` call.
             if let Some(clip_target) = clip_target {
                 let future = self.context.load_manager.load_movie_into_clip(
-                    self.context.player.clone().unwrap(),
+                    self.context.player.clone(),
                     clip_target,
                     &url.to_utf8_lossy(),
                     RequestOptions::get(),
@@ -1486,12 +1481,12 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
     fn action_less(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
         // AS1 less than
+        // If one of the values to compare coerces to `NaN`, the result will be false.
+        // This differs from the behavior used in `Action::Less2`.
         let a = self.context.avm1.pop();
         let b = self.context.avm1.pop();
-        let result = b.into_number_v1() < a.into_number_v1();
-        self.context
-            .avm1
-            .push(Value::from_bool(result, self.swf_version()));
+        let result = b.coerce_to_f64(self)? < a.coerce_to_f64(self)?;
+        self.context.avm1.push(result.into()); // Diverges from spec: returns a boolean even in SWF 4
         Ok(FrameControl::Continue)
     }
 
@@ -1602,9 +1597,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     fn action_not(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
         let a = self.context.avm1.pop();
         let result = !a.as_bool(self.swf_version());
-        self.context
-            .avm1
-            .push(Value::from_bool(result, self.swf_version()));
+        self.context.avm1.push(result.into()); // Diverges from spec: returns a boolean even in SWF 4
         Ok(FrameControl::Continue)
     }
 
@@ -1691,9 +1684,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let a = self.context.avm1.pop();
         let b = self.context.avm1.pop();
         let result = b.as_bool(self.swf_version()) || a.as_bool(self.swf_version());
-        self.context
-            .avm1
-            .push(Value::from_bool(result, self.swf_version()));
+        self.context.avm1.push(result.into()); // Diverges from spec: returns a boolean even in SWF 4
         Ok(FrameControl::Continue)
     }
 
@@ -1770,9 +1761,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn action_random_number(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        // A max value < 0 will always return 0,
-        // and the max value gets converted into an i32, so any number > 2^31 - 1 will return 0.
-        let max = self.context.avm1.pop().into_number_v1() as i32;
+        // The max value is clamped to the range [0, 2^31 - 1).
+        let max = self.context.avm1.pop().coerce_to_f64(self)? as i32;
         let result = if max > 0 {
             self.context.rng.gen_range(0..max)
         } else {
@@ -1788,7 +1778,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let target_clip = self.resolve_target_display_object(start_clip, target, true)?;
 
         if let Some(target_clip) = target_clip {
-            crate::avm1::globals::display_object::remove_display_object(target_clip, self);
+            crate::avm1::globals::remove_display_object(target_clip, self);
         } else {
             avm_warn!(self, "RemoveSprite: Source is not a display object");
         }
@@ -1979,9 +1969,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let a = self.context.avm1.pop();
         let b = self.context.avm1.pop();
         let result = b.coerce_to_string(self)? == a.coerce_to_string(self)?;
-        self.context
-            .avm1
-            .push(Value::from_bool(result, self.swf_version()));
+        self.context.avm1.push(result.into()); // Diverges from spec: returns a boolean even in SWF 4
         Ok(FrameControl::Continue)
     }
 
@@ -2014,9 +2002,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let a = self.context.avm1.pop();
         let b = self.context.avm1.pop();
         let result = b.coerce_to_string(self)?.gt(&a.coerce_to_string(self)?);
-        self.context
-            .avm1
-            .push(Value::from_bool(result, self.swf_version()));
+        self.context.avm1.push(result.into());
         Ok(FrameControl::Continue)
     }
 
@@ -2034,9 +2020,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let a = self.context.avm1.pop();
         let b = self.context.avm1.pop();
         let result = b.coerce_to_string(self)?.lt(&a.coerce_to_string(self)?);
-        self.context
-            .avm1
-            .push(Value::from_bool(result, self.swf_version()));
+        self.context.avm1.push(result.into()); // Diverges from spec: returns a boolean even in SWF 4
         Ok(FrameControl::Continue)
     }
 
@@ -2830,8 +2814,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     /// Changes the target clip.
     pub fn set_target_clip(&mut self, value: Option<DisplayObject<'gc>>) {
         // The target should revert to `None` if the clip is removed.
-        let is_clip_removed = value.map(|clip| clip.removed()).unwrap_or_default();
-        self.target_clip = if !is_clip_removed { value } else { None }
+        self.target_clip = value.filter(|clip| !clip.removed());
     }
 
     /// Define a local property on the activation.
@@ -2951,7 +2934,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
                 "Target not found: Target=\"{}\" Base=\"{}\"",
                 target,
                 match &path {
-                    Some(p) => &*p,
+                    Some(p) => p,
                     None => WStr::from_units(b"?"),
                 }
             );

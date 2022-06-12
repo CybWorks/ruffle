@@ -34,12 +34,13 @@ pub type NativeFunction = for<'gc> fn(
 ) -> Result<Value<'gc>, Error<'gc>>;
 
 /// Indicates the reason for an execution
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum ExecutionReason {
-    /// This execution is a "normal" function call, from either user-code or builtins.
+    /// This execution is a "normal" function call from ActionScript bytecode.
     FunctionCall,
 
-    /// This execution is a "special" function call, such as a getter or setter.
+    /// This execution is a "special" internal function call from the player,
+    /// such as getters, setters, `toString`, or event handlers.
     Special,
 }
 
@@ -224,9 +225,57 @@ impl<'gc> Executable<'gc> {
                 nf(activation, this, args)
             }
             Executable::Action(af) => {
+                let this_obj = match this {
+                    Value::Object(obj) => Some(obj),
+                    _ => None,
+                };
+
+                let target = activation.target_clip_or_root();
+                let is_closure = activation.swf_version() >= 6;
+                let base_clip = if (is_closure || reason == ExecutionReason::Special)
+                    && !af.base_clip.removed()
+                {
+                    af.base_clip
+                } else {
+                    this_obj
+                        .and_then(|this| this.as_display_object())
+                        .unwrap_or(target)
+                };
+                let (swf_version, parent_scope) = if is_closure {
+                    // Function calls in a v6+ SWF are proper closures, and "close" over the scope that defined the function:
+                    // * Use the SWF version from the SWF that defined the function.
+                    // * Use the base clip from when the function was defined.
+                    // * Close over the scope from when the function was defined.
+                    (af.swf_version(), af.scope())
+                } else {
+                    // Function calls in a v5 SWF are *not* closures, and will use the settings of
+                    // `this`, regardless of the function's origin:
+                    // * Use the SWF version of `this`.
+                    // * Use the base clip of `this`.
+                    // * Allocate a new scope using the given base clip. No previous scope is closed over.
+                    let swf_version = base_clip.swf_version();
+                    let base_clip_obj = match base_clip.object() {
+                        Value::Object(o) => o,
+                        _ => unreachable!(),
+                    };
+                    // TODO: It would be nice to avoid these extra Scope allocs.
+                    let scope = GcCell::allocate(
+                        activation.context.gc_context,
+                        Scope::new(
+                            GcCell::allocate(
+                                activation.context.gc_context,
+                                Scope::from_global_object(activation.context.avm1.globals),
+                            ),
+                            super::scope::ScopeClass::Target,
+                            base_clip_obj,
+                        ),
+                    );
+                    (swf_version, scope)
+                };
+
                 let child_scope = GcCell::allocate(
                     activation.context.gc_context,
-                    Scope::new_local_scope(af.scope(), activation.context.gc_context),
+                    Scope::new_local_scope(parent_scope, activation.context.gc_context),
                 );
 
                 let arguments = if af.flags.contains(FunctionFlags::SUPPRESS_ARGUMENTS) {
@@ -252,11 +301,6 @@ impl<'gc> Executable<'gc> {
                     Attribute::DONT_ENUM,
                 );
 
-                let this_obj = match this {
-                    Value::Object(obj) => Some(obj),
-                    _ => None,
-                };
-
                 // TODO: `super` should only be defined if this was a method call (depth > 0?)
                 // `f[""]()` emits a CallMethod op, causing `this` to be undefined, but `super` is a function; what is it?
                 let super_object: Option<Object<'gc>> = this_obj.and_then(|this| {
@@ -266,19 +310,6 @@ impl<'gc> Executable<'gc> {
                         None
                     }
                 });
-
-                let effective_version = if activation.swf_version() > 5 {
-                    if !af.base_clip.removed() {
-                        af.base_clip.swf_version()
-                    } else {
-                        af.swf_version()
-                    }
-                } else {
-                    this_obj
-                        .and_then(|this| this.as_display_object())
-                        .map(|dn| dn.swf_version())
-                        .unwrap_or(activation.context.player_version)
-                };
 
                 let name = if cfg!(feature = "avm_debug") {
                     let mut result = match af.name.map(ExecutionName::Dynamic).unwrap_or(name) {
@@ -301,17 +332,10 @@ impl<'gc> Executable<'gc> {
                 };
 
                 let max_recursion_depth = activation.context.avm1.max_recursion_depth();
-                let base_clip = if effective_version > 5 && !af.base_clip.removed() {
-                    af.base_clip
-                } else {
-                    this_obj
-                        .and_then(|this| this.as_display_object())
-                        .unwrap_or_else(|| activation.base_clip())
-                };
                 let mut frame = Activation::from_action(
                     activation.context.reborrow(),
                     activation.id.function(name, reason, max_recursion_depth)?,
-                    effective_version,
+                    swf_version,
                     child_scope,
                     af.constant_pool,
                     base_clip,
@@ -402,8 +426,6 @@ impl<'gc> From<Gc<'gc, Avm1Function<'gc>>> for Executable<'gc> {
         Executable::Action(af)
     }
 }
-
-pub const TYPE_OF_FUNCTION: &str = "function";
 
 /// Represents an `Object` that holds executable code.
 #[derive(Debug, Clone, Collect, Copy)]
@@ -791,10 +813,6 @@ impl<'gc> TObject<'gc> for FunctionObject<'gc> {
 
     fn get_keys(&self, activation: &mut Activation<'_, 'gc, '_>) -> Vec<AvmString<'gc>> {
         self.base.get_keys(activation)
-    }
-
-    fn type_of(&self) -> &'static str {
-        TYPE_OF_FUNCTION
     }
 
     fn interfaces(&self) -> Vec<Object<'gc>> {

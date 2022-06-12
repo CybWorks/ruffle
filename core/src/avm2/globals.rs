@@ -88,6 +88,10 @@ pub struct SystemPrototypes<'gc> {
     pub nativemenu: Object<'gc>,
     pub contextmenu: Object<'gc>,
     pub mouseevent: Object<'gc>,
+    pub textevent: Object<'gc>,
+    pub errorevent: Object<'gc>,
+    pub ioerrorevent: Object<'gc>,
+    pub securityerrorevent: Object<'gc>,
 }
 
 impl<'gc> SystemPrototypes<'gc> {
@@ -150,6 +154,10 @@ impl<'gc> SystemPrototypes<'gc> {
             nativemenu: empty,
             contextmenu: empty,
             mouseevent: empty,
+            textevent: empty,
+            errorevent: empty,
+            ioerrorevent: empty,
+            securityerrorevent: empty,
         }
     }
 }
@@ -202,6 +210,10 @@ pub struct SystemClasses<'gc> {
     pub nativemenu: ClassObject<'gc>,
     pub contextmenu: ClassObject<'gc>,
     pub mouseevent: ClassObject<'gc>,
+    pub textevent: ClassObject<'gc>,
+    pub errorevent: ClassObject<'gc>,
+    pub ioerrorevent: ClassObject<'gc>,
+    pub securityerrorevent: ClassObject<'gc>,
 }
 
 impl<'gc> SystemClasses<'gc> {
@@ -264,6 +276,10 @@ impl<'gc> SystemClasses<'gc> {
             nativemenu: object,
             contextmenu: object,
             mouseevent: object,
+            textevent: object,
+            errorevent: object,
+            ioerrorevent: object,
+            securityerrorevent: object,
         }
     }
 }
@@ -319,13 +335,16 @@ fn class<'gc>(
     let class_read = class_def.read();
     let super_class = if let Some(sc_name) = class_read.super_class_name() {
         let super_class: Result<Object<'gc>, Error> = global
-            .get_property(sc_name, activation)?
-            .coerce_to_object(activation)
-            .map_err(|_e| {
+            .get_property(sc_name, activation)
+            .ok()
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| {
                 format!(
-                    "Could not resolve superclass {:?} when defining global class {:?}",
-                    sc_name.local_name(),
-                    class_read.name().local_name()
+                    "Could not resolve superclass {} when defining global class {}",
+                    sc_name.to_qualified_name(activation.context.gc_context),
+                    class_read
+                        .name()
+                        .to_qualified_name(activation.context.gc_context)
                 )
                 .into()
             });
@@ -573,11 +592,30 @@ pub fn load_player_globals<'gc>(
         flash::events::mouseevent::create_class(mc),
         script
     );
-    class(
+    avm2_system_class!(
+        textevent,
+        activation,
+        flash::events::textevent::create_class(mc),
+        script
+    );
+    avm2_system_class!(
+        errorevent,
+        activation,
+        flash::events::errorevent::create_class(mc),
+        script
+    );
+    avm2_system_class!(
+        securityerrorevent,
+        activation,
+        flash::events::securityerrorevent::create_class(mc),
+        script
+    );
+    avm2_system_class!(
+        ioerrorevent,
         activation,
         flash::events::ioerrorevent::create_class(mc),
-        script,
-    )?;
+        script
+    );
     class(
         activation,
         flash::events::contextmenuevent::create_class(mc),
@@ -756,6 +794,21 @@ pub fn load_player_globals<'gc>(
         flash::display::capsstyle::create_class(mc),
         script,
     )?;
+    class(
+        activation,
+        flash::display::spreadmethod::create_class(mc),
+        script,
+    )?;
+    class(
+        activation,
+        flash::display::interpolationmethod::create_class(mc),
+        script,
+    )?;
+    class(
+        activation,
+        flash::display::gradienttype::create_class(mc),
+        script,
+    )?;
     class(activation, flash::display::loader::create_class(mc), script)?;
     avm2_system_class!(
         loaderinfo,
@@ -836,6 +889,11 @@ pub fn load_player_globals<'gc>(
     )?;
     class(
         activation,
+        flash::filters::blurfilter::create_class(mc),
+        script,
+    )?;
+    class(
+        activation,
         flash::filters::glowfilter::create_class(mc),
         script,
     )?;
@@ -909,6 +967,12 @@ pub fn load_player_globals<'gc>(
         flash::net::object_encoding::create_class(mc),
         script,
     )?;
+    class(activation, flash::net::url_loader::create_class(mc), script)?;
+    class(
+        activation,
+        flash::net::url_loader_data_format::create_class(mc),
+        script,
+    )?;
     class(
         activation,
         flash::net::url_request::create_class(mc),
@@ -958,6 +1022,13 @@ pub fn load_player_globals<'gc>(
     class(
         activation,
         flash::external::externalinterface::create_class(mc),
+        script,
+    )?;
+
+    // package `flash.accessibility`
+    class(
+        activation,
+        flash::accessibility::accessibilityproperties::create_class(mc),
         script,
     )?;
 

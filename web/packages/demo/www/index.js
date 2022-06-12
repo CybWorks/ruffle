@@ -21,6 +21,7 @@ const sampleFileInputContainer = document.getElementById(
 );
 const localFileInput = document.getElementById("local-file");
 const sampleFileInput = document.getElementById("sample-swfs");
+const localFileName = document.getElementById("local-file-name");
 // prettier-ignore
 const optionGroups = {
     "Animation": document.getElementById("anim-optgroup"),
@@ -68,6 +69,9 @@ async function loadFile(file) {
     if (!file) {
         return;
     }
+    if (file.name) {
+        localFileName.textContent = file.name;
+    }
     hideSample();
     const data = await new Response(file).arrayBuffer();
     load({ data, ...config });
@@ -75,6 +79,7 @@ async function loadFile(file) {
 
 function loadSample() {
     const swfData = sampleFileInput[sampleFileInput.selectedIndex].swfData;
+    localFileName.textContent = "No file selected.";
     if (swfData) {
         showSample(swfData);
         load({ url: swfData.location, ...config });
@@ -141,19 +146,18 @@ window.addEventListener("load", () => {
 
 (async () => {
     const response = await fetch("swfs.json");
-    if (!response.ok) {
-        return;
-    }
 
-    const data = await response.json();
-    for (const swfData of data.swfs) {
-        const option = document.createElement("option");
-        option.textContent = swfData.title;
-        option.value = swfData.location;
-        option.swfData = swfData;
-        optionGroups[swfData.type].append(option);
+    if (response.ok) {
+        const data = await response.json();
+        for (const swfData of data.swfs) {
+            const option = document.createElement("option");
+            option.textContent = swfData.title;
+            option.value = swfData.location;
+            option.swfData = swfData;
+            optionGroups[swfData.type].append(option);
+        }
+        sampleFileInputContainer.classList.remove("hidden");
     }
-    sampleFileInputContainer.classList.remove("hidden");
 
     const initialFile = new URL(window.location).searchParams.get("file");
     if (initialFile) {
@@ -163,5 +167,13 @@ window.addEventListener("load", () => {
             0
         );
         loadSample();
+    } else {
+        load({
+            url: "logo-anim.swf",
+            autoplay: "on",
+            backgroundColor: "#31497D",
+            letterbox: "off",
+            unmuteOverlay: "hidden",
+        });
     }
 })();

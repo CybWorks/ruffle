@@ -40,7 +40,7 @@ use std::cell::{Ref, RefMut};
 use std::collections::HashMap;
 use std::sync::Arc;
 use swf::extensions::ReadSwfExt;
-use swf::{ClipEventFlag, FrameLabelData, Tag};
+use swf::{ClipEventFlag, FrameLabelData};
 
 type FrameNumber = u16;
 
@@ -464,16 +464,19 @@ impl<'gc> MovieClip<'gc> {
             return Ok(());
         }
 
+        let start = reader.as_slice();
         // Queue the init actions.
         // TODO: Init actions are supposed to be executed once, and it gives a
         // sprite ID... how does that work?
         let _sprite_id = reader.read_u16()?;
+        let num_read = reader.pos(start);
+
         let slice = self
             .0
             .read()
             .static_data
             .swf
-            .resize_to_reader(reader, tag_len)
+            .resize_to_reader(reader, tag_len - num_read)
             .ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::Other,
@@ -481,7 +484,7 @@ impl<'gc> MovieClip<'gc> {
                 )
             })?;
 
-        Avm1::run_stack_frame_for_init_action(self.into(), context.swf.version(), slice, context);
+        Avm1::run_stack_frame_for_init_action(self.into(), slice, context);
 
         Ok(())
     }
@@ -499,6 +502,7 @@ impl<'gc> MovieClip<'gc> {
             return Ok(());
         }
 
+        let start = reader.as_slice();
         // Queue the actions.
         // TODO: The tag reader parses the entire ABC file, instead of just
         // giving us a `SwfSlice` for later parsing, so we have to replcate the
@@ -507,6 +511,7 @@ impl<'gc> MovieClip<'gc> {
         let name = reader.read_str()?.to_string_lossy(reader.encoding());
         let is_lazy_initialize = flags & 1 != 0;
         let domain = context.library.library_for_movie_mut(movie).avm2_domain();
+        let num_read = reader.pos(start);
 
         // The rest of the tag is an ABC file so we can take our SwfSlice now.
         let slice = self
@@ -514,7 +519,7 @@ impl<'gc> MovieClip<'gc> {
             .read()
             .static_data
             .swf
-            .resize_to_reader(reader, tag_len)
+            .resize_to_reader(reader, tag_len - num_read)
             .ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::Other,
@@ -555,13 +560,17 @@ impl<'gc> MovieClip<'gc> {
             let domain = library.avm2_domain();
             let class_object = domain
                 .get_defined_value(&mut activation, name)
-                .and_then(|v| v.coerce_to_object(&mut activation))
                 .and_then(|v| {
-                    v.as_class_object().ok_or_else(|| {
-                        "Attempted to assign a non-class to symbol"
-                            .to_string()
+                    v.as_object()
+                        .and_then(|o| o.as_class_object())
+                        .ok_or_else(|| {
+                            format!(
+                                "Attempted to assign a non-class {} to symbol {}",
+                                class_name,
+                                name.to_qualified_name(activation.context.gc_context)
+                            )
                             .into()
-                    })
+                        })
                 });
 
             match class_object {
@@ -1124,8 +1133,46 @@ impl<'gc> MovieClip<'gc> {
                         child.set_place_frame(context.gc_context, self.current_frame());
                     }
 
+                    // Apply PlaceObject parameters.
+                    child.apply_place_object(context, place_object);
+                    if let Some(name) = &place_object.name {
+                        let encoding = swf::SwfStr::encoding_for_version(self.swf_version());
+                        let name = name.to_str_lossy(encoding);
+                        child.set_name(
+                            context.gc_context,
+                            AvmString::new_utf8(context.gc_context, name),
+                        );
+                    }
+                    if let Some(clip_depth) = place_object.clip_depth {
+                        child.set_clip_depth(context.gc_context, clip_depth.into());
+                    }
+                    // Clip events only apply to movie clips.
+                    if let (Some(clip_actions), Some(clip)) =
+                        (&place_object.clip_actions, child.as_movie_clip())
+                    {
+                        // Convert from `swf::ClipAction` to Ruffle's `ClipEventHandler`.
+                        if let Some(movie) = self.movie() {
+                            clip.set_clip_event_handlers(
+                                context.gc_context,
+                                clip_actions
+                                    .iter()
+                                    .cloned()
+                                    .map(|a| {
+                                        ClipEventHandler::from_action_and_movie(
+                                            a,
+                                            Arc::clone(&movie),
+                                        )
+                                    })
+                                    .collect(),
+                            );
+                        } else {
+                            // This probably shouldn't happen; we should always have a movie.
+                            log::error!("No movie when trying to set clip event");
+                        }
+                    }
+                    // TODO: Missing PlaceObject properties: amf_data, filters
+
                     // Run first frame.
-                    child.apply_place_object(context, self.movie(), place_object);
                     child.construct_frame(context);
                     child.post_instantiation(context, None, Instantiator::Movie, false);
                     // In AVM1, children are added in `run_frame` so this is necessary.
@@ -1300,11 +1347,11 @@ impl<'gc> MovieClip<'gc> {
                 // If it's a rewind, we removed any dead children above, so we always
                 // modify the previous child.
                 (_, Some(prev_child), true) | (PlaceObjectAction::Modify, Some(prev_child), _) => {
-                    prev_child.apply_place_object(context, self.movie(), &params.place_object);
+                    prev_child.apply_place_object(context, &params.place_object);
                 }
                 (swf::PlaceObjectAction::Replace(id), Some(prev_child), _) => {
                     prev_child.replace_with(context, id);
-                    prev_child.apply_place_object(context, self.movie(), &params.place_object);
+                    prev_child.apply_place_object(context, &params.place_object);
                     prev_child.set_place_frame(context.gc_context, params.frame);
                 }
                 (PlaceObjectAction::Place(id), _, _)
@@ -1378,7 +1425,6 @@ impl<'gc> MovieClip<'gc> {
     ) {
         //TODO: This will break horribly when AVM2 starts touching the display list
         if self.0.read().object.is_none() {
-            let version = context.swf.version();
             let globals = context.avm1.global_object_cell();
             let avm1_constructor = self.0.read().get_registered_avm1_constructor(context);
 
@@ -1388,7 +1434,6 @@ impl<'gc> MovieClip<'gc> {
                 let mut activation = Avm1Activation::from_nothing(
                     context.reborrow(),
                     ActivationIdentifier::root("[Construct]"),
-                    version,
                     globals,
                     self.into(),
                 );
@@ -1438,7 +1483,6 @@ impl<'gc> MovieClip<'gc> {
                 let mut activation = Avm1Activation::from_nothing(
                     context.reborrow(),
                     ActivationIdentifier::root("[Init]"),
-                    version,
                     globals,
                     self.into(),
                 );
@@ -1485,14 +1529,9 @@ impl<'gc> MovieClip<'gc> {
         }
 
         // If this text field has a variable set, initialize text field binding.
-        Avm1::run_with_stack_frame_for_display_object(
-            self.into(),
-            context.swf.version(),
-            context,
-            |activation| {
-                self.bind_text_field_variables(activation);
-            },
-        );
+        Avm1::run_with_stack_frame_for_display_object(self.into(), context, |activation| {
+            self.bind_text_field_variables(activation);
+        });
     }
 
     /// Allocate the AVM2 side of this object.
@@ -1764,35 +1803,51 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
 
         if let Some(avm2_object) = avm2_object {
             if let Some(frame_id) = write.queued_script_frame {
-                let is_fresh_frame = write.queued_script_frame != write.last_queued_script_frame;
-
-                write.last_queued_script_frame = Some(frame_id);
-                write.queued_script_frame = None;
-                write
+                // If we are already executing frame scripts, then we shouldn't
+                // run frame scripts recursively. This is because AVM2 can run
+                // gotos, which will both queue and run frame scripts for the
+                // whole movie again. If a goto is attempting to queue frame
+                // scripts on us AGAIN, we should allow the current stack to
+                // wind down before handling that.
+                if !write
                     .flags
-                    .insert(MovieClipFlags::EXECUTING_AVM2_FRAME_SCRIPT);
+                    .contains(MovieClipFlags::EXECUTING_AVM2_FRAME_SCRIPT)
+                {
+                    let is_fresh_frame =
+                        write.queued_script_frame != write.last_queued_script_frame;
 
-                if is_fresh_frame {
-                    while let Some(fs) = write.frame_scripts.get(index) {
-                        if fs.frame_id == frame_id {
-                            let callable = fs.callable;
-                            drop(write);
-                            if let Err(e) = Avm2::run_stack_frame_for_callable(
-                                callable,
-                                Some(avm2_object),
-                                &[],
-                                context,
-                            ) {
-                                log::error!("Error occured when running AVM2 frame script: {}", e);
+                    write.last_queued_script_frame = Some(frame_id);
+                    write.queued_script_frame = None;
+                    write
+                        .flags
+                        .insert(MovieClipFlags::EXECUTING_AVM2_FRAME_SCRIPT);
+
+                    if is_fresh_frame {
+                        while let Some(fs) = write.frame_scripts.get(index) {
+                            if fs.frame_id == frame_id {
+                                let callable = fs.callable;
+                                drop(write);
+                                if let Err(e) = Avm2::run_stack_frame_for_callable(
+                                    callable,
+                                    Some(avm2_object),
+                                    &[],
+                                    context,
+                                ) {
+                                    log::error!(
+                                        "Error occured when running AVM2 frame script: {}",
+                                        e
+                                    );
+                                }
+                                write = self.0.write(context.gc_context);
                             }
-                            write = self.0.write(context.gc_context);
-                            write
-                                .flags
-                                .remove(MovieClipFlags::EXECUTING_AVM2_FRAME_SCRIPT);
-                        }
 
-                        index += 1;
+                            index += 1;
+                        }
                     }
+
+                    write
+                        .flags
+                        .remove(MovieClipFlags::EXECUTING_AVM2_FRAME_SCRIPT);
                 }
             }
         }
@@ -2456,23 +2511,19 @@ impl<'gc, 'a> MovieClipData<'gc> {
         context: &mut UpdateContext<'_, 'gc, '_>,
         reader: &mut SwfStream,
     ) -> DecodeResult {
-        match reader.read_video_frame()? {
-            Tag::VideoFrame(vframe) => {
-                let library = context.library.library_for_movie_mut(self.movie());
-                match library.character_by_id(vframe.stream_id) {
-                    Some(Character::Video(mut v)) => {
-                        v.preload_swf_frame(vframe, context);
+        let vframe = reader.read_video_frame()?;
+        let library = context.library.library_for_movie_mut(self.movie());
+        match library.character_by_id(vframe.stream_id) {
+            Some(Character::Video(mut v)) => {
+                v.preload_swf_frame(vframe, context);
 
-                        Ok(())
-                    }
-                    _ => Err(format!(
-                        "Attempted to preload video frames into non-video character {}",
-                        vframe.stream_id
-                    )
-                    .into()),
-                }
+                Ok(())
             }
-            _ => unreachable!(),
+            _ => Err(format!(
+                "Attempted to preload video frames into non-video character {}",
+                vframe.stream_id
+            )
+            .into()),
         }
     }
 
@@ -2829,18 +2880,13 @@ impl<'gc, 'a> MovieClipData<'gc> {
         context: &mut UpdateContext<'_, 'gc, '_>,
         reader: &mut SwfStream,
     ) -> DecodeResult {
-        match reader.read_define_video_stream()? {
-            Tag::DefineVideoStream(streamdef) => {
-                let id = streamdef.id;
-                let video = Video::from_swf_tag(self.movie(), streamdef, context.gc_context);
-                context
-                    .library
-                    .library_for_movie_mut(self.movie())
-                    .register_character(id, Character::Video(video));
-            }
-            _ => unreachable!(),
-        };
-
+        let streamdef = reader.read_define_video_stream()?;
+        let id = streamdef.id;
+        let video = Video::from_swf_tag(self.movie(), streamdef, context.gc_context);
+        context
+            .library
+            .library_for_movie_mut(self.movie())
+            .register_character(id, Character::Video(video));
         Ok(())
     }
 
@@ -2850,14 +2896,17 @@ impl<'gc, 'a> MovieClipData<'gc> {
         reader: &mut SwfStream<'a>,
         tag_len: usize,
     ) -> DecodeResult {
+        let start = reader.as_slice();
         let id = reader.read_character_id()?;
         let num_frames = reader.read_u16()?;
+        let num_read = reader.pos(start);
+
         let movie_clip = MovieClip::new_with_data(
             context.gc_context,
             id,
             self.static_data
                 .swf
-                .resize_to_reader(reader, tag_len - 4)
+                .resize_to_reader(reader, tag_len - num_read)
                 .ok_or_else(|| {
                     std::io::Error::new(
                         std::io::ErrorKind::Other,
@@ -3058,7 +3107,7 @@ impl<'gc, 'a> MovieClip<'gc> {
             PlaceObjectAction::Replace(id) => {
                 if let Some(child) = self.child_by_depth(place_object.depth.into()) {
                     child.replace_with(context, id);
-                    child.apply_place_object(context, self.movie(), &place_object);
+                    child.apply_place_object(context, &place_object);
                     if context.avm_type() == AvmType::Avm2 {
                         // In AVM2 instantiation happens before frame advance so we
                         // have to special-case that
@@ -3070,7 +3119,7 @@ impl<'gc, 'a> MovieClip<'gc> {
             }
             PlaceObjectAction::Modify => {
                 if let Some(child) = self.child_by_depth(place_object.depth.into()) {
-                    child.apply_place_object(context, self.movie(), &place_object);
+                    child.apply_place_object(context, &place_object);
                 }
             }
         }
@@ -3293,15 +3342,22 @@ impl<'a> GotoPlaceObject<'a> {
                 if place_object.ratio.is_none() {
                     place_object.ratio = Some(Default::default());
                 }
-                if place_object.name.is_none() {
-                    place_object.name = Some(Default::default());
+                if place_object.blend_mode.is_none() {
+                    place_object.blend_mode = Some(Default::default());
                 }
-                if place_object.clip_depth.is_none() {
-                    place_object.clip_depth = Some(Default::default());
+                if place_object.is_bitmap_cached.is_none() {
+                    place_object.is_bitmap_cached = Some(Default::default());
                 }
-                if place_object.class_name.is_none() {
-                    place_object.class_name = Some(Default::default());
+                if place_object.background_color.is_none() {
+                    place_object.background_color = Some(Color::from_rgba(0));
                 }
+                // Purposely omitted properties:
+                // name, clip_depth, clip_actions, amf_data
+                // These properties are only set on initial placement in `MovieClip::instantiate_child`
+                // and can not be modified by subsequent PlaceObject tags.
+                // Also, is_visible flag persists during rewind unlike all other properties.
+                // TODO: Filters need to be applied here. Rewinding will erase filters if initial
+                // PlaceObject tag has none.
             }
         }
 
@@ -3339,22 +3395,23 @@ impl<'a> GotoPlaceObject<'a> {
         if next_place.ratio.is_some() {
             cur_place.ratio = next_place.ratio.take();
         }
-        if next_place.name.is_some() {
-            cur_place.name = next_place.name.take();
+        if next_place.blend_mode.is_some() {
+            cur_place.blend_mode = next_place.blend_mode.take();
         }
-        if next_place.clip_depth.is_some() {
-            cur_place.clip_depth = next_place.clip_depth.take();
-        }
-        if next_place.class_name.is_some() {
-            cur_place.class_name = next_place.class_name.take();
-        }
-        if next_place.background_color.is_some() {
-            cur_place.background_color = next_place.background_color.take();
+        if next_place.is_bitmap_cached.is_some() {
+            cur_place.is_bitmap_cached = next_place.is_bitmap_cached.take();
         }
         if next_place.is_visible.is_some() {
             cur_place.is_visible = next_place.is_visible.take();
         }
-        // TODO: Other stuff.
+        if next_place.background_color.is_some() {
+            cur_place.background_color = next_place.background_color.take();
+        }
+        // Purposely omitted properties:
+        // name, clip_depth, clip_actions, amf_data
+        // These properties are only set on initial placement in `MovieClip::instantiate_child`
+        // and can not be modified by subsequent PlaceObject tags.
+        // TODO: Filters need to be applied here. New filters will overwrite old filters.
     }
 }
 
