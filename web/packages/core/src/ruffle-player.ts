@@ -122,13 +122,18 @@ export class RufflePlayer extends HTMLElement {
     private container: HTMLElement;
     private playButton: HTMLElement;
     private unmuteOverlay: HTMLElement;
+    private preloader: HTMLElement;
 
     // Firefox has a read-only "contextMenu" property,
     // so avoid shadowing it.
     private contextMenuElement: HTMLElement;
     private hasContextMenu = false;
+
     // Allows the user to permanently disable the context menu.
     private contextMenuForceDisabled = false;
+
+    // Whether to show a preloader while Ruffle is still loading the SWF
+    private hasPreloader = true;
 
     // Whether this device is a touch device.
     // Set to true when a touch event is encountered.
@@ -216,6 +221,7 @@ export class RufflePlayer extends HTMLElement {
         }
 
         this.unmuteOverlay = this.shadow.getElementById("unmute_overlay")!;
+        this.preloader = this.shadow.getElementById("preloader")!;
 
         this.contextMenuElement = this.shadow.getElementById("context-menu")!;
         this.addEventListener("contextmenu", this.showContextMenu.bind(this));
@@ -392,7 +398,13 @@ export class RufflePlayer extends HTMLElement {
     private async ensureFreshInstance(config: BaseLoadOptions): Promise<void> {
         this.destroy();
 
-        const ruffleConstructor = await loadRuffle(config).catch((e) => {
+        if (this.hasPreloader) {
+            this.showPreloader();
+        }
+        const ruffleConstructor = await loadRuffle(
+            config,
+            this.onRuffleDownloadProgress.bind(this)
+        ).catch((e) => {
             console.error(`Serious error loading Ruffle: ${e}`);
 
             // Serious duck typing. In error conditions, let's not make assumptions.
@@ -495,6 +507,28 @@ export class RufflePlayer extends HTMLElement {
     }
 
     /**
+     * Uploads the preloader progress bar.
+     *
+     * @param bytesLoaded The size of the Ruffle WebAssembly file downloaded so far.
+     * @param bytesTotal The total size of the Ruffle WebAssembly file.
+     */
+    private onRuffleDownloadProgress(bytesLoaded: number, bytesTotal: number) {
+        const loadBar = <HTMLElement>(
+            this.preloader.querySelector(".loadbarInner")
+        );
+        const outerLoadbar = <HTMLElement>(
+            this.preloader.querySelector(".loadbar")
+        );
+        if (Number.isNaN(bytesTotal)) {
+            if (outerLoadbar) {
+                outerLoadbar.style.display = "none";
+            }
+        } else {
+            loadBar.style.width = `${100.0 * (bytesLoaded / bytesTotal)}%`;
+        }
+    }
+
+    /**
      * Destroys the currently running instance of Ruffle.
      */
     private destroy(): void {
@@ -576,6 +610,7 @@ export class RufflePlayer extends HTMLElement {
             this.showSwfDownload = config.showSwfDownload === true;
             this.options = options;
             this.hasContextMenu = config.contextMenu !== false;
+            this.hasPreloader = config.preloader !== false;
 
             // Pre-emptively set background color of container while Ruffle/SWF loads.
             if (
@@ -589,7 +624,7 @@ export class RufflePlayer extends HTMLElement {
 
             if ("url" in options) {
                 console.log(`Loading SWF file ${options.url}`);
-                this.swfUrl = new URL(options.url, document.location.href);
+                this.swfUrl = new URL(options.url, document.baseURI);
 
                 const parameters = {
                     ...sanitizeParameters(
@@ -1086,6 +1121,7 @@ export class RufflePlayer extends HTMLElement {
             return;
         }
         this.panicked = true;
+        this.hidePreloader();
 
         if (
             error instanceof Error &&
@@ -1365,6 +1401,7 @@ export class RufflePlayer extends HTMLElement {
             return;
         }
 
+        this.hidePreloader();
         const div = document.createElement("div");
         div.id = "message_overlay";
         div.innerHTML = `<div class="message">
@@ -1421,10 +1458,21 @@ export class RufflePlayer extends HTMLElement {
         }\n`;
     }
 
+    private hidePreloader(): void {
+        this.preloader.classList.add("hidden");
+        this.container.classList.remove("hidden");
+    }
+
+    private showPreloader(): void {
+        this.preloader.classList.remove("hidden");
+        this.container.classList.add("hidden");
+    }
+
     private setMetadata(metadata: MovieMetadata) {
         this._metadata = metadata;
         // TODO: Switch this to ReadyState.Loading when we have streaming support.
         this._readyState = ReadyState.Loaded;
+        this.hidePreloader();
         this.dispatchEvent(new Event(RufflePlayer.LOADED_METADATA));
         // TODO: Move this to whatever function changes the ReadyState to Loaded when we have streaming support.
         this.dispatchEvent(new Event(RufflePlayer.LOADED_DATA));

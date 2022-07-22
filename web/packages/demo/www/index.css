@@ -1,6 +1,7 @@
 :root {
     --ruffle-blue: #37528c;
     --ruffle-orange: #ffad33;
+    --preloader-background: #31497d;
 }
 
 body {
@@ -40,19 +41,6 @@ body {
 #overlay.drag {
     opacity: 1;
     transition-timing-function: ease-out;
-}
-
-#prompt {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    color: var(--ruffle-orange);
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    font-size: large;
 }
 
 #player {
@@ -103,7 +91,9 @@ body {
 }
 
 #local-file {
-    display: none;
+    width: 0;
+    opacity: 0;
+    position: absolute;
 }
 
 #local-file-label {

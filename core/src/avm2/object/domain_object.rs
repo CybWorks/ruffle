@@ -12,11 +12,10 @@ use std::cell::{Ref, RefMut};
 /// A class instance allocator that allocates AppDomain objects.
 pub fn appdomain_allocator<'gc>(
     class: ClassObject<'gc>,
-    proto: Object<'gc>,
     activation: &mut Activation<'_, 'gc, '_>,
 ) -> Result<Object<'gc>, Error> {
     let domain = activation.domain();
-    let base = ScriptObjectData::base_new(Some(proto), Some(class));
+    let base = ScriptObjectData::new(class);
 
     Ok(DomainObject(GcCell::allocate(
         activation.context.gc_context,
@@ -49,8 +48,7 @@ impl<'gc> DomainObject<'gc> {
         domain: Domain<'gc>,
     ) -> Result<Object<'gc>, Error> {
         let class = activation.avm2().classes().application_domain;
-        let proto = activation.avm2().prototypes().application_domain;
-        let base = ScriptObjectData::base_new(Some(proto), Some(class));
+        let base = ScriptObjectData::new(class);
         let mut this: Object<'gc> = DomainObject(GcCell::allocate(
             activation.context.gc_context,
             DomainObjectData { base, domain },

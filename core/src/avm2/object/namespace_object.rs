@@ -12,10 +12,9 @@ use std::cell::{Ref, RefMut};
 /// A class instance allocator that allocates namespace objects.
 pub fn namespace_allocator<'gc>(
     class: ClassObject<'gc>,
-    proto: Object<'gc>,
     activation: &mut Activation<'_, 'gc, '_>,
 ) -> Result<Object<'gc>, Error> {
-    let base = ScriptObjectData::base_new(Some(proto), Some(class));
+    let base = ScriptObjectData::new(class);
 
     Ok(NamespaceObject(GcCell::allocate(
         activation.context.gc_context,
@@ -49,8 +48,7 @@ impl<'gc> NamespaceObject<'gc> {
         namespace: Namespace<'gc>,
     ) -> Result<Object<'gc>, Error> {
         let class = activation.avm2().classes().namespace;
-        let proto = activation.avm2().prototypes().namespace;
-        let base = ScriptObjectData::base_new(Some(proto), Some(class));
+        let base = ScriptObjectData::new(class);
 
         let mut this: Object<'gc> = NamespaceObject(GcCell::allocate(
             activation.context.gc_context,

@@ -8,10 +8,12 @@ use crate::avm2::value::{abc_default_value, Value};
 use crate::avm2::Error;
 use crate::string::AvmString;
 use gc_arena::{Collect, CollectionContext, Gc, MutationContext};
+use std::borrow::Cow;
 use std::fmt;
 use std::rc::Rc;
 use swf::avm2::types::{
-    AbcFile, Index, Method as AbcMethod, MethodBody as AbcMethodBody, MethodParam as AbcMethodParam,
+    AbcFile, Index, Method as AbcMethod, MethodBody as AbcMethodBody,
+    MethodFlags as AbcMethodFlags, MethodParam as AbcMethodParam,
 };
 
 /// Represents a function defined in Ruffle's code.
@@ -139,7 +141,7 @@ impl<'gc> BytecodeMethod<'gc> {
         abc_method: Index<AbcMethod>,
         is_function: bool,
         activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Result<Gc<'gc, Self>, Error> {
+    ) -> Result<Self, Error> {
         let abc = txunit.abc();
         let mut signature = Vec::new();
 
@@ -161,34 +163,28 @@ impl<'gc> BytecodeMethod<'gc> {
 
             for (index, method_body) in abc.method_bodies.iter().enumerate() {
                 if method_body.method.0 == abc_method.0 {
-                    return Ok(Gc::allocate(
-                        activation.context.gc_context,
-                        Self {
-                            txunit,
-                            abc: txunit.abc(),
-                            abc_method: abc_method.0,
-                            abc_method_body: Some(index as u32),
-                            signature,
-                            return_type,
-                            is_function,
-                        },
-                    ));
+                    return Ok(Self {
+                        txunit,
+                        abc: txunit.abc(),
+                        abc_method: abc_method.0,
+                        abc_method_body: Some(index as u32),
+                        signature,
+                        return_type,
+                        is_function,
+                    });
                 }
             }
         }
 
-        Ok(Gc::allocate(
-            activation.context.gc_context,
-            Self {
-                txunit,
-                abc: txunit.abc(),
-                abc_method: abc_method.0,
-                abc_method_body: None,
-                signature,
-                return_type: Multiname::any(),
-                is_function,
-            },
-        ))
+        Ok(Self {
+            txunit,
+            abc: txunit.abc(),
+            abc_method: abc_method.0,
+            abc_method_body: None,
+            signature,
+            return_type: Multiname::any(),
+            is_function,
+        })
     }
 
     /// Get the underlying ABC file.
@@ -241,7 +237,9 @@ impl<'gc> BytecodeMethod<'gc> {
     ///
     /// Variadic methods shove excess parameters into a final register.
     pub fn is_variadic(&self) -> bool {
-        self.method().needs_arguments_object || self.method().needs_rest
+        self.method()
+            .flags
+            .intersects(AbcMethodFlags::NEED_ARGUMENTS | AbcMethodFlags::NEED_REST)
     }
 
     /// Determine if a given method is unchecked.
@@ -262,7 +260,7 @@ impl<'gc> BytecodeMethod<'gc> {
             }
         }
 
-        !self.method().needs_rest
+        !self.method().flags.contains(AbcMethodFlags::NEED_REST)
     }
 }
 
@@ -273,7 +271,7 @@ pub struct NativeMethod<'gc> {
     pub method: NativeMethodImpl,
 
     /// The name of the method.
-    pub name: &'static str,
+    pub name: Cow<'static, str>,
 
     /// The parameter signature of the method.
     pub signature: Vec<ParamConfig<'gc>>,
@@ -322,7 +320,7 @@ impl<'gc> Method<'gc> {
     /// Define a builtin method with a particular param configuration.
     pub fn from_builtin_and_params(
         method: NativeMethodImpl,
-        name: &'static str,
+        name: impl Into<Cow<'static, str>>,
         signature: Vec<ParamConfig<'gc>>,
         is_variadic: bool,
         mc: MutationContext<'gc, '_>,
@@ -331,7 +329,7 @@ impl<'gc> Method<'gc> {
             mc,
             NativeMethod {
                 method,
-                name,
+                name: name.into(),
                 signature,
                 is_variadic,
             },
@@ -341,37 +339,25 @@ impl<'gc> Method<'gc> {
     /// Define a builtin with no parameter constraints.
     pub fn from_builtin(
         method: NativeMethodImpl,
-        name: &'static str,
+        name: impl Into<Cow<'static, str>>,
         mc: MutationContext<'gc, '_>,
     ) -> Self {
         Self::Native(Gc::allocate(
             mc,
             NativeMethod {
                 method,
-                name,
+                name: name.into(),
                 signature: Vec::new(),
                 is_variadic: true,
             },
         ))
     }
 
-    /// Access the bytecode of this method.
-    ///
-    /// This function returns `Err` if there is no bytecode for this method.
-    pub fn into_bytecode(self) -> Result<Gc<'gc, BytecodeMethod<'gc>>, Error> {
-        match self {
-            Method::Native { .. } => {
-                Err("Attempted to unwrap a native method as a user-defined one".into())
-            }
-            Method::Bytecode(bm) => Ok(bm),
-        }
-    }
-
     /// Check if this method needs `arguments`.
     pub fn needs_arguments_object(&self) -> bool {
         match self {
             Method::Native { .. } => false,
-            Method::Bytecode(bm) => bm.method().needs_arguments_object,
+            Method::Bytecode(bm) => bm.method().flags.contains(AbcMethodFlags::NEED_ARGUMENTS),
         }
     }
 }

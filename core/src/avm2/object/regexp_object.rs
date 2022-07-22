@@ -13,10 +13,9 @@ use std::cell::{Ref, RefMut};
 /// A class instance allocator that allocates RegExp objects.
 pub fn regexp_allocator<'gc>(
     class: ClassObject<'gc>,
-    proto: Object<'gc>,
     activation: &mut Activation<'_, 'gc, '_>,
 ) -> Result<Object<'gc>, Error> {
-    let base = ScriptObjectData::base_new(Some(proto), Some(class));
+    let base = ScriptObjectData::new(class);
 
     Ok(RegExpObject(GcCell::allocate(
         activation.context.gc_context,
@@ -47,8 +46,7 @@ impl<'gc> RegExpObject<'gc> {
         regexp: RegExp<'gc>,
     ) -> Result<Object<'gc>, Error> {
         let class = activation.avm2().classes().regexp;
-        let proto = activation.avm2().prototypes().regexp;
-        let base = ScriptObjectData::base_new(Some(proto), Some(class));
+        let base = ScriptObjectData::new(class);
 
         let mut this: Object<'gc> = RegExpObject(GcCell::allocate(
             activation.context.gc_context,

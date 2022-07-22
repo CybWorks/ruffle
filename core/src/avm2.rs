@@ -1,16 +1,18 @@
 //! ActionScript Virtual Machine 2 (AS3) support
 
-use crate::avm2::globals::{SystemClasses, SystemPrototypes};
-use crate::avm2::method::Method;
+use crate::avm2::class::AllocatorFn;
+use crate::avm2::globals::SystemClasses;
+use crate::avm2::method::{Method, NativeMethodImpl};
 use crate::avm2::object::EventObject;
 use crate::avm2::script::{Script, TranslationUnit};
 use crate::context::UpdateContext;
 use crate::string::AvmString;
-use crate::tag_utils::SwfSlice;
+use crate::tag_utils::{SwfSlice, SwfStream};
 use fnv::FnvHashMap;
 use gc_arena::{Collect, MutationContext};
 use std::rc::Rc;
 use swf::avm2::read::Reader;
+use swf::extensions::ReadSwfExt;
 
 #[macro_export]
 macro_rules! avm_debug {
@@ -71,11 +73,14 @@ pub struct Avm2<'gc> {
     /// Global scope object.
     globals: Domain<'gc>,
 
-    /// System prototypes.
-    system_prototypes: Option<SystemPrototypes<'gc>>,
-
     /// System classes.
     system_classes: Option<SystemClasses<'gc>>,
+
+    #[collect(require_static)]
+    native_method_table: &'static [Option<NativeMethodImpl>],
+
+    #[collect(require_static)]
+    native_instance_allocator_table: &'static [Option<AllocatorFn>],
 
     /// A list of objects which are capable of recieving broadcasts.
     ///
@@ -99,8 +104,9 @@ impl<'gc> Avm2<'gc> {
         Self {
             stack: Vec::new(),
             globals,
-            system_prototypes: None,
             system_classes: None,
+            native_method_table: Default::default(),
+            native_instance_allocator_table: Default::default(),
             broadcast_list: Default::default(),
 
             #[cfg(feature = "avm_debug")]
@@ -112,13 +118,6 @@ impl<'gc> Avm2<'gc> {
         let globals = context.avm2.globals;
         let mut activation = Activation::from_nothing(context.reborrow());
         globals::load_player_globals(&mut activation, globals)
-    }
-
-    /// Return the current set of system prototypes.
-    ///
-    /// This function panics if the interpreter has not yet been initialized.
-    pub fn prototypes(&self) -> &SystemPrototypes<'gc> {
-        self.system_prototypes.as_ref().unwrap()
     }
 
     /// Return the current set of system classes.
@@ -140,12 +139,12 @@ impl<'gc> Avm2<'gc> {
             Method::Native(method) => {
                 //This exists purely to check if the builtin is OK with being called with
                 //no parameters.
-                init_activation.resolve_parameters(method.name, &[], &method.signature)?;
+                init_activation.resolve_parameters(&method.name, &[], &method.signature)?;
 
                 (method.method)(&mut init_activation, Some(scope), &[])?;
             }
-            Method::Bytecode(_) => {
-                init_activation.run_stack_frame_for_script(script)?;
+            Method::Bytecode(method) => {
+                init_activation.run_actions(method)?;
             }
         };
 
@@ -258,6 +257,37 @@ impl<'gc> Avm2<'gc> {
         let mut evt_activation = Activation::from_nothing(context.reborrow());
         callable.call(reciever, args, &mut evt_activation)?;
 
+        Ok(())
+    }
+
+    pub fn load_abc_from_do_abc(
+        context: &mut UpdateContext<'_, 'gc, '_>,
+        swf: &SwfSlice,
+        domain: Domain<'gc>,
+        reader: &mut SwfStream<'_>,
+        tag_len: usize,
+    ) -> Result<(), Error> {
+        let start = reader.as_slice();
+        // Queue the actions.
+        // TODO: The tag reader parses the entire ABC file, instead of just
+        // giving us a `SwfSlice` for later parsing, so we have to replcate the
+        // *entire* parsing code here. This sucks.
+        let flags = reader.read_u32()?;
+        let name = reader.read_str()?.to_string_lossy(reader.encoding());
+        let is_lazy_initialize = flags & 1 != 0;
+        let num_read = reader.pos(start);
+
+        // The rest of the tag is an ABC file so we can take our SwfSlice now.
+        let slice = swf
+            .resize_to_reader(reader, tag_len - num_read)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Invalid source or tag length when running init action",
+                )
+            })?;
+
+        Avm2::load_abc(slice, &name, is_lazy_initialize, context, domain)?;
         Ok(())
     }
 

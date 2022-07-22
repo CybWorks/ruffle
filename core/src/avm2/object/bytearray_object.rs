@@ -11,10 +11,9 @@ use std::cell::{Ref, RefMut};
 /// A class instance allocator that allocates ByteArray objects.
 pub fn bytearray_allocator<'gc>(
     class: ClassObject<'gc>,
-    proto: Object<'gc>,
     activation: &mut Activation<'_, 'gc, '_>,
 ) -> Result<Object<'gc>, Error> {
-    let base = ScriptObjectData::base_new(Some(proto), Some(class));
+    let base = ScriptObjectData::new(class);
 
     Ok(ByteArrayObject(GcCell::allocate(
         activation.context.gc_context,
@@ -45,8 +44,7 @@ impl<'gc> ByteArrayObject<'gc> {
         bytes: ByteArrayStorage,
     ) -> Result<Object<'gc>, Error> {
         let class = activation.avm2().classes().bytearray;
-        let proto = activation.avm2().prototypes().bytearray;
-        let base = ScriptObjectData::base_new(Some(proto), Some(class));
+        let base = ScriptObjectData::new(class);
 
         let mut instance: Object<'gc> = ByteArrayObject(GcCell::allocate(
             activation.context.gc_context,

@@ -1,4 +1,5 @@
 use bytemuck::{Pod, Zeroable};
+use fnv::FnvHashMap;
 use ruffle_core::backend::render::{
     Bitmap, BitmapFormat, BitmapHandle, BitmapSource, Color, NullBitmapSource, RenderBackend,
     ShapeHandle, Transform,
@@ -9,7 +10,6 @@ use ruffle_render_common_tess::{
     Gradient as TessGradient, GradientType, ShapeTessellator, Vertex as TessVertex,
 };
 use ruffle_web_common::JsResult;
-use std::collections::HashMap;
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{
     HtmlCanvasElement, OesVertexArrayObject, WebGl2RenderingContext as Gl2, WebGlBuffer,
@@ -75,7 +75,6 @@ pub struct WebGlRenderBackend {
 
     shape_tessellator: ShapeTessellator,
 
-    textures: Vec<Texture>,
     meshes: Vec<Mesh>,
 
     color_quad_shape: ShapeHandle,
@@ -95,7 +94,13 @@ pub struct WebGlRenderBackend {
     renderbuffer_height: i32,
     view_matrix: [[f32; 4]; 4],
 
-    bitmap_registry: HashMap<BitmapHandle, Bitmap>,
+    bitmap_registry: FnvHashMap<BitmapHandle, RegistryData>,
+    next_bitmap_handle: BitmapHandle,
+}
+
+struct RegistryData {
+    bitmap: Bitmap,
+    texture_wrapper: Texture,
 }
 
 const MAX_GRADIENT_COLORS: usize = 15;
@@ -233,7 +238,6 @@ impl WebGlRenderBackend {
             meshes: vec![],
             color_quad_shape: ShapeHandle(0),
             bitmap_quad_shape: ShapeHandle(1),
-            textures: vec![],
             renderbuffer_width: 1,
             renderbuffer_height: 1,
             view_matrix: [[0.0; 4]; 4],
@@ -247,7 +251,8 @@ impl WebGlRenderBackend {
             blend_func: (Gl::ONE, Gl::ONE_MINUS_SRC_ALPHA),
             mult_color: None,
             add_color: None,
-            bitmap_registry: HashMap::new(),
+            bitmap_registry: Default::default(),
+            next_bitmap_handle: BitmapHandle(0),
         };
 
         let color_quad_mesh = renderer.build_quad_mesh(&renderer.color_program)?;
@@ -343,6 +348,7 @@ impl WebGlRenderBackend {
                 vertex_buffer,
                 index_buffer,
                 num_indices: 6,
+                num_mask_indices: 6,
             }],
         };
         Ok(quad_mesh)
@@ -496,6 +502,7 @@ impl WebGlRenderBackend {
         let mut draws = Vec::with_capacity(lyon_mesh.len());
         for draw in lyon_mesh {
             let num_indices = draw.indices.len() as i32;
+            let num_mask_indices = draw.mask_index_count as i32;
 
             let vao = self.create_vertex_array().unwrap();
             let vertex_buffer = self.gl.create_buffer().unwrap();
@@ -560,6 +567,7 @@ impl WebGlRenderBackend {
                     vertex_buffer,
                     index_buffer,
                     num_indices,
+                    num_mask_indices,
                 },
                 TessDrawType::Gradient(gradient) => Draw {
                     draw_type: DrawType::Gradient(Box::new(Gradient::from(gradient))),
@@ -567,6 +575,7 @@ impl WebGlRenderBackend {
                     vertex_buffer,
                     index_buffer,
                     num_indices,
+                    num_mask_indices,
                 },
                 TessDrawType::Bitmap(bitmap) => Draw {
                     draw_type: DrawType::Bitmap(BitmapDraw {
@@ -579,6 +588,7 @@ impl WebGlRenderBackend {
                     vertex_buffer,
                     index_buffer,
                     num_indices,
+                    num_mask_indices,
                 },
             });
 
@@ -821,7 +831,8 @@ impl RenderBackend for WebGlRenderBackend {
 
     fn render_bitmap(&mut self, bitmap: BitmapHandle, transform: &Transform, smoothing: bool) {
         self.set_stencil_state();
-        if let Some(bitmap) = self.textures.get(bitmap.0) {
+        if let Some(entry) = self.bitmap_registry.get(&bitmap) {
+            let bitmap = &entry.texture_wrapper;
             let texture = &bitmap.texture;
             // Adjust the quad draw to use the target bitmap.
             let mesh = &self.meshes[self.bitmap_quad_shape.0];
@@ -941,6 +952,18 @@ impl RenderBackend for WebGlRenderBackend {
 
         let mesh = &self.meshes[shape.0];
         for draw in &mesh.draws {
+            // Ignore strokes when drawing a mask stencil.
+            let num_indices = if self.mask_state != MaskState::DrawMaskStencil
+                && self.mask_state != MaskState::ClearMaskStencil
+            {
+                draw.num_indices
+            } else {
+                draw.num_mask_indices
+            };
+            if num_indices == 0 {
+                continue;
+            }
+
             self.bind_vertex_array(Some(&draw.vao));
 
             let (program, src_blend, dst_blend) = match &draw.draw_type {
@@ -1019,8 +1042,8 @@ impl RenderBackend for WebGlRenderBackend {
                     );
                 }
                 DrawType::Bitmap(bitmap) => {
-                    let texture = if let Some(texture) = self.textures.get(bitmap.handle.0) {
-                        texture
+                    let texture = if let Some(entry) = self.bitmap_registry.get(&bitmap.handle) {
+                        &entry.texture_wrapper
                     } else {
                         // Bitmap not registered
                         continue;
@@ -1062,7 +1085,7 @@ impl RenderBackend for WebGlRenderBackend {
 
             // Draw the triangles.
             self.gl
-                .draw_elements_with_i32(Gl::TRIANGLES, draw.num_indices, Gl::UNSIGNED_INT, 0);
+                .draw_elements_with_i32(Gl::TRIANGLES, num_indices, Gl::UNSIGNED_INT, 0);
         }
     }
 
@@ -1168,7 +1191,7 @@ impl RenderBackend for WebGlRenderBackend {
     }
 
     fn get_bitmap_pixels(&mut self, bitmap: BitmapHandle) -> Option<Bitmap> {
-        self.bitmap_registry.get(&bitmap).cloned()
+        self.bitmap_registry.get(&bitmap).map(|e| e.bitmap.clone())
     }
 
     fn register_bitmap(&mut self, bitmap: Bitmap) -> Result<BitmapHandle, Error> {
@@ -1203,18 +1226,28 @@ impl RenderBackend for WebGlRenderBackend {
         self.gl
             .tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_MAG_FILTER, Gl::LINEAR as i32);
 
-        let handle = BitmapHandle(self.textures.len());
+        let handle = self.next_bitmap_handle;
+        self.next_bitmap_handle = BitmapHandle(self.next_bitmap_handle.0 + 1);
         let width = bitmap.width();
         let height = bitmap.height();
-        self.bitmap_registry.insert(handle, bitmap);
-
-        self.textures.push(Texture {
-            width,
-            height,
-            texture,
-        });
+        self.bitmap_registry.insert(
+            handle,
+            RegistryData {
+                bitmap,
+                texture_wrapper: Texture {
+                    width,
+                    height,
+                    texture,
+                },
+            },
+        );
 
         Ok(handle)
+    }
+
+    fn unregister_bitmap(&mut self, bitmap: BitmapHandle) -> Result<(), Error> {
+        self.bitmap_registry.remove(&bitmap);
+        Ok(())
     }
 
     fn update_texture(
@@ -1224,8 +1257,8 @@ impl RenderBackend for WebGlRenderBackend {
         height: u32,
         rgba: Vec<u8>,
     ) -> Result<BitmapHandle, Error> {
-        let texture = if let Some(texture) = self.textures.get(handle.0) {
-            texture
+        let texture = if let Some(entry) = self.bitmap_registry.get(&handle) {
+            &entry.texture_wrapper
         } else {
             return Err("update_texture: Bitmap is not regsitered".into());
         };
@@ -1320,6 +1353,7 @@ struct Draw {
     index_buffer: WebGlBuffer,
     vao: WebGlVertexArrayObject,
     num_indices: i32,
+    num_mask_indices: i32,
 }
 
 enum DrawType {

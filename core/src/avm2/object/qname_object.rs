@@ -12,10 +12,9 @@ use std::cell::{Ref, RefMut};
 /// A class instance allocator that allocates QName objects.
 pub fn qname_allocator<'gc>(
     class: ClassObject<'gc>,
-    proto: Object<'gc>,
     activation: &mut Activation<'_, 'gc, '_>,
 ) -> Result<Object<'gc>, Error> {
-    let base = ScriptObjectData::base_new(Some(proto), Some(class));
+    let base = ScriptObjectData::new(class);
 
     Ok(QNameObject(GcCell::allocate(
         activation.context.gc_context,
@@ -46,8 +45,7 @@ impl<'gc> QNameObject<'gc> {
         qname: QName<'gc>,
     ) -> Result<Object<'gc>, Error> {
         let class = activation.avm2().classes().qname;
-        let proto = activation.avm2().prototypes().qname;
-        let base = ScriptObjectData::base_new(Some(proto), Some(class));
+        let base = ScriptObjectData::new(class);
 
         let mut this: Object<'gc> = QNameObject(GcCell::allocate(
             activation.context.gc_context,

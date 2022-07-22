@@ -4,7 +4,9 @@ use crate::avm2::activation::Activation;
 use crate::avm2::class::Class;
 use crate::avm2::domain::Domain;
 use crate::avm2::method::{BytecodeMethod, Method};
+use crate::avm2::names::Multiname;
 use crate::avm2::object::{Object, TObject};
+use crate::avm2::property_map::PropertyMap;
 use crate::avm2::scope::ScopeChain;
 use crate::avm2::traits::Trait;
 use crate::avm2::value::Value;
@@ -12,6 +14,7 @@ use crate::avm2::{Avm2, Error};
 use crate::context::UpdateContext;
 use crate::string::AvmString;
 use gc_arena::{Collect, Gc, GcCell, MutationContext};
+use std::borrow::Cow;
 use std::cell::Ref;
 use std::mem::drop;
 use std::rc::Rc;
@@ -55,6 +58,23 @@ pub struct TranslationUnitData<'gc> {
     /// All strings loaded from the ABC's strings list.
     /// They're lazy loaded and offset by 1, with the 0th element being always None.
     strings: Vec<Option<AvmString<'gc>>>,
+
+    /// A map from trait names to their defining `Scripts`.
+    /// This is very similar to `Domain.defs`, except it
+    /// only stores traits with `Namespace::Private`, which are
+    /// not exported/stored in `Domain`.
+    ///
+    /// This should only be used in very specific circumstances -
+    /// such as resolving classes for property types. All other
+    /// lookups should go through `Activation.resolve_definition`,
+    /// which takes scopes and privacy into account.
+    ///
+    /// Note that this map is 'gradually' populated over time -
+    /// each call to `script.load_traits` inserts all private
+    /// traits declared by that script. When looking up a
+    /// trait name in this map, you must ensure that its
+    /// corresponing `Script` will have already been loaded.
+    private_trait_scripts: PropertyMap<'gc, Script<'gc>>,
 }
 
 impl<'gc> TranslationUnit<'gc> {
@@ -65,6 +85,7 @@ impl<'gc> TranslationUnit<'gc> {
         let methods = vec![None; abc.methods.len()];
         let scripts = vec![None; abc.scripts.len()];
         let strings = vec![None; abc.constant_pool.strings.len() + 1];
+        let private_trait_scripts = PropertyMap::new();
 
         Self(GcCell::allocate(
             mc,
@@ -75,13 +96,26 @@ impl<'gc> TranslationUnit<'gc> {
                 methods,
                 scripts,
                 strings,
+                private_trait_scripts,
             },
         ))
+    }
+
+    pub fn domain(self) -> Domain<'gc> {
+        self.0.read().domain
     }
 
     /// Retrieve the underlying `AbcFile` for this translation unit.
     pub fn abc(self) -> Rc<AbcFile> {
         self.0.read().abc.clone()
+    }
+
+    pub fn get_loaded_private_trait_script(self, name: &Multiname<'gc>) -> Option<Script<'gc>> {
+        self.0
+            .read()
+            .private_trait_scripts
+            .get_for_multiname(name)
+            .copied()
     }
 
     /// Load a method from the ABC file and return its method definition.
@@ -96,11 +130,30 @@ impl<'gc> TranslationUnit<'gc> {
             return Ok(method.clone());
         }
 
+        let is_global = read.domain.is_avm2_global_domain(activation);
         drop(read);
 
-        let method: Result<Gc<'gc, BytecodeMethod<'gc>>, Error> =
-            BytecodeMethod::from_method_index(self, method_index, is_function, activation);
-        let method: Method<'gc> = method?.into();
+        let bc_method =
+            BytecodeMethod::from_method_index(self, method_index, is_function, activation)?;
+
+        // This closure lets us move out of 'bc_method.signature' and then return,
+        // allowing us to use 'bc_method' later on without a borrow-checker error.
+        let method = (|| {
+            if is_global {
+                if let Some(native) = activation.avm2().native_method_table[method_index.0 as usize]
+                {
+                    let variadic = bc_method.is_variadic();
+                    return Method::from_builtin_and_params(
+                        native,
+                        Cow::Owned(bc_method.method_name().to_string()),
+                        bc_method.signature,
+                        variadic,
+                        activation.context.gc_context,
+                    );
+                }
+            }
+            Gc::allocate(activation.context.gc_context, bc_method).into()
+        })();
 
         self.0.write(activation.context.gc_context).methods[method_index.0 as usize] =
             Some(method.clone());
@@ -338,7 +391,13 @@ impl<'gc> Script<'gc> {
 
         for abc_trait in script.traits.iter() {
             let newtrait = Trait::from_abc_trait(unit, abc_trait, activation)?;
-            if !newtrait.name().namespace().is_private() {
+            let name = newtrait.name();
+            if name.namespace().is_private() {
+                unit.0
+                    .write(activation.context.gc_context)
+                    .private_trait_scripts
+                    .insert(name, *self);
+            } else {
                 write.domain.export_definition(
                     newtrait.name(),
                     *self,
@@ -379,7 +438,7 @@ impl<'gc> Script<'gc> {
             let scope = ScopeChain::new(domain);
 
             globals.vtable().unwrap().init_vtable(
-                None,
+                globals.instance_of().unwrap(),
                 &self.traits()?,
                 scope,
                 None,

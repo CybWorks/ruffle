@@ -287,76 +287,42 @@ fn replace<'gc>(
 ) -> Result<Value<'gc>, Error> {
     if let Some(this) = this {
         let this = Value::from(this).coerce_to_string(activation)?;
-
         let pattern = args.get(0).unwrap_or(&Value::Undefined);
         let replacement = args.get(1).unwrap_or(&Value::Undefined);
-
-        if replacement
+        // Handles regex patterns.
+        if let Some(mut regexp) = pattern
             .as_object()
-            .and_then(|o| o.as_function_object())
-            .is_some()
+            .as_ref()
+            .and_then(|o| o.as_regexp_mut(activation.context.gc_context))
         {
-            log::warn!("string.replace(_, function) - not implemented");
-            return Err("NotImplemented".into());
-        }
-        let replacement = replacement.coerce_to_string(activation)?;
-
-        if replacement.find(b'$').is_some() {
-            log::warn!("string.replace(_, \"...$...\") - not implemented");
-            return Err("NotImplemented".into());
-        }
-
-        if pattern
-            .as_object()
-            .map(|o| o.as_regexp().is_some())
-            .unwrap_or(false)
-        {
-            let regexp_object = pattern.as_object().unwrap();
-            let mut regexp = regexp_object
-                .as_regexp_mut(activation.context.gc_context)
-                .unwrap();
-            let mut ret = WString::new();
-            let mut start = 0;
-
-            let old = regexp.last_index();
-            regexp.set_last_index(0);
-
-            while let Some(result) = regexp.exec(this) {
-                ret.push_str(&this[start..result.start()]);
-                ret.push_str(&replacement);
-
-                start = regexp.last_index();
-
-                if result.range().is_empty() {
-                    let last_index = regexp.last_index();
-                    if last_index == this.len() {
-                        break;
-                    }
-                    regexp.set_last_index(last_index + 1);
-                }
-
-                if !regexp.flags().contains(RegExpFlags::GLOBAL) {
-                    break;
-                }
+            // Replacement is either a function or treatable as string.
+            if let Some(f) = replacement.as_object().and_then(|o| o.as_function_object()) {
+                return Ok(regexp.replace_fn(activation, this, &f)?.into());
+            } else {
+                let replacement = replacement.coerce_to_string(activation)?;
+                return Ok(regexp.replace_string(activation, this, replacement)?.into());
             }
-
-            regexp.set_last_index(old);
-
-            ret.push_str(&this[start..]);
-
+        }
+        // Handles patterns which are treatable as string.
+        let pattern = pattern.coerce_to_string(activation)?;
+        if let Some(position) = this.find(&pattern) {
+            let mut ret = WString::from(&this[..position]);
+            // Replacement is either a function or treatable as string.
+            if let Some(f) = replacement.as_object().and_then(|o| o.as_function_object()) {
+                let args = [pattern.into(), position.into(), this.into()];
+                let v = f.call(activation.global_scope(), &args, activation)?;
+                ret.push_str(v.coerce_to_string(activation)?.as_wstr());
+            } else {
+                let replacement = replacement.coerce_to_string(activation)?;
+                ret.push_str(&replacement);
+            }
+            ret.push_str(&this[position + pattern.len()..]);
             return Ok(AvmString::new(activation.context.gc_context, ret).into());
         } else {
-            let pattern = pattern.coerce_to_string(activation)?;
-            if let Some(position) = this.find(&pattern) {
-                let mut ret = WString::from(&this[..position]);
-                ret.push_str(&replacement);
-                ret.push_str(&this[position + pattern.len()..]);
-                return Ok(AvmString::new(activation.context.gc_context, ret).into());
-            } else {
-                return Ok(this.into());
-            }
+            return Ok(this.into());
         }
     }
+
     Ok(Value::Undefined)
 }
 
@@ -408,19 +374,22 @@ fn split<'gc>(
                     .into(),
             );
         }
-        if delimiter
-            .as_object()
-            .map(|o| o.as_regexp().is_some())
-            .unwrap_or(false)
-        {
-            log::warn!("string.split(regex) - not implemented");
-        }
+
         let this = Value::from(this).coerce_to_string(activation)?;
-        let delimiter = delimiter.coerce_to_string(activation)?;
         let limit = match args.get(1).unwrap_or(&Value::Undefined) {
             Value::Undefined => usize::MAX,
             limit => limit.coerce_to_i32(activation)?.max(0) as usize,
         };
+
+        if let Some(mut regexp) = delimiter
+            .as_object()
+            .as_ref()
+            .and_then(|o| o.as_regexp_mut(activation.context.gc_context))
+        {
+            return Ok(regexp.split(activation, this, limit)?.into());
+        }
+
+        let delimiter = delimiter.coerce_to_string(activation)?;
 
         let storage = if delimiter.is_empty() {
             // When using an empty delimiter, Str::split adds an extra beginning and trailing item, but Flash does not.

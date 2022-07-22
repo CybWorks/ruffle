@@ -502,32 +502,15 @@ impl<'gc> MovieClip<'gc> {
             return Ok(());
         }
 
-        let start = reader.as_slice();
-        // Queue the actions.
-        // TODO: The tag reader parses the entire ABC file, instead of just
-        // giving us a `SwfSlice` for later parsing, so we have to replcate the
-        // *entire* parsing code here. This sucks.
-        let flags = reader.read_u32()?;
-        let name = reader.read_str()?.to_string_lossy(reader.encoding());
-        let is_lazy_initialize = flags & 1 != 0;
         let domain = context.library.library_for_movie_mut(movie).avm2_domain();
-        let num_read = reader.pos(start);
 
-        // The rest of the tag is an ABC file so we can take our SwfSlice now.
-        let slice = self
-            .0
-            .read()
-            .static_data
-            .swf
-            .resize_to_reader(reader, tag_len - num_read)
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "Invalid source or tag length when running init action",
-                )
-            })?;
-
-        if let Err(e) = Avm2::load_abc(slice, &name, is_lazy_initialize, context, domain) {
+        if let Err(e) = Avm2::load_abc_from_do_abc(
+            context,
+            &self.0.read().static_data.swf,
+            domain,
+            reader,
+            tag_len,
+        ) {
             log::warn!("Error loading ABC file: {}", e);
         }
 
@@ -1120,6 +1103,7 @@ impl<'gc> MovieClip<'gc> {
                 // Remove previous child from children list,
                 // and add new child onto front of the list.
                 let prev_child = self.replace_at_depth(context, child, depth);
+                let mut placed_with_name = false;
                 {
                     // Set initial properties for child.
                     child.set_instantiated_by_timeline(context.gc_context, true);
@@ -1136,6 +1120,7 @@ impl<'gc> MovieClip<'gc> {
                     // Apply PlaceObject parameters.
                     child.apply_place_object(context, place_object);
                     if let Some(name) = &place_object.name {
+                        placed_with_name = true;
                         let encoding = swf::SwfStr::encoding_for_version(self.swf_version());
                         let name = name.to_str_lossy(encoding);
                         child.set_name(
@@ -1189,16 +1174,19 @@ impl<'gc> MovieClip<'gc> {
                     dispatch_removed_event(prev_child, context);
                 }
 
-                if let Avm2Value::Object(mut p) = self.object2() {
-                    if let Avm2Value::Object(c) = child.object2() {
-                        let name = Avm2QName::new(Avm2Namespace::public(), child.name());
-                        let mut activation = Avm2Activation::from_nothing(context.reborrow());
-                        if let Err(e) = p.init_property(&name.into(), c.into(), &mut activation) {
-                            log::error!(
-                                "Got error when setting AVM2 child named \"{}\": {}",
-                                &child.name(),
-                                e
-                            );
+                if placed_with_name {
+                    if let Avm2Value::Object(mut p) = self.object2() {
+                        if let Avm2Value::Object(c) = child.object2() {
+                            let name = Avm2QName::new(Avm2Namespace::public(), child.name());
+                            let mut activation = Avm2Activation::from_nothing(context.reborrow());
+                            if let Err(e) = p.init_property(&name.into(), c.into(), &mut activation)
+                            {
+                                log::error!(
+                                    "Got error when setting AVM2 child named \"{}\": {}",
+                                    &child.name(),
+                                    e
+                                );
+                            }
                         }
                     }
                 }
@@ -1776,6 +1764,19 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
 
             if needs_construction {
                 self.construct_as_avm2_object(context);
+
+                // AVM2 roots work exactly the same as any other timeline- or
+                // script-constructed object in terms of events received on
+                // them. However, because roots are added by the player itself,
+                // we can't fire the events until we run our first frame, so we
+                // have to actually check if we've just built the root and act
+                // like it just got added to the timeline.
+                let root = self.avm2_root(context);
+                let self_dobj: DisplayObject<'gc> = (*self).into();
+                if DisplayObject::option_ptr_eq(Some(self_dobj), root) {
+                    dispatch_added_event_only(self_dobj, context);
+                    dispatch_added_to_stage_event_only(self_dobj, context);
+                }
             }
         }
     }

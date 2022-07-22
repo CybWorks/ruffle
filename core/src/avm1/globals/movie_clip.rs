@@ -261,10 +261,10 @@ fn line_style<'gc>(
             .and_then(|v| v.coerce_to_string(activation).ok())
             .as_deref()
         {
-            Some(v) if v == b"normal" => (true, true),
+            Some(v) if v == b"none" => (false, false),
             Some(v) if v == b"vertical" => (true, false),
             Some(v) if v == b"horizontal" => (false, true),
-            _ => (false, false),
+            _ => (true, true),
         };
         let cap_style = match args
             .get(5)
@@ -1320,12 +1320,11 @@ fn load_movie<'gc>(
     let url = url_val.coerce_to_string(activation)?;
     let method = args.get(1).cloned().unwrap_or(Value::Undefined);
     let method = NavigationMethod::from_method_str(&method.coerce_to_string(activation)?);
-    let (url, opts) = activation.locals_into_request_options(&url, method);
+    let request = activation.locals_into_request(url, method);
     let future = activation.context.load_manager.load_movie_into_clip(
         activation.context.player.clone(),
         DisplayObject::MovieClip(target),
-        &url,
-        opts,
+        request,
         None,
         None,
     );
@@ -1343,13 +1342,12 @@ fn load_variables<'gc>(
     let url = url_val.coerce_to_string(activation)?;
     let method = args.get(1).cloned().unwrap_or(Value::Undefined);
     let method = NavigationMethod::from_method_str(&method.coerce_to_string(activation)?);
-    let (url, opts) = activation.locals_into_request_options(&url, method);
+    let request = activation.locals_into_request(url, method);
     let target = target.object().coerce_to_object(activation);
     let future = activation.context.load_manager.load_form_into_object(
         activation.context.player.clone(),
         target,
-        &url,
-        opts,
+        request,
     );
     activation.context.navigator.spawn_future(future);
 
@@ -1381,8 +1379,18 @@ fn set_transform<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     value: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
-    let transform = value.coerce_to_object(activation);
-    crate::avm1::globals::transform::apply_to_display_object(activation, transform, this.into())?;
+    if let Value::Object(object) = value {
+        if let Some(transform) = object.as_transform_object() {
+            if let Some(clip) = transform.clip() {
+                let matrix = *clip.base().matrix();
+                this.set_matrix(activation.context.gc_context, &matrix);
+                let color_transform = *clip.base().color_transform();
+                this.set_color_transform(activation.context.gc_context, &color_transform);
+                this.set_transformed_by_script(activation.context.gc_context, true);
+            }
+        }
+    }
+
     Ok(())
 }
 

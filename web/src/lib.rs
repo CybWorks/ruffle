@@ -219,7 +219,7 @@ impl Ruffle {
     /// Stream an arbitrary movie file from (presumably) the Internet.
     ///
     /// This method should only be called once per player.
-    pub fn stream_from(&mut self, movie_url: &str, parameters: &JsValue) -> Result<(), JsValue> {
+    pub fn stream_from(&mut self, movie_url: String, parameters: &JsValue) -> Result<(), JsValue> {
         let _ = self.with_core_mut(|core| {
             let parameters_to_load = parse_movie_parameters(parameters);
 
@@ -821,7 +821,7 @@ impl Ruffle {
                 let instances = instances.try_borrow()?;
                 if let Some(instance) = instances.get(self.0) {
                     let instance = instance.try_borrow()?;
-                    Ok(f(&*instance))
+                    Ok(f(&instance))
                 } else {
                     Err(RuffleInstanceError::InstanceNotFound)
                 }
@@ -844,7 +844,7 @@ impl Ruffle {
                 let instances = instances.try_borrow()?;
                 if let Some(instance) = instances.get(self.0) {
                     let mut instance = instance.try_borrow_mut()?;
-                    Ok(f(&mut *instance))
+                    Ok(f(&mut instance))
                 } else {
                     Err(RuffleInstanceError::InstanceNotFound)
                 }
@@ -873,7 +873,7 @@ impl Ruffle {
                     let core = core
                         .try_lock()
                         .map_err(|_| RuffleInstanceError::TryLockError)?;
-                    Ok(f(&*core))
+                    Ok(f(&core))
                 } else {
                     Err(RuffleInstanceError::InstanceNotFound)
                 }
@@ -902,7 +902,7 @@ impl Ruffle {
                     let mut core = core
                         .try_lock()
                         .map_err(|_| RuffleInstanceError::TryLockError)?;
-                    Ok(f(&mut *core))
+                    Ok(f(&mut core))
                 } else {
                     Err(RuffleInstanceError::InstanceNotFound)
                 }
@@ -1022,7 +1022,7 @@ impl RuffleInstance {
         let ret = self
             .core
             .try_lock()
-            .map(|core| f(&*core))
+            .map(|core| f(&core))
             .map_err(|_| RuffleInstanceError::TryLockError);
         if let Err(e) = &ret {
             log::error!("{}", e);
@@ -1037,7 +1037,7 @@ impl RuffleInstance {
         let ret = self
             .core
             .try_lock()
-            .map(|mut core| f(&mut *core))
+            .map(|mut core| f(&mut core))
             .map_err(|_| RuffleInstanceError::TryLockError);
         if let Err(e) = &ret {
             log::error!("{}", e);
@@ -1217,7 +1217,7 @@ async fn create_renderer(
     // Try to create a backend, falling through to the next backend on failure.
     // We must recreate the canvas each attempt, as only a single context may be created per canvas
     // with `getContext`.
-    #[cfg(all(feature = "wgpu", target_arch = "wasm32"))]
+    #[cfg(all(feature = "wgpu", target_family = "wasm"))]
     {
         // Check that we have access to WebGPU (navigator.gpu should exist).
         if web_sys::window()

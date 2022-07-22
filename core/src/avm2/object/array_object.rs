@@ -14,10 +14,9 @@ use std::cell::{Ref, RefMut};
 /// A class instance allocator that allocates array objects.
 pub fn array_allocator<'gc>(
     class: ClassObject<'gc>,
-    proto: Object<'gc>,
     activation: &mut Activation<'_, 'gc, '_>,
 ) -> Result<Object<'gc>, Error> {
-    let base = ScriptObjectData::base_new(Some(proto), Some(class));
+    let base = ScriptObjectData::new(class);
 
     Ok(ArrayObject(GcCell::allocate(
         activation.context.gc_context,
@@ -58,8 +57,7 @@ impl<'gc> ArrayObject<'gc> {
         array: ArrayStorage<'gc>,
     ) -> Result<Object<'gc>, Error> {
         let class = activation.avm2().classes().array;
-        let proto = activation.avm2().prototypes().array;
-        let base = ScriptObjectData::base_new(Some(proto), Some(class));
+        let base = ScriptObjectData::new(class);
 
         let mut instance: Object<'gc> = ArrayObject(GcCell::allocate(
             activation.context.gc_context,

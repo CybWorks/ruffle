@@ -31,7 +31,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node_version: ["16"]
+        node_version: ["16", "18"]
         rust_version: [stable] # We most likely don't care about Rust versions here, we'll catch those issues in test_rust.yml.
         os: [ubuntu-latest, windows-latest]
 
@@ -55,7 +55,7 @@ jobs:
       # wasm-bindgen-cli version must match wasm-bindgen crate version.
       # Be sure to update in release_nightly.yml, web/Cargo.toml and web/README.md.
       - name: Install wasm-bindgen
-        run: cargo install wasm-bindgen-cli --version 0.2.80
+        run: cargo install wasm-bindgen-cli --version 0.2.81
 
       - name: Setup conda
         uses: conda-incubator/setup-miniconda@v2
@@ -92,7 +92,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        node_version: ["16"]
+        node_version: ["16", "18"]
         rust_version: [stable] # We most likely don't care about Rust versions here, we'll catch those issues in test_rust.yml.
         os: [ubuntu-latest, windows-latest]
 

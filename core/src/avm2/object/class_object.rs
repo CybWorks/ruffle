@@ -11,8 +11,9 @@ use crate::avm2::object::{Multiname, Object, ObjectPtr, TObject};
 use crate::avm2::property::Property;
 use crate::avm2::scope::{Scope, ScopeChain};
 use crate::avm2::value::Value;
-use crate::avm2::vtable::VTable;
+use crate::avm2::vtable::{ClassBoundMethod, VTable};
 use crate::avm2::Error;
+use crate::avm2::TranslationUnit;
 use crate::string::AvmString;
 use fnv::FnvHashMap;
 use gc_arena::{Collect, GcCell, MutationContext};
@@ -134,7 +135,7 @@ impl<'gc> ClassObject<'gc> {
         class_object.link_prototype(activation, class_proto)?;
 
         let class_class = activation.avm2().classes().class;
-        let class_class_proto = activation.avm2().prototypes().class;
+        let class_class_proto = class_class.prototype();
 
         class_object.link_type(activation, class_class_proto, class_class);
         class_object.into_finished_class(activation)
@@ -185,7 +186,7 @@ impl<'gc> ClassObject<'gc> {
         let class_object = ClassObject(GcCell::allocate(
             activation.context.gc_context,
             ClassObjectData {
-                base: ScriptObjectData::base_new(None, None),
+                base: ScriptObjectData::custom_new(None, None),
                 class,
                 prototype: None,
                 class_scope: scope,
@@ -245,7 +246,7 @@ impl<'gc> ClassObject<'gc> {
         class.read().validate_class(self.superclass_object())?;
 
         self.instance_vtable().init_vtable(
-            Some(self),
+            self,
             class.read().instance_traits(),
             self.instance_scope(),
             self.superclass_object().map(|cls| cls.instance_vtable()),
@@ -254,7 +255,7 @@ impl<'gc> ClassObject<'gc> {
 
         // class vtable == class traits + Class instance traits
         self.class_vtable().init_vtable(
-            Some(self),
+            self,
             class.read().class_traits(),
             self.class_scope(),
             Some(self.instance_of().unwrap().instance_vtable()),
@@ -542,15 +543,17 @@ impl<'gc> ClassObject<'gc> {
         }
         if let Some(Property::Method { disp_id, .. }) = property {
             // todo: handle errors
-            let (superclass_object, method) =
-                self.instance_vtable().get_full_method(disp_id).unwrap();
-            let scope = superclass_object.unwrap().instance_scope();
+            let ClassBoundMethod {
+                class,
+                scope,
+                method,
+            } = self.instance_vtable().get_full_method(disp_id).unwrap();
             let callee = FunctionObject::from_method(
                 activation,
                 method.clone(),
                 scope,
                 Some(reciever),
-                superclass_object,
+                Some(class),
             );
 
             callee.call(Some(reciever), arguments, activation)
@@ -602,15 +605,17 @@ impl<'gc> ClassObject<'gc> {
         }) = property
         {
             // todo: handle errors
-            let (superclass_object, method) =
-                self.instance_vtable().get_full_method(disp_id).unwrap();
-            let scope = superclass_object.unwrap().class_scope();
+            let ClassBoundMethod {
+                class,
+                scope,
+                method,
+            } = self.instance_vtable().get_full_method(disp_id).unwrap();
             let callee = FunctionObject::from_method(
                 activation,
                 method.clone(),
                 scope,
                 Some(reciever),
-                superclass_object,
+                Some(class),
             );
 
             callee.call(Some(reciever), &[], activation)
@@ -664,15 +669,17 @@ impl<'gc> ClassObject<'gc> {
         }) = property
         {
             // todo: handle errors
-            let (superclass_object, method) =
-                self.instance_vtable().get_full_method(disp_id).unwrap();
-            let scope = superclass_object.unwrap().class_scope();
+            let ClassBoundMethod {
+                class,
+                scope,
+                method,
+            } = self.instance_vtable().get_full_method(disp_id).unwrap();
             let callee = FunctionObject::from_method(
                 activation,
                 method.clone(),
                 scope,
                 Some(reciever),
-                superclass_object,
+                Some(class),
             );
 
             callee.call(Some(reciever), &[value], activation)?;
@@ -680,6 +687,14 @@ impl<'gc> ClassObject<'gc> {
             Ok(())
         } else {
             reciever.set_property(multiname, value, activation)
+        }
+    }
+
+    pub fn translation_unit(self) -> Option<TranslationUnit<'gc>> {
+        if let Method::Bytecode(bc) = self.0.read().constructor {
+            Some(bc.txunit)
+        } else {
+            None
         }
     }
 
@@ -779,9 +794,8 @@ impl<'gc> TObject<'gc> for ClassObject<'gc> {
         arguments: &[Value<'gc>],
     ) -> Result<Object<'gc>, Error> {
         let instance_allocator = self.0.read().instance_allocator.0;
-        let prototype = self.0.read().prototype.unwrap();
 
-        let mut instance = instance_allocator(self, prototype, activation)?;
+        let mut instance = instance_allocator(self, activation)?;
 
         instance.install_instance_slots(activation);
 
@@ -871,7 +885,6 @@ impl<'gc> TObject<'gc> for ClassObject<'gc> {
         let class_proto = self.allocate_prototype(activation, superclass_object)?;
 
         let class_class = activation.avm2().classes().class;
-        let class_class_proto = activation.avm2().prototypes().class;
 
         let constructor = self.0.read().constructor.clone();
         let native_constructor = self.0.read().native_constructor.clone();
@@ -880,7 +893,7 @@ impl<'gc> TObject<'gc> for ClassObject<'gc> {
         let mut class_object = ClassObject(GcCell::allocate(
             activation.context.gc_context,
             ClassObjectData {
-                base: ScriptObjectData::base_new(Some(class_class_proto), Some(class_class)),
+                base: ScriptObjectData::new(class_class),
                 class: parameterized_class,
                 prototype: None,
                 class_scope,
@@ -904,7 +917,7 @@ impl<'gc> TObject<'gc> for ClassObject<'gc> {
             .validate_class(class_object.superclass_object())?;
 
         class_object.instance_vtable().init_vtable(
-            Some(class_object),
+            class_object,
             parameterized_class.read().instance_traits(),
             class_object.instance_scope(),
             class_object
@@ -915,7 +928,7 @@ impl<'gc> TObject<'gc> for ClassObject<'gc> {
 
         // class vtable == class traits + Class instance traits
         class_object.class_vtable().init_vtable(
-            Some(class_object),
+            class_object,
             parameterized_class.read().class_traits(),
             class_object.class_scope(),
             Some(class_object.instance_of().unwrap().instance_vtable()),

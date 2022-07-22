@@ -20,14 +20,10 @@ use ruffle_render_wgpu::wgpu;
 use ruffle_render_wgpu::WgpuRenderBackend;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-
-fn get_img_platform_suffix(info: &wgpu::AdapterInfo) -> String {
-    format!("{}-{}", std::env::consts::OS, info.name)
-}
 
 const RUN_IMG_TESTS: bool = cfg!(feature = "imgtests");
 
@@ -192,6 +188,7 @@ swf_tests! {
     (as3_class_to_string, "avm2/class_to_string", 1),
     (as3_class_value_of, "avm2/class_value_of", 1),
     (as3_closures, "avm2/closures", 1),
+    (as3_coerce_property, "avm2/coerce_property", 1),
     (as3_coerce_string, "avm2/coerce_string", 1),
     (as3_constructor_call, "avm2/constructor_call", 1),
     (as3_control_flow_bool, "avm2/control_flow_bool", 1),
@@ -340,6 +337,7 @@ swf_tests! {
     (as3_mouseevent_constr, "avm2/mouseevent_constr", 1),
     (as3_mouseevent_stagexy, "avm2/mouseevent_stagexy", 1),
     (as3_mouseevent_valueof_tostring, "avm2/mouseevent_valueof_tostring", 1),
+    (as3_movieclip_child_property, "avm2/movieclip_child_property", 1),
     (as3_movieclip_constr, "avm2/movieclip_constr", 1),
     (as3_movieclip_currentlabels, "avm2/movieclip_currentlabels", 5),
     (as3_movieclip_currentscene, "avm2/movieclip_currentscene", 5),
@@ -488,6 +486,7 @@ swf_tests! {
     (as3_vector_tostring, "avm2/vector_tostring", 1),
     (as3_virtual_properties, "avm2/virtual_properties", 1),
     (as3_with, "avm2/with", 1),
+    (as3_escape, "avm2/escape", 1),
     (attach_movie, "avm1/attach_movie", 1),
     (bad_placeobject_clipaction, "avm1/bad_placeobject_clipaction", 2),
     (bad_swf_tag_past_eof, "avm1/bad_swf_tag_past_eof", 1),
@@ -579,6 +578,7 @@ swf_tests! {
     (function_as_function, "avm1/function_as_function", 1),
     (function_base_clip_removed, "avm1/function_base_clip_removed", 3),
     (function_base_clip, "avm1/function_base_clip", 2),
+    (function_suppress_and_preload, "avm1/function_suppress_and_preload", 1),
     (funky_function_calls, "avm1/funky_function_calls", 1),
     (get_bytes_total, "avm1/get_bytes_total", 1),
     (getproperty_swf4, "avm1/getproperty_swf4", 1),
@@ -681,6 +681,7 @@ swf_tests! {
     (object_string_coerce_swf5, "avm1/object_string_coerce_swf5", 1),
     (object_string_coerce_swf6, "avm1/object_string_coerce_swf6", 1),
     (on_construct, "avm1/on_construct", 1),
+    (parse_float, "avm1/parse_float", 1),
     (parse_int, "avm1/parse_int", 1),
     (path_string, "avm1/path_string", 1),
     (point, "avm1/point", 1),
@@ -812,6 +813,7 @@ swf_tests_approx! {
     (as3_number_tofixed, "avm2/number_tofixed", 1, max_relative = 0.001),
     (as3_number_toprecision, "avm2/number_toprecision", 1, max_relative = 0.001),
     (as3_parse_float, "avm2/parse_float", 1, max_relative = 5.0 * f64::EPSILON),
+    (as3_parse_float_swf10, "avm2/parse_float_swf10", 1, max_relative = 5.0 * f64::EPSILON),
     (edittext_align, "avm1/edittext_align", 1, epsilon = 3.0),
     (edittext_autosize, "avm1/edittext_autosize", 1, epsilon = 0.1),
     (edittext_bullet, "avm1/edittext_bullet", 1, epsilon = 3.0),
@@ -822,7 +824,6 @@ swf_tests_approx! {
     (edittext_underline, "avm1/edittext_underline", 1, epsilon = 4.0),
     (local_to_global, "avm1/local_to_global", 1, epsilon = 0.051),
     (movieclip_getbounds, "avm1/movieclip_getbounds", 1, epsilon = 0.051),
-    (parse_float, "avm1/parse_float", 1, max_relative = 5.0 * f64::EPSILON),
     (stage_object_properties_swf6, "avm1/stage_object_properties_swf6", 4, epsilon = 0.051),
     (stage_object_properties, "avm1/stage_object_properties", 6, epsilon = 0.051),
 }
@@ -1184,24 +1185,21 @@ fn run_swf(
     let movie = SwfMovie::from_path(swf_path, None)?;
     let frame_time = 1000.0 / movie.frame_rate().to_f64();
     let trace_output = Rc::new(RefCell::new(Vec::new()));
-
-    let mut platform_id = None;
-    let backend_bit = wgpu::Backends::PRIMARY;
-
     let mut builder = PlayerBuilder::new();
+
     if check_img {
-        let instance = wgpu::Instance::new(backend_bit);
+        const BACKEND: wgpu::Backends = wgpu::Backends::PRIMARY;
+
+        let instance = wgpu::Instance::new(BACKEND);
 
         let descriptors =
             futures::executor::block_on(WgpuRenderBackend::<TextureTarget>::build_descriptors(
-                backend_bit,
+                BACKEND,
                 instance,
                 None,
                 Default::default(),
                 None,
             ))?;
-
-        platform_id = Some(get_img_platform_suffix(&descriptors.info));
 
         let target = TextureTarget::new(
             &descriptors.device,
@@ -1215,6 +1213,7 @@ fn run_swf(
             .with_renderer(WgpuRenderBackend::new(descriptors, target)?)
             .with_software_video();
     };
+
     let player = builder
         .with_log(TestLogBackend::new(trace_output.clone()))
         .with_navigator(NullNavigatorBackend::with_base_path(base_path, &executor))
@@ -1258,55 +1257,29 @@ fn run_swf(
     // Render the image to disk
     // FIXME: Determine how we want to compare against on on-disk image
     if check_img {
-        player.lock().unwrap().render();
         let mut player_lock = player.lock().unwrap();
+        player_lock.render();
         let renderer = player_lock
             .renderer_mut()
             .downcast_mut::<WgpuRenderBackend<TextureTarget>>()
             .unwrap();
-        let target = renderer.target();
-        let image = target
-            .capture(renderer.device())
-            .expect("Failed to capture image");
+        let actual_image = renderer.capture_frame().expect("Failed to capture image");
 
-        // The swf path ends in '<swf_name>/test.swf' - extract `swf_name`
-        let mut swf_path_buf = PathBuf::from(swf_path);
-        swf_path_buf.pop();
+        let expected_image_path = base_path.join("expected.png");
+        let expected_image =
+            image::open(&expected_image_path).expect("Failed to read expected image");
 
-        let swf_name = swf_path_buf.file_name().unwrap().to_string_lossy();
-        let img_name = format!("{}-{}.png", swf_name, platform_id.unwrap());
-
-        let mut img_path = swf_path_buf.clone();
-        img_path.push(&img_name);
-
-        let result = match image::open(&img_path) {
-            Ok(existing_img) => {
-                if existing_img
-                    .as_rgba8()
-                    .expect("Expected 8-bit RGBA image")
-                    .as_raw()
-                    == image.as_raw()
-                {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "Test output does not match existing image `{:?}`",
-                        img_path
-                    ))
-                }
-            }
-            Err(err) => Err(format!(
-                "Error occured when trying to read existing image `{:?}`: {}",
-                img_path, err
-            )),
-        };
-
-        if let Err(err) = result {
-            let new_img_path = img_path.with_file_name(img_name + ".updated");
-            image.save_with_format(&new_img_path, image::ImageFormat::Png)?;
+        if expected_image
+            .as_rgba8()
+            .expect("Expected 8-bit RGBA image")
+            .as_raw()
+            != actual_image.as_raw()
+        {
+            let actual_image_path = base_path.join("actual.png");
+            actual_image.save_with_format(&actual_image_path, image::ImageFormat::Png)?;
             panic!(
-                "Image test failed - saved new image to `{:?}`\n{}",
-                new_img_path, err
+                "Test output does not match expected image - saved actual image to {:?}",
+                actual_image_path
             );
         }
     }

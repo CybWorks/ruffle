@@ -7,7 +7,7 @@ use crate::avm1::scope::Scope;
 use crate::avm1::{
     fscommand, globals, scope, skip_actions, start_drag, ArrayObject, ScriptObject, Value,
 };
-use crate::backend::navigator::{NavigationMethod, RequestOptions};
+use crate::backend::navigator::{NavigationMethod, Request};
 use crate::context::UpdateContext;
 use crate::display_object::{DisplayObject, MovieClip, TDisplayObject, TDisplayObjectContainer};
 use crate::ecma_conversions::f64_to_wrapping_u32;
@@ -194,13 +194,19 @@ pub struct Activation<'a, 'gc: 'a, 'gc_context: 'a> {
     constant_pool: GcCell<'gc, Vec<Value<'gc>>>,
 
     /// The immutable value of `this`.
+    ///
+    /// This differs from Flash Player, where `this` is mutable and seems
+    /// to be part of the scope chain (e.g. a function with the `suppress_this` flag
+    /// set can modify the `this` value of its closure).
+    ///
+    /// Fortunately, ActionScript syntax prevents mutating `this` altogether, so
+    /// observing this behavior requires manually-crafted bytecode.
+    ///
+    /// TODO: implement correct semantics for mutable `this`.
     this: Value<'gc>,
 
     /// The function object being called.
     pub callee: Option<Object<'gc>>,
-
-    /// The arguments this function was called by.
-    pub arguments: Option<Object<'gc>>,
 
     /// Local registers, if any.
     ///
@@ -254,7 +260,6 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         base_clip: DisplayObject<'gc>,
         this: Value<'gc>,
         callee: Option<Object<'gc>>,
-        arguments: Option<Object<'gc>>,
     ) -> Self {
         avm_debug!(context.avm1, "START {}", id);
         Self {
@@ -268,7 +273,6 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             base_clip_unloaded: base_clip.removed(),
             this,
             callee,
-            arguments,
             local_registers: None,
             actions_since_timeout_check: 0,
         }
@@ -293,7 +297,6 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             base_clip_unloaded: self.base_clip_unloaded,
             this: self.this,
             callee: self.callee,
-            arguments: self.arguments,
             local_registers: self.local_registers,
             actions_since_timeout_check: 0,
         }
@@ -329,7 +332,6 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             base_clip_unloaded: base_clip.removed(),
             this: globals.into(),
             callee: None,
-            arguments: None,
             local_registers: None,
             actions_since_timeout_check: 0,
         }
@@ -383,7 +385,6 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             active_clip,
             clip_obj.into(),
             None,
-            None,
         );
         child_activation.run_actions(code)
     }
@@ -420,7 +421,6 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             constant_pool,
             active_clip,
             clip_obj.into(),
-            None,
             None,
         );
         function(&mut activation)
@@ -1154,8 +1154,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
                         let future = self.context.load_manager.load_movie_into_clip(
                             self.context.player.clone(),
                             level,
-                            &url,
-                            RequestOptions::get(),
+                            Request::get(url),
                             None,
                             None,
                         );
@@ -1246,15 +1245,14 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
                         .unwrap()
                         .object()
                         .coerce_to_object(self);
-                    let (url, opts) = self.locals_into_request_options(
-                        &url,
+                    let request = self.locals_into_request(
+                        url,
                         NavigationMethod::from_send_vars_method(action.send_vars_method()),
                     );
                     let future = self.context.load_manager.load_form_into_object(
                         self.context.player.clone(),
                         target_obj,
-                        &url,
-                        opts,
+                        request,
                     );
                     self.context.navigator.spawn_future(future);
                 }
@@ -1263,22 +1261,20 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         } else if action.is_target_sprite() {
             // `loadMovie`, `unloadMovie` or `unloadMovieNum` call.
             if let Some(clip_target) = clip_target {
-                let (url, opts) = self.locals_into_request_options(
-                    &url,
-                    NavigationMethod::from_send_vars_method(action.send_vars_method()),
-                );
-
                 if url.is_empty() {
                     // Blank URL on movie loads = unload!
                     if let Some(mut mc) = clip_target.as_movie_clip() {
                         mc.replace_with_movie(self.context.gc_context, None)
                     }
                 } else {
+                    let request = self.locals_into_request(
+                        url,
+                        NavigationMethod::from_send_vars_method(action.send_vars_method()),
+                    );
                     let future = self.context.load_manager.load_movie_into_clip(
                         self.context.player.clone(),
                         clip_target,
-                        &url,
-                        opts,
+                        request,
                         None,
                         None,
                     );
@@ -1292,8 +1288,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
                 let future = self.context.load_manager.load_movie_into_clip(
                     self.context.player.clone(),
                     clip_target,
-                    &url.to_utf8_lossy(),
-                    RequestOptions::get(),
+                    Request::get(url.to_utf8_lossy().into_owned()),
                     None,
                     None,
                 );
@@ -2131,7 +2126,6 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
                     self.base_clip,
                     self.this,
                     self.callee,
-                    self.arguments,
                 );
 
                 match catch_vars {
@@ -2296,14 +2290,14 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         form_values
     }
 
-    /// Construct request options for a fetch operation that may sends object properties as
-    /// form data in the request body or URL.
-    pub fn object_into_request_options<'c>(
+    /// Construct a request for a fetch operation that may send object properties as form data in
+    /// the request body or URL.
+    pub fn object_into_request(
         &mut self,
         object: Object<'gc>,
-        url: &'c WStr,
+        url: AvmString<'gc>,
         method: Option<NavigationMethod>,
-    ) -> (Cow<'c, str>, RequestOptions) {
+    ) -> Request {
         match method {
             Some(method) => {
                 let vars = self.object_into_form_values(object);
@@ -2312,24 +2306,20 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
                     .finish();
 
                 match method {
-                    NavigationMethod::Get if url.find(b'?').is_none() => (
-                        Cow::Owned(format!("{}?{}", url, qstring)),
-                        RequestOptions::get(),
-                    ),
-                    NavigationMethod::Get => (
-                        Cow::Owned(format!("{}&{}", url, qstring)),
-                        RequestOptions::get(),
-                    ),
-                    NavigationMethod::Post => (
-                        url.to_utf8_lossy(),
-                        RequestOptions::post(Some((
+                    NavigationMethod::Get if !url.contains(b'?') => {
+                        Request::get(format!("{}?{}", url, qstring))
+                    }
+                    NavigationMethod::Get => Request::get(format!("{}&{}", url, qstring)),
+                    NavigationMethod::Post => Request::post(
+                        url.to_utf8_lossy().into_owned(),
+                        Some((
                             qstring.as_bytes().to_owned(),
                             "application/x-www-form-urlencoded".to_string(),
-                        ))),
+                        )),
                     ),
                 }
             }
-            None => (url.to_utf8_lossy(), RequestOptions::get()),
+            None => Request::get(url.to_utf8_lossy().into_owned()),
         }
     }
 
@@ -2345,16 +2335,16 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         self.object_into_form_values(locals)
     }
 
-    /// Construct request options for a fetch operation that may send locals as
-    /// form data in the request body or URL.
-    pub fn locals_into_request_options<'c>(
+    /// Construct a request for a fetch operation that may send locals as form data in the request
+    /// body or URL.
+    pub fn locals_into_request(
         &mut self,
-        url: &'c WStr,
+        url: AvmString<'gc>,
         method: Option<NavigationMethod>,
-    ) -> (Cow<'c, str>, RequestOptions) {
+    ) -> Request {
         let scope = self.scope_cell();
         let locals = scope.read().locals_cell();
-        self.object_into_request_options(locals, url, method)
+        self.object_into_request(locals, url, method)
     }
 
     /// Resolves a target value to a display object, relative to a starting display object.
@@ -2735,12 +2725,6 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     pub fn resolve(&mut self, name: AvmString<'gc>) -> Result<CallableValue<'gc>, Error<'gc>> {
         if &name == b"this" {
             return Ok(CallableValue::UnCallable(self.this_cell()));
-        }
-
-        if &name == b"arguments" && self.arguments.is_some() {
-            return Ok(CallableValue::UnCallable(Value::Object(
-                self.arguments.unwrap(),
-            )));
         }
 
         self.scope_cell().read().resolve(name, self)

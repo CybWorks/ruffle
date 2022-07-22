@@ -12,10 +12,9 @@ use std::cell::{Ref, RefMut};
 /// A class instance allocator that allocates Stage objects.
 pub fn stage_allocator<'gc>(
     class: ClassObject<'gc>,
-    proto: Object<'gc>,
     activation: &mut Activation<'_, 'gc, '_>,
 ) -> Result<Object<'gc>, Error> {
-    let base = ScriptObjectData::base_new(Some(proto), Some(class));
+    let base = ScriptObjectData::new(class);
 
     Ok(StageObject(GcCell::allocate(
         activation.context.gc_context,
@@ -57,12 +56,10 @@ impl<'gc> StageObject<'gc> {
         display_object: DisplayObject<'gc>,
         class: ClassObject<'gc>,
     ) -> Result<Self, Error> {
-        let proto = class.prototype();
-
         let mut instance = Self(GcCell::allocate(
             activation.context.gc_context,
             StageObjectData {
-                base: ScriptObjectData::base_new(Some(proto), Some(class)),
+                base: ScriptObjectData::new(class),
                 display_object: Some(display_object),
             },
         ));
@@ -94,11 +91,10 @@ impl<'gc> StageObject<'gc> {
         display_object: DisplayObject<'gc>,
     ) -> Result<Self, Error> {
         let class = activation.avm2().classes().graphics;
-        let proto = activation.avm2().prototypes().graphics;
         let mut this = Self(GcCell::allocate(
             activation.context.gc_context,
             StageObjectData {
-                base: ScriptObjectData::base_new(Some(proto), Some(class)),
+                base: ScriptObjectData::new(class),
                 display_object: Some(display_object),
             },
         ));

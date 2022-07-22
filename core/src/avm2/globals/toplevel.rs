@@ -4,7 +4,7 @@ use crate::avm2::activation::Activation;
 use crate::avm2::object::Object;
 use crate::avm2::value::Value;
 use crate::avm2::Error;
-use crate::string::WStr;
+use crate::string::{AvmString, WStr, WString};
 
 pub fn trace<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
@@ -59,86 +59,18 @@ pub fn parse_int<'gc>(
     _this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error> {
-    let string = match args.get(0) {
-        None => return Ok(f64::NAN.into()),
-        Some(Value::Undefined) => Value::Null,
-        Some(v) => *v,
-    }
-    .coerce_to_string(activation)?;
-
-    let radix = if let Some(val) = args.get(1) {
-        Some(val.coerce_to_u32(activation)?)
-    } else {
-        None
-    };
-    let radix = match radix {
-        Some(r @ 2..=36) => Some(r as u32),
-        Some(0) => None,
-        Some(_) => return Ok(f64::NAN.into()),
-        None => None,
+    let string = match args.get(0).unwrap_or(&Value::Undefined) {
+        Value::Undefined => "null".into(),
+        value => value.coerce_to_string(activation)?,
     };
 
-    let string = string.as_wstr();
-
-    // Strip spaces.
-    let string = string.trim_start_matches(b"\t\n\r ".as_ref());
-
-    if string.is_empty() {
-        return Ok(f64::NAN.into());
-    }
-
-    let (sign, string) = match u8::try_from(string.get(0).unwrap()) {
-        Ok(b'+') => (1.0, &string[1..]),
-        Ok(b'-') => (-1.0, &string[1..]),
-        _ => (1.0, string),
+    let radix = match args.get(1) {
+        Some(value) => value.coerce_to_i32(activation)?,
+        None => 0,
     };
 
-    fn starts_with_0x(string: &WStr) -> bool {
-        if string.get(0) == Some(b'0' as u16) {
-            let x_char = string.get(1);
-            x_char == Some(b'x' as u16) || x_char == Some(b'X' as u16)
-        } else {
-            false
-        }
-    }
-
-    let (radix, string) = match radix {
-        None => {
-            if starts_with_0x(string) {
-                (16, &string[2..])
-            } else {
-                (10, string)
-            }
-        }
-        Some(16) => {
-            if starts_with_0x(string) {
-                (16, &string[2..])
-            } else {
-                (16, string)
-            }
-        }
-        Some(radix) => (radix, string),
-    };
-
-    let mut empty = true;
-    let mut result = 0.0f64;
-    for chr in string {
-        let digit = u8::try_from(chr)
-            .ok()
-            .and_then(|c| (c as char).to_digit(radix));
-        if let Some(digit) = digit {
-            result = result * radix as f64 + digit as f64;
-            empty = false;
-        } else {
-            break;
-        }
-    }
-
-    if empty {
-        Ok(f64::NAN.into())
-    } else {
-        Ok(result.copysign(sign).into())
-    }
+    let result = crate::avm2::value::string_to_int(&string, radix, false);
+    Ok(result.into())
 }
 
 pub fn parse_float<'gc>(
@@ -146,25 +78,46 @@ pub fn parse_float<'gc>(
     _this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error> {
-    let s = if let Some(val) = args.get(0) {
-        val.coerce_to_string(activation)?
-    } else {
-        return Ok(f64::NAN.into());
-    };
-
-    let s = s.trim_start();
-
-    if s.starts_with(WStr::from_units(b"Infinity")) || s.starts_with(WStr::from_units(b"+Infinity"))
-    {
-        return Ok(f64::INFINITY.into());
-    } else if s.starts_with(WStr::from_units(b"-Infinity")) {
-        return Ok((-f64::INFINITY).into());
+    if let Some(value) = args.get(0) {
+        let string = value.coerce_to_string(activation)?;
+        let swf_version = activation.context.swf.version();
+        if let Some(result) = crate::avm2::value::string_to_f64(&string, swf_version, false) {
+            return Ok(result.into());
+        }
     }
 
-    // TODO: this reuses logic from AVM1,
-    // which is generally much more lenient.
-    // There are some cases we should accept (like "- Infinity", but not "- 1")
-    // And some we should not (like "InfinityXYZ")
-    use crate::avm1::globals::parse_float_impl;
-    Ok(parse_float_impl(s, false).into())
+    Ok(f64::NAN.into())
+}
+
+pub fn escape<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    _this: Option<Object<'gc>>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error> {
+    let value = match args.first() {
+        None => return Ok("undefined".into()),
+        Some(Value::Undefined) => return Ok("null".into()),
+        Some(value) => value,
+    };
+
+    let mut output = WString::new();
+
+    // Characters that are not escaped, sourced from as3 docs
+    let not_converted =
+        WStr::from_units(b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ@-_.*+/");
+
+    for x in value.coerce_to_string(activation)?.iter() {
+        if not_converted.contains(x) {
+            output.push(x);
+        } else {
+            let encode = if x <= u8::MAX.into() {
+                format!("%{:02X}", x)
+            } else {
+                format!("%u{:04X}", x)
+            };
+            output.push_str(WStr::from_units(encode.as_bytes()));
+        }
+    }
+
+    Ok(AvmString::new(activation.context.gc_context, output).into())
 }

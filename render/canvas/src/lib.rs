@@ -1,10 +1,11 @@
+use fnv::FnvHashMap;
 use ruffle_core::backend::render::{
     swf, Bitmap, BitmapFormat, BitmapHandle, BitmapSource, Color, NullBitmapSource, RenderBackend,
     ShapeHandle, Transform,
 };
 use ruffle_core::color_transform::ColorTransform;
 use ruffle_core::matrix::Matrix;
-use ruffle_core::shape_utils::{DistilledShape, DrawCommand};
+use ruffle_core::shape_utils::{DistilledShape, DrawCommand, LineScaleMode, LineScales};
 use ruffle_web_common::{JsError, JsResult};
 use wasm_bindgen::{Clamped, JsCast};
 use web_sys::{
@@ -21,17 +22,36 @@ pub struct WebCanvasRenderBackend {
     context: CanvasRenderingContext2d,
     color_matrix: Element,
     shapes: Vec<ShapeData>,
-    bitmaps: Vec<BitmapData>,
+    bitmaps: FnvHashMap<BitmapHandle, BitmapData>,
     viewport_width: u32,
     viewport_height: u32,
     rect: Path2d,
     mask_state: MaskState,
+    next_bitmap_handle: BitmapHandle,
 }
 
 /// Canvas-drawable shape data extracted from an SWF file.
 struct ShapeData(Vec<CanvasDrawCommand>);
 
 struct CanvasColor(String, u8, u8, u8, u8);
+
+impl From<&Color> for CanvasColor {
+    fn from(color: &Color) -> CanvasColor {
+        CanvasColor(
+            format!(
+                "rgba({},{},{},{})",
+                color.r,
+                color.g,
+                color.b,
+                f32::from(color.a) / 255.0
+            ),
+            color.r,
+            color.g,
+            color.b,
+            color.a,
+        )
+    }
+}
 
 impl CanvasColor {
     /// Apply a color transformation to this color.
@@ -52,10 +72,11 @@ enum CanvasDrawCommand {
     Stroke {
         path: Path2d,
         line_width: f64,
-        stroke_style: CanvasFillStyle,
+        stroke_style: CanvasStrokeStyle,
         line_cap: String,
         line_join: String,
         miter_limit: f64,
+        scale_mode: LineScaleMode,
     },
 
     /// A command to fill a path with a given style.
@@ -65,17 +86,41 @@ enum CanvasDrawCommand {
     },
 }
 
+/// Fill style for a canvas path.
 enum CanvasFillStyle {
     Color(CanvasColor),
-    Gradient(CanvasGradient),
-    TransformedGradient(TransformedGradient),
-    Pattern(CanvasPattern, bool),
+    Gradient(Gradient),
+    Bitmap(CanvasBitmap),
 }
 
-struct TransformedGradient {
+struct Gradient {
     gradient: CanvasGradient,
-    gradient_matrix: [f64; 6],
-    inverse_gradient_matrix: DomMatrix,
+    transform: Option<GradientTransform>,
+}
+
+/// A "complex" gradient transform, such as elliptical or skewed gradients.
+///
+/// Canvas does not provide an API for arbitrary gradient transforms, so we cheat by applying the
+/// inverse of the gradient transform to the path, and then drawing the path with the gradient transform.
+/// This results in an non-transformed shape with a transformed gradient.
+struct GradientTransform {
+    matrix: [f64; 6],
+    inverse_matrix: DomMatrix,
+}
+
+/// Stroke style for a canvas path.
+///
+/// Gradients are handled differently for strokes vs. fills.
+enum CanvasStrokeStyle {
+    Color(CanvasColor),
+    Gradient(swf::Gradient, Option<f64>),
+    Bitmap(CanvasBitmap),
+}
+
+struct CanvasBitmap {
+    pattern: CanvasPattern,
+    matrix: Matrix,
+    smoothed: bool,
 }
 
 #[allow(dead_code)]
@@ -237,11 +282,12 @@ impl WebCanvasRenderBackend {
             color_matrix,
             context,
             shapes: vec![],
-            bitmaps: vec![],
+            bitmaps: Default::default(),
             viewport_width: 0,
             viewport_height: 0,
             rect,
             mask_state: MaskState::DrawContent,
+            next_bitmap_handle: BitmapHandle(0),
         };
         Ok(renderer)
     }
@@ -369,7 +415,7 @@ impl RenderBackend for WebCanvasRenderBackend {
 
         self.set_transform(&transform.matrix);
         self.set_color_filter(transform);
-        if let Some(bitmap) = self.bitmaps.get(bitmap.0) {
+        if let Some(bitmap) = self.bitmaps.get(&bitmap) {
             let _ = self
                 .context
                 .draw_image_with_html_canvas_element(&bitmap.canvas, 0.0, 0.0);
@@ -380,73 +426,78 @@ impl RenderBackend for WebCanvasRenderBackend {
     fn render_shape(&mut self, shape: ShapeHandle, transform: &Transform) {
         match &self.mask_state {
             MaskState::DrawContent => {
-                self.set_transform(&transform.matrix);
+                let mut line_scale = LineScales::new(&transform.matrix);
+                let dom_matrix = transform.matrix.to_dom_matrix();
+                let mut transform_dirty = true;
                 if let Some(shape) = self.shapes.get(shape.0) {
                     for command in shape.0.iter() {
                         match command {
-                            CanvasDrawCommand::Fill { path, fill_style } => match fill_style {
-                                CanvasFillStyle::Color(color) => {
-                                    let color = color.color_transform(&transform.color_transform);
-                                    self.context.set_fill_style(&color.0.into());
-                                    self.context.fill_with_path_2d_and_winding(
-                                        path,
-                                        CanvasWindingRule::Evenodd,
+                            CanvasDrawCommand::Fill { path, fill_style } => {
+                                if transform_dirty {
+                                    let _ = self.context.set_transform(
+                                        transform.matrix.a.into(),
+                                        transform.matrix.b.into(),
+                                        transform.matrix.c.into(),
+                                        transform.matrix.d.into(),
+                                        transform.matrix.tx.to_pixels(),
+                                        transform.matrix.ty.to_pixels(),
                                     );
+                                    transform_dirty = false;
                                 }
-                                CanvasFillStyle::Gradient(gradient) => {
-                                    self.set_color_filter(&transform);
-                                    self.context.set_fill_style(gradient);
-                                    self.context.fill_with_path_2d_and_winding(
-                                        path,
-                                        CanvasWindingRule::Evenodd,
-                                    );
-                                    self.clear_color_filter();
+                                match fill_style {
+                                    CanvasFillStyle::Color(color) => {
+                                        let color =
+                                            color.color_transform(&transform.color_transform);
+                                        self.context.set_fill_style(&color.0.into());
+                                        self.context.fill_with_path_2d_and_winding(
+                                            path,
+                                            CanvasWindingRule::Evenodd,
+                                        );
+                                    }
+                                    CanvasFillStyle::Gradient(gradient) => {
+                                        self.set_color_filter(transform);
+                                        self.context.set_fill_style(&gradient.gradient);
+
+                                        if let Some(gradient_transform) = &gradient.transform {
+                                            // Canvas has no easy way to draw gradients with an arbitrary transform,
+                                            // but we can fake it by pushing the gradient's transform to the canvas,
+                                            // then transforming the path itself by the inverse.
+                                            let matrix = &gradient_transform.matrix;
+                                            let _ = self.context.transform(
+                                                matrix[0], matrix[1], matrix[2], matrix[3],
+                                                matrix[4], matrix[5],
+                                            );
+                                            transform_dirty = true;
+                                            let untransformed_path = Path2d::new().unwrap();
+                                            untransformed_path.add_path_with_transformation(
+                                                path,
+                                                gradient_transform.inverse_matrix.unchecked_ref(),
+                                            );
+                                            self.context.fill_with_path_2d_and_winding(
+                                                &untransformed_path,
+                                                CanvasWindingRule::Evenodd,
+                                            );
+                                        } else {
+                                            self.context.fill_with_path_2d_and_winding(
+                                                path,
+                                                CanvasWindingRule::Evenodd,
+                                            );
+                                        }
+
+                                        self.clear_color_filter();
+                                    }
+                                    CanvasFillStyle::Bitmap(bitmap) => {
+                                        self.set_color_filter(transform);
+                                        self.context.set_image_smoothing_enabled(bitmap.smoothed);
+                                        self.context.set_fill_style(&bitmap.pattern);
+                                        self.context.fill_with_path_2d_and_winding(
+                                            path,
+                                            CanvasWindingRule::Evenodd,
+                                        );
+                                        self.clear_color_filter();
+                                    }
                                 }
-                                CanvasFillStyle::TransformedGradient(gradient) => {
-                                    // Canvas has no easy way to draw gradients with an arbitrary transform,
-                                    // but we can fake it by pushing the gradient's transform to the canvas,
-                                    // then transforming the path itself by the inverse.
-                                    self.set_color_filter(&transform);
-                                    self.context.set_fill_style(&gradient.gradient);
-                                    let matrix = &gradient.gradient_matrix;
-                                    self.context
-                                        .transform(
-                                            matrix[0], matrix[1], matrix[2], matrix[3], matrix[4],
-                                            matrix[5],
-                                        )
-                                        .warn_on_error();
-                                    let untransformed_path = Path2d::new().unwrap();
-                                    untransformed_path.add_path_with_transformation(
-                                        path,
-                                        gradient.inverse_gradient_matrix.unchecked_ref(),
-                                    );
-                                    self.context.fill_with_path_2d_and_winding(
-                                        &untransformed_path,
-                                        CanvasWindingRule::Evenodd,
-                                    );
-                                    self.context
-                                        .set_transform(
-                                            transform.matrix.a.into(),
-                                            transform.matrix.b.into(),
-                                            transform.matrix.c.into(),
-                                            transform.matrix.d.into(),
-                                            transform.matrix.tx.to_pixels(),
-                                            transform.matrix.ty.to_pixels(),
-                                        )
-                                        .unwrap();
-                                    self.clear_color_filter();
-                                }
-                                CanvasFillStyle::Pattern(patt, smoothed) => {
-                                    self.set_color_filter(&transform);
-                                    self.context.set_image_smoothing_enabled(*smoothed);
-                                    self.context.set_fill_style(patt);
-                                    self.context.fill_with_path_2d_and_winding(
-                                        path,
-                                        CanvasWindingRule::Evenodd,
-                                    );
-                                    self.clear_color_filter();
-                                }
-                            },
+                            }
                             CanvasDrawCommand::Stroke {
                                 path,
                                 line_width,
@@ -454,44 +505,76 @@ impl RenderBackend for WebCanvasRenderBackend {
                                 line_cap,
                                 line_join,
                                 miter_limit,
+                                scale_mode,
                             } => {
+                                // Canvas.setTransform ends up transforming the stroke geometry itself (including joins/endcaps).
+                                // Instead, reset the canvas transform, and apply the transform to the stroke path directly so
+                                // that the geometry remains untransformed.
+                                let _ = self.context.reset_transform();
+                                transform_dirty = true;
+                                let transformed_path = Path2d::new().unwrap();
+                                transformed_path
+                                    .add_path_with_transformation(path, dom_matrix.unchecked_ref());
+
+                                // Set stroke parameters.
                                 self.context.set_line_cap(line_cap);
                                 self.context.set_line_join(line_join);
                                 self.context.set_miter_limit(*miter_limit);
-                                self.context.set_line_width(*line_width);
+                                let line_width =
+                                    line_scale.transform_width(*line_width as f32, *scale_mode);
+                                self.context.set_line_width(line_width.into());
                                 match stroke_style {
-                                    CanvasFillStyle::Color(color) => {
+                                    CanvasStrokeStyle::Color(color) => {
                                         let color =
                                             color.color_transform(&transform.color_transform);
                                         self.context.set_stroke_style(&color.0.into());
-                                        self.context.stroke_with_path(path);
+                                        self.context.stroke_with_path(&transformed_path);
                                     }
-                                    CanvasFillStyle::Gradient(gradient) => {
-                                        self.set_color_filter(&transform);
-                                        self.context.set_stroke_style(gradient);
-                                        self.context.stroke_with_path(path);
-                                        self.clear_color_filter();
+                                    CanvasStrokeStyle::Gradient(gradient, focal_point) => {
+                                        // This is the hard case -- the Canvas API provides no good way to transform gradients,
+                                        // and the inverse-transform trick used above for gradient fills can't be used here
+                                        // because it will distort the stroke geometry.
+                                        // Another possibility is to avoid the Path2D API, instead drawing using explicit path
+                                        // commands (`context.lineTo`), then push the gradient transform, and finally stroke
+                                        // the path using `stroke()`. But this will be tons of JS calls if there are many strokes.
+                                        // So let's settle for allocating a new canvas gradient that is a best-effort match of the
+                                        // the desired transform. This will not match Flash exactly, but should be relatively rare.
+                                        let mut gradient = gradient.clone();
+                                        gradient.matrix = (transform.matrix
+                                            * Matrix::from(gradient.matrix))
+                                        .into();
+                                        let gradient = match focal_point {
+                                            Some(focal_point) => create_radial_gradient(
+                                                &self.context,
+                                                &gradient,
+                                                *focal_point,
+                                                false,
+                                            ),
+                                            None => create_linear_gradient(
+                                                &self.context,
+                                                &gradient,
+                                                false,
+                                            ),
+                                        };
+                                        if let Ok(gradient) = gradient {
+                                            self.set_color_filter(transform);
+                                            self.context.set_stroke_style(&gradient.gradient);
+                                            self.context.stroke_with_path(&transformed_path);
+                                            self.clear_color_filter();
+                                        }
                                     }
-                                    CanvasFillStyle::TransformedGradient(gradient) => {
-                                        self.set_color_filter(&transform);
-                                        self.context.set_stroke_style(&gradient.gradient);
-                                        self.context.stroke_with_path(path);
-                                        self.context
-                                            .set_transform(
-                                                transform.matrix.a.into(),
-                                                transform.matrix.b.into(),
-                                                transform.matrix.c.into(),
-                                                transform.matrix.d.into(),
-                                                transform.matrix.tx.to_pixels(),
-                                                transform.matrix.ty.to_pixels(),
-                                            )
-                                            .unwrap();
-                                        self.clear_color_filter();
-                                    }
-                                    CanvasFillStyle::Pattern(patt, smoothed) => {
-                                        self.context.set_image_smoothing_enabled(*smoothed);
-                                        self.context.set_stroke_style(patt);
-                                        self.context.stroke_with_path(path);
+                                    CanvasStrokeStyle::Bitmap(bitmap) => {
+                                        // Set the CanvasPattern's matrix to the concatenated transform.
+                                        let bitmap_matrix = transform.matrix
+                                            * bitmap.matrix
+                                            * Matrix::scale(0.05, 0.05);
+                                        bitmap.pattern.set_transform(
+                                            bitmap_matrix.to_dom_matrix().unchecked_ref(),
+                                        );
+                                        self.set_color_filter(transform);
+                                        self.context.set_image_smoothing_enabled(bitmap.smoothed);
+                                        self.context.set_stroke_style(&bitmap.pattern);
+                                        self.context.stroke_with_path(&transformed_path);
                                         self.clear_color_filter();
                                     }
                                 };
@@ -570,7 +653,7 @@ impl RenderBackend for WebCanvasRenderBackend {
             // A possible improvement is to choose the winding rule based on whether the shape has
             // layers or not (via a flag in DistilledShape?)
             self.context
-                .clip_with_path_2d_and_winding(&mask_path, CanvasWindingRule::Nonzero);
+                .clip_with_path_2d_and_winding(mask_path, CanvasWindingRule::Nonzero);
             self.mask_state = MaskState::DrawContent;
         }
     }
@@ -590,15 +673,21 @@ impl RenderBackend for WebCanvasRenderBackend {
     }
 
     fn get_bitmap_pixels(&mut self, bitmap: BitmapHandle) -> Option<Bitmap> {
-        let bitmap = &self.bitmaps[bitmap.0];
+        let bitmap = &self.bitmaps[&bitmap];
         bitmap.get_pixels()
     }
 
     fn register_bitmap(&mut self, bitmap: Bitmap) -> Result<BitmapHandle, Error> {
-        let handle = BitmapHandle(self.bitmaps.len());
+        let handle = self.next_bitmap_handle;
+        self.next_bitmap_handle = BitmapHandle(self.next_bitmap_handle.0 + 1);
         let bitmap_data = BitmapData::new(bitmap)?;
-        self.bitmaps.push(bitmap_data);
+        self.bitmaps.insert(handle, bitmap_data);
         Ok(handle)
+    }
+
+    fn unregister_bitmap(&mut self, bitmap: BitmapHandle) -> Result<(), Error> {
+        self.bitmaps.remove(&bitmap);
+        Ok(())
     }
 
     fn update_texture(
@@ -610,8 +699,10 @@ impl RenderBackend for WebCanvasRenderBackend {
     ) -> Result<BitmapHandle, Error> {
         // TODO: Could be optimized to a single put_image_data call
         // in case it is already stored as a canvas+context.
-        self.bitmaps[handle.0] =
-            BitmapData::new(Bitmap::new(width, height, BitmapFormat::Rgba, rgba))?;
+        self.bitmaps.insert(
+            handle,
+            BitmapData::new(Bitmap::new(width, height, BitmapFormat::Rgba, rgba))?,
+        );
         Ok(handle)
     }
 }
@@ -647,7 +738,7 @@ fn draw_commands_to_path2d(commands: &[DrawCommand], is_closed: bool) -> Path2d 
 fn swf_shape_to_canvas_commands(
     shape: &DistilledShape,
     bitmap_source: &dyn BitmapSource,
-    bitmaps: &[BitmapData],
+    bitmaps: &FnvHashMap<BitmapHandle, BitmapData>,
     context: &CanvasRenderingContext2d,
 ) -> ShapeData {
     use ruffle_core::shape_utils::DrawPath;
@@ -674,94 +765,105 @@ fn swf_shape_to_canvas_commands(
     bounds_viewbox_matrix.set_d(1.0 / 20.0);
 
     for path in &shape.paths {
-        let (style, commands, is_fill, is_closed) = match &path {
-            DrawPath::Fill {
-                style, commands, ..
-            } => (*style, commands, true, false),
-            DrawPath::Stroke {
-                style,
-                commands,
-                is_closed,
-            } => (style.fill_style(), commands, false, *is_closed),
-        };
-        let fill_style = match style {
-            FillStyle::Color(Color { r, g, b, a }) => CanvasFillStyle::Color(CanvasColor(
-                format!("rgba({},{},{},{})", r, g, b, f32::from(*a) / 255.0),
-                *r,
-                *g,
-                *b,
-                *a,
-            )),
-            FillStyle::LinearGradient(gradient) => {
-                create_linear_gradient(context, gradient, is_fill).unwrap()
-            }
-            FillStyle::RadialGradient(gradient) => {
-                create_radial_gradient(context, gradient, 0.0, is_fill).unwrap()
-            }
-            FillStyle::FocalGradient {
-                gradient,
-                focal_point,
-            } => create_radial_gradient(context, gradient, focal_point.to_f64(), is_fill).unwrap(),
-            FillStyle::Bitmap {
-                id,
-                matrix,
-                is_smoothed,
-                is_repeating,
-            } => {
-                if let Some(bitmap) = bitmap_source
-                    .bitmap(*id)
-                    .and_then(|bitmap| bitmaps.get(bitmap.handle.0))
-                {
-                    let repeat = if !*is_repeating {
-                        // NOTE: The WebGL backend does clamping in this case, just like
-                        // Flash Player, but CanvasPattern has no such option...
-                        "no-repeat"
-                    } else {
-                        "repeat"
-                    };
-
-                    let bitmap_pattern = if let Ok(Some(bitmap_pattern)) =
-                        context.create_pattern_with_html_canvas_element(&bitmap.canvas, repeat)
-                    {
-                        bitmap_pattern
-                    } else {
-                        log::warn!("Unable to create bitmap pattern for bitmap ID {}", id);
-                        continue;
-                    };
-
-                    bitmap_pattern.set_transform(matrix.to_dom_matrix().unchecked_ref());
-
-                    CanvasFillStyle::Pattern(bitmap_pattern, *is_smoothed)
-                } else {
-                    log::error!("Couldn't fill shape with unknown bitmap {}", id);
-                    CanvasFillStyle::Color(CanvasColor("rgba(0,0,0,0)".to_string(), 0, 0, 0, 0))
-                }
-            }
-        };
-
-        let canvas_path = Path2d::new().unwrap();
-        canvas_path.add_path_with_transformation(
-            &draw_commands_to_path2d(commands, is_closed),
-            bounds_viewbox_matrix.unchecked_ref(),
-        );
-
         match path {
-            DrawPath::Fill { .. } => {
+            DrawPath::Fill {
+                commands, style, ..
+            } => {
+                let canvas_path = Path2d::new().unwrap();
+                canvas_path.add_path_with_transformation(
+                    &draw_commands_to_path2d(commands, false),
+                    bounds_viewbox_matrix.unchecked_ref(),
+                );
+
+                let fill_style = match style {
+                    FillStyle::Color(color) => CanvasFillStyle::Color(color.into()),
+                    FillStyle::LinearGradient(gradient) => CanvasFillStyle::Gradient(
+                        create_linear_gradient(context, gradient, true).unwrap(),
+                    ),
+                    FillStyle::RadialGradient(gradient) => CanvasFillStyle::Gradient(
+                        create_radial_gradient(context, gradient, 0.0, true).unwrap(),
+                    ),
+                    FillStyle::FocalGradient {
+                        gradient,
+                        focal_point,
+                    } => CanvasFillStyle::Gradient(
+                        create_radial_gradient(context, gradient, focal_point.to_f64(), true)
+                            .unwrap(),
+                    ),
+                    FillStyle::Bitmap {
+                        id,
+                        matrix,
+                        is_smoothed,
+                        is_repeating,
+                    } => {
+                        let bitmap = if let Ok(bitmap) = create_bitmap_pattern(
+                            *id,
+                            *matrix,
+                            *is_smoothed,
+                            *is_repeating,
+                            bitmap_source,
+                            bitmaps,
+                            context,
+                        ) {
+                            bitmap
+                        } else {
+                            continue;
+                        };
+                        CanvasFillStyle::Bitmap(bitmap)
+                    }
+                };
+
                 canvas_data.0.push(CanvasDrawCommand::Fill {
                     path: canvas_path,
                     fill_style,
                 });
             }
-            DrawPath::Stroke { style, .. } => {
-                // Flash always renders strokes with a minimum width of 1 pixel (20 twips).
-                // Additionally, many SWFs use the "hairline" stroke setting, which sets the stroke's width
-                // to 1 twip. Because of the minimum, this will effectively make the stroke nearly-always render
-                // as 1 pixel wide.
-                // SVG doesn't have a minimum and can render strokes at fractional widths, so these hairline
-                // strokes end up rendering very faintly if we use the actual width of 1 twip.
-                // Therefore, we clamp the stroke width to 1 pixel (20 twips). This won't be 100% accurate
-                // if the shape is scaled, but it looks much closer to the Flash Player.
-                let line_width = std::cmp::max(style.width().get(), 20);
+            DrawPath::Stroke {
+                commands,
+                style,
+                is_closed,
+            } => {
+                let canvas_path = Path2d::new().unwrap();
+                canvas_path.add_path_with_transformation(
+                    &draw_commands_to_path2d(commands, *is_closed),
+                    bounds_viewbox_matrix.unchecked_ref(),
+                );
+
+                let stroke_style = match style.fill_style() {
+                    FillStyle::Color(color) => CanvasStrokeStyle::Color(color.into()),
+                    FillStyle::LinearGradient(gradient) => {
+                        CanvasStrokeStyle::Gradient(gradient.clone(), None)
+                    }
+                    FillStyle::RadialGradient(gradient) => {
+                        CanvasStrokeStyle::Gradient(gradient.clone(), Some(0.0))
+                    }
+                    FillStyle::FocalGradient {
+                        gradient,
+                        focal_point,
+                    } => CanvasStrokeStyle::Gradient(gradient.clone(), Some(focal_point.to_f64())),
+                    FillStyle::Bitmap {
+                        id,
+                        matrix,
+                        is_smoothed,
+                        is_repeating,
+                    } => {
+                        let bitmap = if let Ok(bitmap) = create_bitmap_pattern(
+                            *id,
+                            *matrix,
+                            *is_smoothed,
+                            *is_repeating,
+                            bitmap_source,
+                            bitmaps,
+                            context,
+                        ) {
+                            bitmap
+                        } else {
+                            continue;
+                        };
+                        CanvasStrokeStyle::Bitmap(bitmap)
+                    }
+                };
+
                 let line_cap = match style.start_cap() {
                     LineCapStyle::Round => "round",
                     LineCapStyle::Square => "square",
@@ -774,11 +876,17 @@ fn swf_shape_to_canvas_commands(
                 };
                 canvas_data.0.push(CanvasDrawCommand::Stroke {
                     path: canvas_path,
-                    line_width: line_width as f64 / 20.0,
-                    stroke_style: fill_style,
+                    line_width: style.width().to_pixels(),
+                    stroke_style,
                     line_cap: line_cap.to_string(),
                     line_join: line_join.to_string(),
                     miter_limit: miter_limit as f64 / 20.0,
+                    scale_mode: match (style.allow_scale_x(), style.allow_scale_y()) {
+                        (false, false) => LineScaleMode::None,
+                        (true, false) => LineScaleMode::Horizontal,
+                        (false, true) => LineScaleMode::Vertical,
+                        (true, true) => LineScaleMode::Both,
+                    },
                 });
             }
         }
@@ -790,14 +898,14 @@ fn create_linear_gradient(
     context: &CanvasRenderingContext2d,
     gradient: &swf::Gradient,
     is_fill: bool,
-) -> Result<CanvasFillStyle, JsError> {
+) -> Result<Gradient, JsError> {
     // Canvas linear gradients are configured via the line endpoints, so we only need
     // to transform it if the basis is not orthogonal (skew in the transform).
     let transformed = if is_fill {
         let dot = gradient.matrix.a * gradient.matrix.c + gradient.matrix.b * gradient.matrix.d;
         dot.to_f32().abs() > GRADIENT_TRANSFORM_THRESHOLD
     } else {
-        // TODO: Gradient transforms don't work correctly with strokes.
+        // Complex gradient transforms can't apply to strokes; fall back to simple transforms.
         false
     };
     let create_fn = |matrix: swf::Matrix, gradient_scale: f64| {
@@ -821,7 +929,7 @@ fn create_radial_gradient(
     gradient: &swf::Gradient,
     focal_point: f64,
     is_fill: bool,
-) -> Result<CanvasFillStyle, JsError> {
+) -> Result<Gradient, JsError> {
     // Canvas radial gradients can not be elliptical or skewed, so transform if there
     // is a non-uniform scale or skew.
     // A scale rotation matrix is always of the form:
@@ -831,7 +939,7 @@ fn create_radial_gradient(
         (gradient.matrix.a - gradient.matrix.d).to_f32().abs() > GRADIENT_TRANSFORM_THRESHOLD
             || (gradient.matrix.b + gradient.matrix.c).to_f32().abs() > GRADIENT_TRANSFORM_THRESHOLD
     } else {
-        // TODO: Gradient transforms don't work correctly with strokes.
+        // Complex gradient transforms can't apply to strokes; fall back to simple transforms.
         false
     };
     let create_fn = |matrix: swf::Matrix, gradient_scale: f64| {
@@ -870,7 +978,7 @@ fn swf_to_canvas_gradient(
     swf_gradient: &swf::Gradient,
     transformed: bool,
     mut create_gradient_fn: impl FnMut(swf::Matrix, f64) -> Result<CanvasGradient, JsError>,
-) -> Result<CanvasFillStyle, JsError> {
+) -> Result<Gradient, JsError> {
     let matrix = if transformed {
         // When we are rendering a complex gradient, the gradient transform is handled later by
         // transforming the path before rendering; so use the indentity matrix here.
@@ -960,25 +1068,67 @@ fn swf_to_canvas_gradient(
         }
     }
 
-    if transformed {
-        // When we render this gradient, we will push the gradient's transform to the canvas,
-        // and then transform the path itself by the inverse.
-        let matrix = swf_gradient.matrix.to_dom_matrix();
-        let inverse_gradient_matrix = matrix.inverse();
-        Ok(CanvasFillStyle::TransformedGradient(TransformedGradient {
-            gradient: canvas_gradient,
-            gradient_matrix: [
-                matrix.a(),
-                matrix.b(),
-                matrix.c(),
-                matrix.d(),
-                matrix.e(),
-                matrix.f(),
-            ],
-            inverse_gradient_matrix,
-        }))
+    Ok(Gradient {
+        gradient: canvas_gradient,
+        transform: transformed.then(|| {
+            // When we render this gradient, we will push the gradient's transform to the canvas,
+            // and then transform the path itself by the inverse.
+            let matrix = swf_gradient.matrix.to_dom_matrix();
+            let inverse_matrix = matrix.inverse();
+            GradientTransform {
+                matrix: [
+                    matrix.a(),
+                    matrix.b(),
+                    matrix.c(),
+                    matrix.d(),
+                    matrix.e(),
+                    matrix.f(),
+                ],
+                inverse_matrix,
+            }
+        }),
+    })
+}
+
+/// Converts an SWF bitmap fill to a canvas pattern.
+fn create_bitmap_pattern(
+    id: swf::CharacterId,
+    matrix: swf::Matrix,
+    is_smoothed: bool,
+    is_repeating: bool,
+    bitmap_source: &dyn BitmapSource,
+    bitmaps: &FnvHashMap<BitmapHandle, BitmapData>,
+    context: &CanvasRenderingContext2d,
+) -> Result<CanvasBitmap, Error> {
+    if let Some(bitmap) = bitmap_source
+        .bitmap(id)
+        .and_then(|bitmap| bitmaps.get(&bitmap.handle))
+    {
+        let repeat = if !is_repeating {
+            // NOTE: The WebGL backend does clamping in this case, just like
+            // Flash Player, but CanvasPattern has no such option...
+            "no-repeat"
+        } else {
+            "repeat"
+        };
+
+        let pattern = match context.create_pattern_with_html_canvas_element(&bitmap.canvas, repeat)
+        {
+            Ok(Some(pattern)) => pattern,
+            _ => {
+                log::warn!("Unable to create bitmap pattern for bitmap ID {}", id);
+                return Err("Unable to create bitmap pattern".into());
+            }
+        };
+        pattern.set_transform(matrix.to_dom_matrix().unchecked_ref());
+        Ok(CanvasBitmap {
+            pattern,
+            matrix: matrix.into(),
+            smoothed: is_smoothed,
+        })
     } else {
-        Ok(CanvasFillStyle::Gradient(canvas_gradient))
+        log::warn!("Couldn't fill shape with unknown bitmap {}", id);
+        Err("Unable to create bitmap pattern".into())
     }
 }
 

@@ -116,13 +116,9 @@ pub(crate) use define_indirect_properties;
 ///  * `class` - The class object that is being allocated. This must be the
 ///  current class (using a superclass will cause the wrong class to be
 ///  read for traits).
-///  * `proto` - The prototype attached to the class object.
 ///  * `activation` - The current AVM2 activation.
-pub type AllocatorFn = for<'gc> fn(
-    ClassObject<'gc>,
-    Object<'gc>,
-    &mut Activation<'_, 'gc, '_>,
-) -> Result<Object<'gc>, Error>;
+pub type AllocatorFn =
+    for<'gc> fn(ClassObject<'gc>, &mut Activation<'_, 'gc, '_>) -> Result<Object<'gc>, Error>;
 
 #[derive(Clone, Collect)]
 #[collect(require_static)]
@@ -358,6 +354,16 @@ impl<'gc> Class<'gc> {
         attributes.set(ClassAttributes::FINAL, abc_instance.is_final);
         attributes.set(ClassAttributes::INTERFACE, abc_instance.is_interface);
 
+        let mut instance_allocator = None;
+
+        // When loading a class from our playerglobal, grab the corresponding native
+        // allocator function from the table (which may be `None`)
+        if unit.domain().is_avm2_global_domain(activation) {
+            instance_allocator = activation.avm2().native_instance_allocator_table
+                [class_index as usize]
+                .map(Allocator);
+        }
+
         Ok(GcCell::allocate(
             activation.context.gc_context,
             Self {
@@ -367,7 +373,7 @@ impl<'gc> Class<'gc> {
                 attributes,
                 protected_namespace,
                 interfaces,
-                instance_allocator: None,
+                instance_allocator,
                 instance_init,
                 native_instance_init,
                 instance_traits: Vec::new(),
@@ -755,6 +761,20 @@ impl<'gc> Class<'gc> {
             self.define_instance_trait(Trait::from_slot(
                 QName::new(Namespace::public(), name),
                 QName::new(Namespace::Package(type_ns.into()), type_name).into(),
+                None,
+            ));
+        }
+    }
+
+    #[inline(never)]
+    pub fn define_public_slot_instance_traits_type_multiname(
+        &mut self,
+        items: &[(&'static str, Multiname<'gc>)],
+    ) {
+        for (name, type_name) in items {
+            self.define_instance_trait(Trait::from_slot(
+                QName::new(Namespace::public(), *name),
+                type_name.clone(),
                 None,
             ));
         }

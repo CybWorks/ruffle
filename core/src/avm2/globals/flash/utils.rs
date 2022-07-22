@@ -6,9 +6,7 @@ use crate::avm2::{Activation, Error, Object, Value};
 use instant::Instant;
 
 pub mod bytearray;
-pub mod compression_algorithm;
 pub mod dictionary;
-pub mod endian;
 pub mod proxy;
 pub mod timer;
 
@@ -85,7 +83,7 @@ pub fn get_qualified_super_class_name<'gc>(
     }
 }
 
-/// Implements `flash.utils.getDefinitionByName`
+/// Implements native method `flash.utils.getDefinitionByName`
 pub fn get_definition_by_name<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     _this: Option<Object<'gc>>,

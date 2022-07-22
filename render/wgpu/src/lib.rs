@@ -1,8 +1,12 @@
+use crate::bitmaps::BitmapSamplers;
+use crate::globals::Globals;
 use crate::pipelines::Pipelines;
 use crate::target::{RenderTarget, RenderTargetFrame, SwapChainTarget};
+use crate::uniform_buffer::UniformBuffer;
 use crate::utils::{create_buffer_with_data, format_list, get_backend_names};
 use bytemuck::{Pod, Zeroable};
 use enum_map::Enum;
+use fnv::FnvHashMap;
 use ruffle_core::backend::render::{
     Bitmap, BitmapHandle, BitmapSource, Color, RenderBackend, ShapeHandle, Transform,
 };
@@ -14,6 +18,8 @@ use ruffle_render_common_tess::{
     Vertex as TessVertex,
 };
 use std::num::NonZeroU32;
+use std::path::Path;
+pub use wgpu;
 
 type Error = Box<dyn std::error::Error>;
 
@@ -28,13 +34,6 @@ mod uniform_buffer;
 
 #[cfg(feature = "clap")]
 pub mod clap;
-
-use crate::bitmaps::BitmapSamplers;
-use crate::globals::Globals;
-use crate::uniform_buffer::UniformBuffer;
-use std::collections::HashMap;
-use std::path::Path;
-pub use wgpu;
 
 pub struct Descriptors {
     pub device: wgpu::Device,
@@ -95,20 +94,13 @@ impl Descriptors {
             wgpu::TextureFormat::Etc2Rgb8UnormSrgb => wgpu::TextureFormat::Etc2Rgb8Unorm,
             wgpu::TextureFormat::Etc2Rgb8A1UnormSrgb => wgpu::TextureFormat::Etc2Rgb8A1Unorm,
             wgpu::TextureFormat::Etc2Rgba8UnormSrgb => wgpu::TextureFormat::Etc2Rgba8Unorm,
-            wgpu::TextureFormat::Astc4x4RgbaUnormSrgb => wgpu::TextureFormat::Astc4x4RgbaUnorm,
-            wgpu::TextureFormat::Astc5x4RgbaUnormSrgb => wgpu::TextureFormat::Astc5x4RgbaUnorm,
-            wgpu::TextureFormat::Astc5x5RgbaUnormSrgb => wgpu::TextureFormat::Astc5x5RgbaUnorm,
-            wgpu::TextureFormat::Astc6x5RgbaUnormSrgb => wgpu::TextureFormat::Astc6x5RgbaUnorm,
-            wgpu::TextureFormat::Astc6x6RgbaUnormSrgb => wgpu::TextureFormat::Astc6x6RgbaUnorm,
-            wgpu::TextureFormat::Astc8x5RgbaUnormSrgb => wgpu::TextureFormat::Astc8x5RgbaUnorm,
-            wgpu::TextureFormat::Astc8x6RgbaUnormSrgb => wgpu::TextureFormat::Astc8x6RgbaUnorm,
-            wgpu::TextureFormat::Astc10x5RgbaUnormSrgb => wgpu::TextureFormat::Astc10x5RgbaUnorm,
-            wgpu::TextureFormat::Astc10x6RgbaUnormSrgb => wgpu::TextureFormat::Astc10x6RgbaUnorm,
-            wgpu::TextureFormat::Astc8x8RgbaUnormSrgb => wgpu::TextureFormat::Astc8x8RgbaUnorm,
-            wgpu::TextureFormat::Astc10x8RgbaUnormSrgb => wgpu::TextureFormat::Astc10x8RgbaUnorm,
-            wgpu::TextureFormat::Astc10x10RgbaUnormSrgb => wgpu::TextureFormat::Astc10x10RgbaUnorm,
-            wgpu::TextureFormat::Astc12x10RgbaUnormSrgb => wgpu::TextureFormat::Astc12x10RgbaUnorm,
-            wgpu::TextureFormat::Astc12x12RgbaUnormSrgb => wgpu::TextureFormat::Astc12x12RgbaUnorm,
+            wgpu::TextureFormat::Astc {
+                block,
+                channel: wgpu::AstcChannel::UnormSrgb,
+            } => wgpu::TextureFormat::Astc {
+                block,
+                channel: wgpu::AstcChannel::Unorm,
+            },
             _ => surface_format,
         };
 
@@ -149,12 +141,17 @@ pub struct WgpuRenderBackend<T: RenderTarget> {
     meshes: Vec<Mesh>,
     mask_state: MaskState,
     shape_tessellator: ShapeTessellator,
-    textures: Vec<Texture>,
     num_masks: u32,
     quad_vbo: wgpu::Buffer,
     quad_ibo: wgpu::Buffer,
     quad_tex_transforms: wgpu::Buffer,
-    bitmap_registry: HashMap<BitmapHandle, Bitmap>,
+    bitmap_registry: FnvHashMap<BitmapHandle, RegistryData>,
+    next_bitmap_handle: BitmapHandle,
+}
+
+struct RegistryData {
+    bitmap: Bitmap,
+    texture_wrapper: Texture,
 }
 
 #[allow(dead_code)]
@@ -286,7 +283,8 @@ struct Draw {
     draw_type: DrawType,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
-    index_count: u32,
+    num_indices: u32,
+    num_mask_indices: u32,
 }
 
 #[allow(dead_code)]
@@ -311,7 +309,7 @@ impl WgpuRenderBackend<SwapChainTarget> {
     #[cfg(target_family = "wasm")]
     pub async fn for_canvas(canvas: &web_sys::HtmlCanvasElement) -> Result<Self, Error> {
         let instance = wgpu::Instance::new(wgpu::Backends::BROWSER_WEBGPU);
-        let surface = unsafe { instance.create_surface_from_canvas(canvas) };
+        let surface = instance.create_surface_from_canvas(canvas);
         let descriptors = Self::build_descriptors(
             wgpu::Backends::BROWSER_WEBGPU,
             instance,
@@ -386,6 +384,10 @@ impl WgpuRenderBackend<target::TextureTarget> {
         ))?;
         let target = target::TextureTarget::new(&descriptors.device, size);
         Self::new(descriptors, target)
+    }
+
+    pub fn capture_frame(&self) -> Option<image::RgbaImage> {
+        self.target.capture(&self.descriptors.device)
     }
 }
 
@@ -481,7 +483,6 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
             current_frame: None,
             meshes: Vec::new(),
             shape_tessellator: ShapeTessellator::new(),
-            textures: Vec::new(),
 
             num_masks: 0,
             mask_state: MaskState::NoMask,
@@ -489,7 +490,8 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
             quad_vbo,
             quad_ibo,
             quad_tex_transforms,
-            bitmap_registry: HashMap::new(),
+            bitmap_registry: Default::default(),
+            next_bitmap_handle: BitmapHandle(0),
         })
     }
 
@@ -527,8 +529,25 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
             )
             .await?;
         let info = adapter.get_info();
+        // Ideally we want to use an RGBA non-sRGB surface format, because Flash colors and
+        // blending are done in sRGB space -- we don't want the GPU to adjust the colors.
+        // Some platforms may only support an sRGB surface, in which case we will draw to an
+        // intermediate linear buffer and then copy to the sRGB surface.
         let surface_format = surface
-            .and_then(|surface| surface.get_preferred_format(&adapter))
+            .and_then(|surface| {
+                let formats = surface.get_supported_formats(&adapter);
+                formats
+                    .iter()
+                    .find(|format| {
+                        matches!(
+                            format,
+                            wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Bgra8Unorm
+                        )
+                    })
+                    .or_else(|| formats.first())
+                    .cloned()
+            })
+            // No surface (rendering to texture), default to linear RBGA.
             .unwrap_or(wgpu::TextureFormat::Rgba8Unorm);
         Descriptors::new(device, queue, info, surface_format)
     }
@@ -572,7 +591,8 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
                     draw_type: DrawType::Color,
                     vertex_buffer,
                     index_buffer,
-                    index_count,
+                    num_indices: index_count,
+                    num_mask_indices: draw.mask_index_count,
                 },
                 TessDrawType::Gradient(gradient) => {
                     // TODO: Extract to function?
@@ -654,12 +674,16 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
                         },
                         vertex_buffer,
                         index_buffer,
-                        index_count,
+                        num_indices: index_count,
+                        num_mask_indices: draw.mask_index_count,
                     }
                 }
                 TessDrawType::Bitmap(bitmap) => {
-                    let texture = self.textures.get(bitmap.bitmap.0).unwrap();
-                    let texture_view = texture.texture.create_view(&Default::default());
+                    let entry = self.bitmap_registry.get(&bitmap.bitmap).unwrap();
+                    let texture_view = entry
+                        .texture_wrapper
+                        .texture
+                        .create_view(&Default::default());
 
                     // TODO: Extract to function?
                     let mut texture_transform = [[0.0; 4]; 4];
@@ -721,21 +745,14 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
                         },
                         vertex_buffer,
                         index_buffer,
-                        index_count,
+                        num_indices: index_count,
+                        num_mask_indices: draw.mask_index_count,
                     }
                 }
             });
         }
 
         Mesh { draws }
-    }
-
-    pub fn target(&self) -> &T {
-        &self.target
-    }
-
-    pub fn device(&self) -> &wgpu::Device {
-        &self.descriptors.device
     }
 }
 
@@ -913,7 +930,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         };
 
         let render_pass = frame_data.0.begin_render_pass(&wgpu::RenderPassDescriptor {
-            color_attachments: &[wgpu::RenderPassColorAttachment {
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: color_view,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -925,7 +942,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                     store: true,
                 },
                 resolve_target,
-            }],
+            })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &self.depth_texture_view,
                 depth_ops: Some(wgpu::Operations {
@@ -952,7 +969,8 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
     }
 
     fn render_bitmap(&mut self, bitmap: BitmapHandle, transform: &Transform, smoothing: bool) {
-        if let Some(texture) = self.textures.get(bitmap.0) {
+        if let Some(entry) = self.bitmap_registry.get(&bitmap) {
+            let texture = &entry.texture_wrapper;
             let frame = if let Some(frame) = &mut self.current_frame {
                 frame.get()
             } else {
@@ -1072,6 +1090,18 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         );
 
         for draw in &mesh.draws {
+            let num_indices = if self.mask_state != MaskState::DrawMaskStencil
+                && self.mask_state != MaskState::ClearMaskStencil
+            {
+                draw.num_indices
+            } else {
+                // Omit strokes when drawing a mask stencil.
+                draw.num_mask_indices
+            };
+            if num_indices == 0 {
+                continue;
+            }
+
             match &draw.draw_type {
                 DrawType::Color => {
                     frame.render_pass.set_pipeline(
@@ -1132,7 +1162,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                 }
             };
 
-            frame.render_pass.draw_indexed(0..draw.index_count, 0, 0..1);
+            frame.render_pass.draw_indexed(0..num_indices, 0, 0..1);
         }
     }
 
@@ -1228,14 +1258,14 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                 );
 
                 let mut render_pass = copy_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    color_attachments: &[wgpu::RenderPassColorAttachment {
-                        view: &frame.frame_data.1.view(),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: frame.frame_data.1.view(),
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                             store: true,
                         },
                         resolve_target: None,
-                    }],
+                    })],
                     depth_stencil_attachment: None,
                     label: None,
                 });
@@ -1320,7 +1350,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
     }
 
     fn get_bitmap_pixels(&mut self, bitmap: BitmapHandle) -> Option<Bitmap> {
-        self.bitmap_registry.get(&bitmap).cloned()
+        self.bitmap_registry.get(&bitmap).map(|e| e.bitmap.clone())
     }
 
     fn register_bitmap(&mut self, bitmap: Bitmap) -> Result<BitmapHandle, Error> {
@@ -1361,7 +1391,8 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             extent,
         );
 
-        let handle = BitmapHandle(self.textures.len());
+        let handle = self.next_bitmap_handle;
+        self.next_bitmap_handle = BitmapHandle(self.next_bitmap_handle.0 + 1);
         let width = bitmap.width();
         let height = bitmap.height();
 
@@ -1391,15 +1422,25 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                 label: create_debug_label!("Bitmap {} bind group", handle.0).as_deref(),
             });
 
-        self.bitmap_registry.insert(handle, bitmap);
-        self.textures.push(Texture {
-            width,
-            height,
-            texture,
-            bind_group,
-        });
+        self.bitmap_registry.insert(
+            handle,
+            RegistryData {
+                bitmap,
+                texture_wrapper: Texture {
+                    width,
+                    height,
+                    texture,
+                    bind_group,
+                },
+            },
+        );
 
         Ok(handle)
+    }
+
+    fn unregister_bitmap(&mut self, handle: BitmapHandle) -> Result<(), Error> {
+        self.bitmap_registry.remove(&handle);
+        Ok(())
     }
 
     fn update_texture(
@@ -1409,8 +1450,8 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         height: u32,
         rgba: Vec<u8>,
     ) -> Result<BitmapHandle, Error> {
-        let texture = if let Some(texture) = self.textures.get(handle.0) {
-            &texture.texture
+        let texture = if let Some(entry) = self.bitmap_registry.get(&handle) {
+            &entry.texture_wrapper.texture
         } else {
             return Err("update_texture: Bitmap not registered".into());
         };

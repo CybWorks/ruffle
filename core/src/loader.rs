@@ -11,10 +11,13 @@ use crate::avm2::{
     Activation as Avm2Activation, Avm2, Domain as Avm2Domain, Event as Avm2Event,
     EventData as Avm2EventData, Object as Avm2Object, QName, Value as Avm2Value,
 };
-use crate::backend::navigator::{OwnedFuture, RequestOptions};
+use crate::backend::navigator::{OwnedFuture, Request};
 use crate::backend::render::{determine_jpeg_tag_format, JpegTagFormat};
 use crate::context::{ActionQueue, ActionType, UpdateContext};
-use crate::display_object::{Bitmap, DisplayObject, TDisplayObject, TDisplayObjectContainer};
+use crate::display_object::{
+    Bitmap, DisplayObject, TDisplayObject, TDisplayObjectContainer, TInteractiveObject,
+};
+use crate::events::ClipEvent;
 use crate::player::Player;
 use crate::string::AvmString;
 use crate::tag_utils::SwfMovie;
@@ -186,15 +189,14 @@ impl<'gc> LoadManager<'gc> {
     pub fn load_root_movie(
         &mut self,
         player: Weak<Mutex<Player>>,
-        url: &str,
-        options: RequestOptions,
+        request: Request,
         parameters: Vec<(String, String)>,
         on_metadata: Box<dyn FnOnce(&swf::HeaderExt)>,
     ) -> OwnedFuture<(), Error> {
         let loader = Loader::RootMovie { self_handle: None };
         let handle = self.add_loader(loader);
         let loader = self.get_loader_mut(handle).unwrap();
-        loader.root_movie_loader(player, url.to_owned(), options, parameters, on_metadata)
+        loader.root_movie_loader(player, request, parameters, on_metadata)
     }
 
     /// Kick off a movie clip load.
@@ -204,8 +206,7 @@ impl<'gc> LoadManager<'gc> {
         &mut self,
         player: Weak<Mutex<Player>>,
         target_clip: DisplayObject<'gc>,
-        url: &str,
-        options: RequestOptions,
+        request: Request,
         loader_url: Option<String>,
         target_broadcaster: Option<Object<'gc>>,
     ) -> OwnedFuture<(), Error> {
@@ -217,7 +218,7 @@ impl<'gc> LoadManager<'gc> {
         };
         let handle = self.add_loader(loader);
         let loader = self.get_loader_mut(handle).unwrap();
-        loader.movie_loader(player, url.to_owned(), options, loader_url)
+        loader.movie_loader(player, request, loader_url)
     }
 
     /// Indicates that a movie clip has initialized (ran its first frame).
@@ -244,8 +245,7 @@ impl<'gc> LoadManager<'gc> {
         &mut self,
         player: Weak<Mutex<Player>>,
         target_object: Object<'gc>,
-        url: &str,
-        options: RequestOptions,
+        request: Request,
     ) -> OwnedFuture<(), Error> {
         let loader = Loader::Form {
             self_handle: None,
@@ -253,7 +253,7 @@ impl<'gc> LoadManager<'gc> {
         };
         let handle = self.add_loader(loader);
         let loader = self.get_loader_mut(handle).unwrap();
-        loader.form_loader(player, url.to_owned(), options)
+        loader.form_loader(player, request)
     }
 
     /// Kick off a form data load into an AVM1 object.
@@ -263,8 +263,7 @@ impl<'gc> LoadManager<'gc> {
         &mut self,
         player: Weak<Mutex<Player>>,
         target_object: Object<'gc>,
-        url: &str,
-        options: RequestOptions,
+        request: Request,
     ) -> OwnedFuture<(), Error> {
         let loader = Loader::LoadVars {
             self_handle: None,
@@ -272,7 +271,7 @@ impl<'gc> LoadManager<'gc> {
         };
         let handle = self.add_loader(loader);
         let loader = self.get_loader_mut(handle).unwrap();
-        loader.load_vars_loader(player, url.to_owned(), options)
+        loader.load_vars_loader(player, request)
     }
 
     /// Kick off a data load into a `URLLoader`, updating
@@ -283,8 +282,7 @@ impl<'gc> LoadManager<'gc> {
         &mut self,
         player: Weak<Mutex<Player>>,
         target_object: Avm2Object<'gc>,
-        url: &str,
-        options: RequestOptions,
+        request: Request,
         data_format: DataFormat,
     ) -> OwnedFuture<(), Error> {
         let loader = Loader::LoadURLLoader {
@@ -293,7 +291,7 @@ impl<'gc> LoadManager<'gc> {
         };
         let handle = self.add_loader(loader);
         let loader = self.get_loader_mut(handle).unwrap();
-        loader.load_url_loader(player, url.to_owned(), options, data_format)
+        loader.load_url_loader(player, request, data_format)
     }
 }
 
@@ -387,8 +385,7 @@ impl<'gc> Loader<'gc> {
     fn root_movie_loader(
         &mut self,
         player: Weak<Mutex<Player>>,
-        url: String,
-        options: RequestOptions,
+        request: Request,
         parameters: Vec<(String, String)>,
         on_metadata: Box<dyn FnOnce(&swf::HeaderExt)>,
     ) -> OwnedFuture<(), Error> {
@@ -404,7 +401,7 @@ impl<'gc> Loader<'gc> {
             .expect("Could not upgrade weak reference to player");
 
         Box::pin(async move {
-            let fetch = player.lock().unwrap().navigator().fetch(&url, options);
+            let fetch = player.lock().unwrap().navigator().fetch(request);
 
             let response = fetch.await.map_err(|error| {
                 player
@@ -433,8 +430,7 @@ impl<'gc> Loader<'gc> {
     fn movie_loader(
         &mut self,
         player: Weak<Mutex<Player>>,
-        url: String,
-        options: RequestOptions,
+        request: Request,
         loader_url: Option<String>,
     ) -> OwnedFuture<(), Error> {
         let handle = match self {
@@ -447,7 +443,7 @@ impl<'gc> Loader<'gc> {
             .expect("Could not upgrade weak reference to player");
 
         Box::pin(async move {
-            let fetch = player.lock().unwrap().navigator().fetch(&url, options);
+            let fetch = player.lock().unwrap().navigator().fetch(request);
 
             let mut replacing_root_movie = false;
             player.lock().unwrap().update(|uc| -> Result<(), Error> {
@@ -542,8 +538,7 @@ impl<'gc> Loader<'gc> {
     fn form_loader(
         &mut self,
         player: Weak<Mutex<Player>>,
-        url: String,
-        options: RequestOptions,
+        request: Request,
     ) -> OwnedFuture<(), Error> {
         let handle = match self {
             Loader::Form { self_handle, .. } => self_handle.expect("Loader not self-introduced"),
@@ -555,7 +550,7 @@ impl<'gc> Loader<'gc> {
             .expect("Could not upgrade weak reference to player");
 
         Box::pin(async move {
-            let fetch = player.lock().unwrap().navigator().fetch(&url, options);
+            let fetch = player.lock().unwrap().navigator().fetch(request);
 
             let response = fetch.await?;
 
@@ -579,6 +574,22 @@ impl<'gc> Loader<'gc> {
                     that.set(k, v.into(), &mut activation)?;
                 }
 
+                // Fire the onData method and event.
+                if let Some(display_object) = that.as_display_object() {
+                    if let Some(movie_clip) = display_object.as_movie_clip() {
+                        activation.context.action_queue.queue_actions(
+                            movie_clip.into(),
+                            ActionType::Method {
+                                object: that,
+                                name: "onData",
+                                args: vec![],
+                            },
+                            false,
+                        );
+                        movie_clip.event_dispatch(&mut activation.context, ClipEvent::Data);
+                    }
+                }
+
                 Ok(())
             })
         })
@@ -588,8 +599,7 @@ impl<'gc> Loader<'gc> {
     fn load_vars_loader(
         &mut self,
         player: Weak<Mutex<Player>>,
-        url: String,
-        options: RequestOptions,
+        request: Request,
     ) -> OwnedFuture<(), Error> {
         let handle = match self {
             Loader::LoadVars { self_handle, .. } => {
@@ -603,7 +613,7 @@ impl<'gc> Loader<'gc> {
             .expect("Could not upgrade weak reference to player");
 
         Box::pin(async move {
-            let fetch = player.lock().unwrap().navigator().fetch(&url, options);
+            let fetch = player.lock().unwrap().navigator().fetch(request);
 
             let data = fetch.await;
 
@@ -670,8 +680,7 @@ impl<'gc> Loader<'gc> {
     fn load_url_loader(
         &mut self,
         player: Weak<Mutex<Player>>,
-        url: String,
-        options: RequestOptions,
+        request: Request,
         data_format: DataFormat,
     ) -> OwnedFuture<(), Error> {
         let handle = match self {
@@ -686,7 +695,7 @@ impl<'gc> Loader<'gc> {
             .expect("Could not upgrade weak reference to player");
 
         Box::pin(async move {
-            let fetch = player.lock().unwrap().navigator().fetch(&url, options);
+            let fetch = player.lock().unwrap().navigator().fetch(request);
             let response = fetch.await;
 
             player.lock().unwrap().update(|uc| {
