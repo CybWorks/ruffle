@@ -7,20 +7,21 @@ default-run = "ruffle_desktop"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-clap = { version = "3.2.2", features = ["derive"] }
-cpal = "0.13.5"
-ruffle_core = { path = "../core" }
+clap = { version = "3.2.18", features = ["derive"] }
+cpal = "0.14.0"
+ruffle_core = { path = "../core", features = ["audio", "minimp3", "nellymoser"] }
 ruffle_render_wgpu = { path = "../render/wgpu", features = ["clap"] }
 env_logger = { version = "0.9", default-features = false, features = ["humantime"] }
 generational-arena = "0.2.8"
 log = "0.4"
-winit = "0.26.1"
+winit = "0.27.2"
 webbrowser = "0.7.1"
 url = "2.2.2"
 clipboard = "0.5.0"
 dirs = "4.0"
 isahc = "1.7.2"
-rfd = "0.9.1"
+rfd = "0.10.0"
+anyhow = "1.0"
 
 [target.'cfg(windows)'.dependencies]
 winapi = "0.3.9"
