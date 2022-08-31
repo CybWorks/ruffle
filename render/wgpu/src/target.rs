@@ -1,5 +1,7 @@
 #[cfg(not(target_family = "wasm"))]
 use crate::utils::BufferDimensions;
+use crate::Error;
+use ruffle_render::utils::unmultiply_alpha_rgba;
 use std::fmt::Debug;
 
 pub trait RenderTargetFrame: Debug {
@@ -130,7 +132,18 @@ impl RenderTargetFrame for TextureTargetFrame {
 
 #[cfg(not(target_family = "wasm"))]
 impl TextureTarget {
-    pub fn new(device: &wgpu::Device, size: (u32, u32)) -> Self {
+    pub fn new(device: &wgpu::Device, size: (u32, u32)) -> Result<Self, Error> {
+        if size.0 > device.limits().max_texture_dimension_2d
+            || size.1 > device.limits().max_texture_dimension_2d
+        {
+            return Err(format!(
+                "Texture target cannot be larger than {}px on either dimension (requested {} x {})",
+                device.limits().max_texture_dimension_2d,
+                size.0,
+                size.1
+            )
+            .into());
+        }
         let buffer_dimensions = BufferDimensions::new(size.0 as usize, size.1 as usize);
         let size = wgpu::Extent3d {
             width: size.0,
@@ -156,15 +169,17 @@ impl TextureTarget {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        Self {
+        Ok(Self {
             size,
             texture,
             format,
             buffer,
             buffer_dimensions,
-        }
+        })
     }
 
+    /// Captures the current contents of our texture buffer
+    /// as an `RgbaImage` (using straight alpha).
     pub fn capture(&self, device: &wgpu::Device) -> Option<image::RgbaImage> {
         let (sender, receiver) = std::sync::mpsc::channel();
         let buffer_slice = self.buffer.slice(..);
@@ -186,6 +201,10 @@ impl TextureTarget {
                         .extend_from_slice(&chunk[..self.buffer_dimensions.unpadded_bytes_per_row]);
                 }
 
+                // Our texture uses premutliplied alpha - convert to straight alpha
+                // so that this image can be saved directly as a PNG.
+                unmultiply_alpha_rgba(&mut buffer);
+
                 let image = image::RgbaImage::from_raw(self.size.width, self.size.height, buffer);
                 drop(map);
                 self.buffer.unmap();
@@ -204,27 +223,8 @@ impl RenderTarget for TextureTarget {
     type Frame = TextureTargetFrame;
 
     fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        self.size.width = width;
-        self.size.height = height;
-
-        let label = create_debug_label!("Render target texture");
-        self.texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: label.as_deref(),
-            size: self.size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        });
-
-        let buffer_label = create_debug_label!("Render target buffer");
-        self.buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: buffer_label.as_deref(),
-            size: width as u64 * height as u64 * 4,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+        *self =
+            TextureTarget::new(device, (width, height)).expect("Unable to resize texture target");
     }
 
     fn format(&self) -> wgpu::TextureFormat {

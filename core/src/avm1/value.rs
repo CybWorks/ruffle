@@ -889,7 +889,7 @@ mod test {
                 protos.function,
             );
 
-            let o = ScriptObject::object_cell(activation.context.gc_context, Some(protos.object));
+            let o = ScriptObject::new(activation.context.gc_context, Some(protos.object));
             o.define_value(
                 activation.context.gc_context,
                 "valueOf",
@@ -898,7 +898,7 @@ mod test {
             );
 
             assert_eq!(
-                Value::Object(o).to_primitive_num(activation).unwrap(),
+                Value::from(o).to_primitive_num(activation).unwrap(),
                 5.into()
             );
 
@@ -920,9 +920,9 @@ mod test {
             assert_eq!(f.coerce_to_f64(activation).unwrap(), 0.0);
             assert!(n.coerce_to_f64(activation).unwrap().is_nan());
 
-            let bo = Value::Object(ScriptObject::bare_object(activation.context.gc_context).into());
+            let o = ScriptObject::new(activation.context.gc_context, None);
 
-            assert!(bo.coerce_to_f64(activation).unwrap().is_nan());
+            assert!(Value::from(o).coerce_to_f64(activation).unwrap().is_nan());
 
             Ok(())
         });
@@ -942,9 +942,9 @@ mod test {
             assert_eq!(f.coerce_to_f64(activation).unwrap(), 0.0);
             assert_eq!(n.coerce_to_f64(activation).unwrap(), 0.0);
 
-            let bo = Value::Object(ScriptObject::bare_object(activation.context.gc_context).into());
+            let o = ScriptObject::new(activation.context.gc_context, None);
 
-            assert_eq!(bo.coerce_to_f64(activation).unwrap(), 0.0);
+            assert_eq!(Value::from(o).coerce_to_f64(activation).unwrap(), 0.0);
 
             Ok(())
         });

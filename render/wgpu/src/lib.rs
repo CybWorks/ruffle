@@ -7,18 +7,20 @@ use crate::utils::{create_buffer_with_data, format_list, get_backend_names};
 use bytemuck::{Pod, Zeroable};
 use enum_map::Enum;
 use fnv::FnvHashMap;
-use ruffle_core::backend::render::{
-    Bitmap, BitmapHandle, BitmapSource, Color, RenderBackend, ShapeHandle, Transform,
-};
-use ruffle_core::color_transform::ColorTransform;
-use ruffle_core::shape_utils::DistilledShape;
-use ruffle_core::swf;
-use ruffle_render_common_tess::{
+use ruffle_render::backend::{RenderBackend, ShapeHandle, ViewportDimensions};
+use ruffle_render::bitmap::{Bitmap, BitmapHandle, BitmapSource};
+use ruffle_render::color_transform::ColorTransform;
+use ruffle_render::error::Error as BitmapError;
+use ruffle_render::shape_utils::DistilledShape;
+use ruffle_render::tessellator::{
     DrawType as TessDrawType, Gradient as TessGradient, GradientType, ShapeTessellator,
     Vertex as TessVertex,
 };
+use ruffle_render::transform::Transform;
 use std::num::NonZeroU32;
 use std::path::Path;
+use std::sync::Arc;
+use swf::{BlendMode, Color};
 pub use wgpu;
 
 type Error = Box<dyn std::error::Error>;
@@ -42,8 +44,8 @@ pub struct Descriptors {
     pub surface_format: wgpu::TextureFormat,
     frame_buffer_format: wgpu::TextureFormat,
     queue: wgpu::Queue,
-    globals: Globals,
-    uniform_buffers: UniformBuffer<Transforms>,
+    globals_layout: wgpu::BindGroupLayout,
+    uniform_buffers_layout: wgpu::BindGroupLayout,
     pipelines: Pipelines,
     bitmap_samplers: BitmapSamplers,
     msaa_sample_count: u32,
@@ -55,14 +57,13 @@ impl Descriptors {
         queue: wgpu::Queue,
         info: wgpu::AdapterInfo,
         surface_format: wgpu::TextureFormat,
-    ) -> Result<Self, Error> {
+    ) -> Self {
         let limits = device.limits();
         // TODO: Allow this to be set from command line/settings file.
         let msaa_sample_count = 4;
         let bitmap_samplers = BitmapSamplers::new(&device);
-        let globals = Globals::new(&device);
         let uniform_buffer_layout_label = create_debug_label!("Uniform buffer bind group layout");
-        let uniform_buffer_layout =
+        let uniform_buffers_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -76,10 +77,6 @@ impl Descriptors {
                 }],
                 label: uniform_buffer_layout_label.as_deref(),
             });
-        let uniform_buffers = UniformBuffer::new(
-            uniform_buffer_layout,
-            limits.min_uniform_buffer_offset_alignment,
-        );
 
         // We want to render directly onto a linear render target to avoid any gamma correction.
         // If our surface is sRGB, render to a linear texture and than copy over to the surface.
@@ -104,34 +101,51 @@ impl Descriptors {
             _ => surface_format,
         };
 
+        let globals_layout_label = create_debug_label!("Globals bind group layout");
+        let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: globals_layout_label.as_deref(),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
         let pipelines = Pipelines::new(
             &device,
             surface_format,
             frame_buffer_format,
             msaa_sample_count,
             bitmap_samplers.layout(),
-            globals.layout(),
-            uniform_buffers.layout(),
-        )?;
+            &globals_layout,
+            &uniform_buffers_layout,
+        );
 
-        Ok(Self {
+        Self {
             device,
             info,
             limits,
             surface_format,
             frame_buffer_format,
             queue,
-            globals,
-            uniform_buffers,
+            globals_layout,
+            uniform_buffers_layout,
             pipelines,
             bitmap_samplers,
             msaa_sample_count,
-        })
+        }
     }
 }
 
 pub struct WgpuRenderBackend<T: RenderTarget> {
-    descriptors: Descriptors,
+    descriptors: Arc<Descriptors>,
+    globals: Globals,
+    uniform_buffers: UniformBuffer<Transforms>,
     target: T,
     frame_buffer_view: Option<wgpu::TextureView>,
     depth_texture_view: wgpu::TextureView,
@@ -145,8 +159,12 @@ pub struct WgpuRenderBackend<T: RenderTarget> {
     quad_vbo: wgpu::Buffer,
     quad_ibo: wgpu::Buffer,
     quad_tex_transforms: wgpu::Buffer,
+    blend_modes: Vec<BlendMode>,
     bitmap_registry: FnvHashMap<BitmapHandle, RegistryData>,
     next_bitmap_handle: BitmapHandle,
+    // This is currently unused - we just store it to report in
+    // `get_viewport_dimensions`
+    viewport_scale_factor: f64,
 }
 
 struct RegistryData {
@@ -324,7 +342,7 @@ impl WgpuRenderBackend<SwapChainTarget> {
             (1, 1),
             &descriptors.device,
         );
-        Self::new(descriptors, target)
+        Self::new(Arc::new(descriptors), target)
     }
 
     #[cfg(not(target_family = "wasm"))]
@@ -356,7 +374,7 @@ impl WgpuRenderBackend<SwapChainTarget> {
             size,
             &descriptors.device,
         );
-        Self::new(descriptors, target)
+        Self::new(Arc::new(descriptors), target)
     }
 }
 
@@ -382,8 +400,8 @@ impl WgpuRenderBackend<target::TextureTarget> {
             power_preference,
             trace_path,
         ))?;
-        let target = target::TextureTarget::new(&descriptors.device, size);
-        Self::new(descriptors, target)
+        let target = target::TextureTarget::new(&descriptors.device, size)?;
+        Self::new(Arc::new(descriptors), target)
     }
 
     pub fn capture_frame(&self) -> Option<image::RgbaImage> {
@@ -392,7 +410,19 @@ impl WgpuRenderBackend<target::TextureTarget> {
 }
 
 impl<T: RenderTarget> WgpuRenderBackend<T> {
-    pub fn new(mut descriptors: Descriptors, target: T) -> Result<Self, Error> {
+    pub fn new(descriptors: Arc<Descriptors>, target: T) -> Result<Self, Error> {
+        if target.width() > descriptors.limits.max_texture_dimension_2d
+            || target.height() > descriptors.limits.max_texture_dimension_2d
+        {
+            return Err(format!(
+                "Render target texture cannot be larger than {}px on either dimension (requested {} x {})",
+                descriptors.limits.max_texture_dimension_2d,
+                target.width(),
+                target.height()
+            )
+            .into());
+        }
+
         let extent = wgpu::Extent3d {
             width: target.width(),
             height: target.height(),
@@ -469,12 +499,16 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
             (None, None)
         };
 
-        descriptors
-            .globals
-            .set_resolution(target.width(), target.height());
+        let mut globals = Globals::new(&descriptors.device, &descriptors.globals_layout);
+        globals.set_resolution(target.width(), target.height());
+
+        let uniform_buffers =
+            UniformBuffer::new(descriptors.limits.min_uniform_buffer_offset_alignment);
 
         Ok(Self {
             descriptors,
+            globals,
+            uniform_buffers,
             target,
             frame_buffer_view,
             depth_texture_view,
@@ -490,8 +524,10 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
             quad_vbo,
             quad_ibo,
             quad_tex_transforms,
+            blend_modes: vec![BlendMode::Normal],
             bitmap_registry: Default::default(),
             next_bitmap_handle: BitmapHandle(0),
+            viewport_scale_factor: 1.0,
         })
     }
 
@@ -549,11 +585,7 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
             })
             // No surface (rendering to texture), default to linear RBGA.
             .unwrap_or(wgpu::TextureFormat::Rgba8Unorm);
-        Descriptors::new(device, queue, info, surface_format)
-    }
-
-    pub fn descriptors(self) -> Descriptors {
-        self.descriptors
+        Ok(Descriptors::new(device, queue, info, surface_format))
     }
 
     fn register_shape_internal(
@@ -754,14 +786,22 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
 
         Mesh { draws }
     }
+
+    fn blend_mode(&self) -> BlendMode {
+        *self.blend_modes.last().unwrap()
+    }
+
+    pub fn descriptors(&self) -> &Arc<Descriptors> {
+        &self.descriptors
+    }
 }
 
 impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
-    fn set_viewport_dimensions(&mut self, width: u32, height: u32) {
+    fn set_viewport_dimensions(&mut self, dimensions: ViewportDimensions) {
         // Avoid panics from creating 0-sized framebuffers.
-        let width = std::cmp::max(width, 1);
-        let height = std::cmp::max(height, 1);
-
+        // TODO: find a way to bubble an error when the size is too large
+        let width = std::cmp::max(dimensions.width, 1);
+        let height = std::cmp::max(dimensions.height, 1);
         self.target.resize(&self.descriptors.device, width, height);
 
         let size = wgpu::Extent3d {
@@ -847,7 +887,16 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             (None, None)
         };
 
-        self.descriptors.globals.set_resolution(width, height);
+        self.globals.set_resolution(width, height);
+        self.viewport_scale_factor = dimensions.scale_factor;
+    }
+
+    fn viewport_dimensions(&self) -> ViewportDimensions {
+        ViewportDimensions {
+            width: self.target.width(),
+            height: self.target.height(),
+            scale_factor: self.viewport_scale_factor,
+        }
     }
 
     fn register_shape(
@@ -872,11 +921,11 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
     }
 
     fn register_glyph_shape(&mut self, glyph: &swf::Glyph) -> ShapeHandle {
-        let shape = ruffle_core::shape_utils::swf_glyph_to_shape(glyph);
+        let shape = ruffle_render::shape_utils::swf_glyph_to_shape(glyph);
         let handle = ShapeHandle(self.meshes.len());
         let mesh = self.register_shape_internal(
             (&shape).into(),
-            &ruffle_core::backend::render::NullBitmapSource,
+            &ruffle_render::backend::null::NullBitmapSource,
         );
         self.meshes.push(mesh);
         handle
@@ -885,7 +934,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
     fn begin_frame(&mut self, clear: Color) {
         self.mask_state = MaskState::NoMask;
         self.num_masks = 0;
-        self.descriptors.uniform_buffers.reset();
+        self.uniform_buffers.reset();
 
         let frame_output = match self.target.get_next_texture() {
             Ok(frame) => frame,
@@ -917,8 +966,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                 });
         let mut frame_data = Box::new((draw_encoder, frame_output, uniform_encoder));
 
-        self.descriptors
-            .globals
+        self.globals
             .update_uniform(&self.descriptors.device, &mut frame_data.0);
 
         // Use intermediate render targets when resolving MSAA or copying from linear-to-sRGB texture.
@@ -971,6 +1019,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
     fn render_bitmap(&mut self, bitmap: BitmapHandle, transform: &Transform, smoothing: bool) {
         if let Some(entry) = self.bitmap_registry.get(&bitmap) {
             let texture = &entry.texture_wrapper;
+            let blend_mode = self.blend_mode();
             let frame = if let Some(frame) = &mut self.current_frame {
                 frame.get()
             } else {
@@ -979,7 +1028,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
 
             let transform = Transform {
                 matrix: transform.matrix
-                    * ruffle_core::matrix::Matrix {
+                    * ruffle_render::matrix::Matrix {
                         a: texture.width as f32,
                         d: texture.height as f32,
                         ..Default::default()
@@ -1003,14 +1052,15 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                 self.descriptors
                     .pipelines
                     .bitmap_pipelines
-                    .pipeline_for(self.mask_state),
+                    .pipeline_for(blend_mode, self.mask_state),
             );
             frame
                 .render_pass
-                .set_bind_group(0, self.descriptors.globals.bind_group(), &[]);
+                .set_bind_group(0, self.globals.bind_group(), &[]);
 
-            self.descriptors.uniform_buffers.write_uniforms(
+            self.uniform_buffers.write_uniforms(
                 &self.descriptors.device,
+                &self.descriptors.uniform_buffers_layout,
                 &mut frame.frame_data.2,
                 &mut frame.render_pass,
                 1,
@@ -1054,6 +1104,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
     }
 
     fn render_shape(&mut self, shape: ShapeHandle, transform: &Transform) {
+        let blend_mode = self.blend_mode();
         let frame = if let Some(frame) = &mut self.current_frame {
             frame.get()
         } else {
@@ -1076,10 +1127,11 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
 
         frame
             .render_pass
-            .set_bind_group(0, self.descriptors.globals.bind_group(), &[]);
+            .set_bind_group(0, self.globals.bind_group(), &[]);
 
-        self.descriptors.uniform_buffers.write_uniforms(
+        self.uniform_buffers.write_uniforms(
             &self.descriptors.device,
+            &self.descriptors.uniform_buffers_layout,
             &mut frame.frame_data.2,
             &mut frame.render_pass,
             1,
@@ -1108,7 +1160,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                         self.descriptors
                             .pipelines
                             .color_pipelines
-                            .pipeline_for(self.mask_state),
+                            .pipeline_for(blend_mode, self.mask_state),
                     );
                 }
                 DrawType::Gradient { bind_group, .. } => {
@@ -1116,7 +1168,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                         self.descriptors
                             .pipelines
                             .gradient_pipelines
-                            .pipeline_for(self.mask_state),
+                            .pipeline_for(blend_mode, self.mask_state),
                     );
                     frame.render_pass.set_bind_group(2, bind_group, &[]);
                 }
@@ -1130,7 +1182,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                         self.descriptors
                             .pipelines
                             .bitmap_pipelines
-                            .pipeline_for(self.mask_state),
+                            .pipeline_for(blend_mode, self.mask_state),
                     );
                     frame.render_pass.set_bind_group(2, bind_group, &[]);
                     frame.render_pass.set_bind_group(
@@ -1166,7 +1218,8 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         }
     }
 
-    fn draw_rect(&mut self, color: Color, matrix: &ruffle_core::matrix::Matrix) {
+    fn draw_rect(&mut self, color: Color, matrix: &ruffle_render::matrix::Matrix) {
+        let blend_mode = self.blend_mode();
         let frame = if let Some(frame) = &mut self.current_frame {
             frame.get()
         } else {
@@ -1197,15 +1250,16 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             self.descriptors
                 .pipelines
                 .color_pipelines
-                .pipeline_for(self.mask_state),
+                .pipeline_for(blend_mode, self.mask_state),
         );
 
         frame
             .render_pass
-            .set_bind_group(0, self.descriptors.globals.bind_group(), &[]);
+            .set_bind_group(0, self.globals.bind_group(), &[]);
 
-        self.descriptors.uniform_buffers.write_uniforms(
+        self.uniform_buffers.write_uniforms(
             &self.descriptors.device,
+            &self.descriptors.uniform_buffers_layout,
             &mut frame.frame_data.2,
             &mut frame.render_pass,
             1,
@@ -1271,9 +1325,10 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                 });
 
                 render_pass.set_pipeline(&self.descriptors.pipelines.copy_srgb_pipeline);
-                render_pass.set_bind_group(0, self.descriptors.globals.bind_group(), &[]);
-                self.descriptors.uniform_buffers.write_uniforms(
+                render_pass.set_bind_group(0, self.globals.bind_group(), &[]);
+                self.uniform_buffers.write_uniforms(
                     &self.descriptors.device,
+                    &self.descriptors.uniform_buffers_layout,
                     &mut uniform_encoder,
                     &mut render_pass,
                     1,
@@ -1311,7 +1366,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                 vec![uniform_encoder.finish(), draw_encoder.finish()]
             };
 
-            self.descriptors.uniform_buffers.finish();
+            self.uniform_buffers.finish();
             self.target.submit(
                 &self.descriptors.device,
                 &self.descriptors.queue,
@@ -1349,11 +1404,25 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         };
     }
 
+    fn push_blend_mode(&mut self, blend: BlendMode) {
+        self.blend_modes.push(blend);
+    }
+
+    fn pop_blend_mode(&mut self) {
+        self.blend_modes.pop();
+    }
+
     fn get_bitmap_pixels(&mut self, bitmap: BitmapHandle) -> Option<Bitmap> {
         self.bitmap_registry.get(&bitmap).map(|e| e.bitmap.clone())
     }
 
-    fn register_bitmap(&mut self, bitmap: Bitmap) -> Result<BitmapHandle, Error> {
+    fn register_bitmap(&mut self, bitmap: Bitmap) -> Result<BitmapHandle, BitmapError> {
+        if bitmap.width() > self.descriptors.limits.max_texture_dimension_2d
+            || bitmap.height() > self.descriptors.limits.max_texture_dimension_2d
+        {
+            return Err(BitmapError::TooLarge);
+        }
+
         let bitmap = bitmap.to_rgba();
         let extent = wgpu::Extent3d {
             width: bitmap.width(),
@@ -1438,9 +1507,8 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         Ok(handle)
     }
 
-    fn unregister_bitmap(&mut self, handle: BitmapHandle) -> Result<(), Error> {
+    fn unregister_bitmap(&mut self, handle: BitmapHandle) {
         self.bitmap_registry.remove(&handle);
-        Ok(())
     }
 
     fn update_texture(
@@ -1449,11 +1517,12 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         width: u32,
         height: u32,
         rgba: Vec<u8>,
-    ) -> Result<BitmapHandle, Error> {
+    ) -> Result<BitmapHandle, BitmapError> {
         let texture = if let Some(entry) = self.bitmap_registry.get(&handle) {
             &entry.texture_wrapper.texture
         } else {
-            return Err("update_texture: Bitmap not registered".into());
+            log::warn!("Tried to replace nonexistent texture");
+            return Ok(handle);
         };
 
         let extent = wgpu::Extent3d {

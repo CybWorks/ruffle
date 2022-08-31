@@ -244,7 +244,7 @@ impl<'gc> Avm1Function<'gc> {
 
     fn load_root(&self, frame: &mut Activation<'_, 'gc, '_>, preload_r: &mut u8) {
         if self.flags.contains(FunctionFlags::PRELOAD_ROOT) {
-            let root = self.base_clip.avm1_root().object();
+            let root = frame.base_clip().avm1_root().object();
             frame.set_local_register(*preload_r, root);
             *preload_r += 1;
         }
@@ -255,7 +255,7 @@ impl<'gc> Avm1Function<'gc> {
             // If _parent is undefined (because this is a root timeline), it actually does not get pushed,
             // and _global ends up incorrectly taking _parent's register.
             // See test for more info.
-            if let Some(parent) = self.base_clip.avm1_parent() {
+            if let Some(parent) = frame.base_clip().avm1_parent() {
                 frame.set_local_register(*preload_r, parent.object());
                 *preload_r += 1;
             }
@@ -380,7 +380,7 @@ impl<'gc> Executable<'gc> {
             // * Use the SWF version of `this`.
             // * Use the base clip of `this`.
             // * Allocate a new scope using the given base clip. No previous scope is closed over.
-            let swf_version = base_clip.swf_version();
+            let swf_version = base_clip.swf_version().max(5);
             let base_clip_obj = match base_clip.object() {
                 Value::Object(o) => o,
                 _ => unreachable!(),
@@ -506,7 +506,7 @@ impl<'gc> FunctionObject<'gc> {
         constructor: Option<Executable<'gc>>,
         fn_proto: Option<Object<'gc>>,
     ) -> Self {
-        let base = ScriptObject::object(gc_context, fn_proto);
+        let base = ScriptObject::new(gc_context, fn_proto);
 
         FunctionObject {
             base,
@@ -741,7 +741,7 @@ impl<'gc> TObject<'gc> for FunctionObject<'gc> {
         activation: &mut Activation<'_, 'gc, '_>,
         prototype: Object<'gc>,
     ) -> Result<Object<'gc>, Error<'gc>> {
-        let base = ScriptObject::object(activation.context.gc_context, Some(prototype));
+        let base = ScriptObject::new(activation.context.gc_context, Some(prototype));
         let fn_object = FunctionObject {
             base,
             data: GcCell::allocate(

@@ -4,24 +4,26 @@ use crate::avm2::activation::Activation;
 use crate::avm2::class::{Allocator, AllocatorFn, Class};
 use crate::avm2::function::Executable;
 use crate::avm2::method::Method;
-use crate::avm2::names::QName;
 use crate::avm2::object::function_object::FunctionObject;
 use crate::avm2::object::script_object::{scriptobject_allocator, ScriptObjectData};
-use crate::avm2::object::{Multiname, Object, ObjectPtr, TObject};
+use crate::avm2::object::{Object, ObjectPtr, TObject};
 use crate::avm2::property::Property;
 use crate::avm2::scope::{Scope, ScopeChain};
 use crate::avm2::value::Value;
 use crate::avm2::vtable::{ClassBoundMethod, VTable};
 use crate::avm2::Error;
+use crate::avm2::Multiname;
+use crate::avm2::QName;
 use crate::avm2::TranslationUnit;
 use crate::string::AvmString;
 use fnv::FnvHashMap;
 use gc_arena::{Collect, GcCell, MutationContext};
-use std::cell::{Ref, RefMut};
+use std::cell::{BorrowError, Ref, RefMut};
+use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 
 /// An Object which can be called to execute its function code.
-#[derive(Collect, Debug, Clone, Copy)]
+#[derive(Collect, Clone, Copy)]
 #[collect(no_drop)]
 pub struct ClassObject<'gc>(GcCell<'gc, ClassObjectData<'gc>>);
 
@@ -291,7 +293,7 @@ impl<'gc> ClassObject<'gc> {
             activation.context.gc_context,
             "constructor".into(),
             false,
-        )?;
+        );
 
         Ok(())
     }
@@ -706,6 +708,15 @@ impl<'gc> ClassObject<'gc> {
         self.0.read().class_vtable
     }
 
+    /// Like `inner_class_definition`, but returns an `Err(BorrowError)` instead of panicking
+    /// if our `GcCell` is already mutably borrowed. This is useful
+    /// in contexts where panicking would be extremely undesirable,
+    /// and there's a fallback if we cannot obtain the `Class`
+    /// (such as `Debug` impls),
+    pub fn try_inner_class_definition(&self) -> Result<GcCell<'gc, Class<'gc>>, BorrowError> {
+        self.0.try_read().map(|c| c.class)
+    }
+
     pub fn inner_class_definition(self) -> GcCell<'gc, Class<'gc>> {
         self.0.read().class
     }
@@ -736,6 +747,24 @@ impl<'gc> ClassObject<'gc> {
 
     fn instance_allocator(self) -> Option<AllocatorFn> {
         Some(self.0.read().instance_allocator.0)
+    }
+
+    /// Attempts to obtain the name of this class.
+    /// If we are unable to read from a necessary `GcCell`,
+    /// the returned value will be some kind of error message.
+    ///
+    /// This should only be used in a debug context, where
+    /// we need infallible access to *something* to print
+    /// out.
+    pub fn debug_class_name(&self) -> Box<dyn Debug + 'gc> {
+        let class_name = self
+            .try_inner_class_definition()
+            .and_then(|class| class.try_read().map(|c| c.name()));
+
+        match class_name {
+            Ok(class_name) => Box::new(class_name),
+            Err(err) => Box::new(err),
+        }
     }
 }
 
@@ -819,11 +848,11 @@ impl<'gc> TObject<'gc> for ClassObject<'gc> {
         mc: MutationContext<'gc, '_>,
         name: AvmString<'gc>,
         is_enumerable: bool,
-    ) -> Result<(), Error> {
+    ) {
         self.0
             .write(mc)
             .base
-            .set_local_property_is_enumerable(name, is_enumerable)
+            .set_local_property_is_enumerable(name, is_enumerable);
     }
 
     fn apply(
@@ -960,5 +989,14 @@ impl<'gc> Eq for ClassObject<'gc> {}
 impl<'gc> Hash for ClassObject<'gc> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.as_ptr().hash(state);
+    }
+}
+
+impl<'gc> Debug for ClassObject<'gc> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        f.debug_struct("ClassObject")
+            .field("name", &self.debug_class_name())
+            .field("ptr", &self.0.as_ptr())
+            .finish()
     }
 }

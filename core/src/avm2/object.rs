@@ -7,13 +7,15 @@ use crate::avm2::class::Class;
 use crate::avm2::domain::Domain;
 use crate::avm2::events::{DispatchList, Event};
 use crate::avm2::function::Executable;
-use crate::avm2::names::{Multiname, Namespace, QName};
 use crate::avm2::property::Property;
 use crate::avm2::regexp::RegExp;
 use crate::avm2::value::{Hint, Value};
 use crate::avm2::vector::VectorStorage;
 use crate::avm2::vtable::{ClassBoundMethod, VTable};
 use crate::avm2::Error;
+use crate::avm2::Multiname;
+use crate::avm2::Namespace;
+use crate::avm2::QName;
 use crate::backend::audio::{SoundHandle, SoundInstanceHandle};
 use crate::bitmap::bitmap_data::BitmapData;
 use crate::display_object::DisplayObject;
@@ -141,8 +143,9 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         activation: &mut Activation<'_, 'gc, '_>,
     ) -> Result<Value<'gc>, Error> {
         match self.vtable().and_then(|vtable| vtable.get_trait(multiname)) {
-            Some(Property::Slot { slot_id, class: _ })
-            | Some(Property::ConstSlot { slot_id, class: _ }) => self.base().get_slot(slot_id),
+            Some(Property::Slot { slot_id }) | Some(Property::ConstSlot { slot_id }) => {
+                self.base().get_slot(slot_id)
+            }
             Some(Property::Method { disp_id }) => {
                 if let Some(bound_method) = self.get_bound_method(disp_id) {
                     return Ok(bound_method.into());
@@ -196,8 +199,11 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         activation: &mut Activation<'_, 'gc, '_>,
     ) -> Result<(), Error> {
         match self.vtable().and_then(|vtable| vtable.get_trait(multiname)) {
-            Some(Property::Slot { slot_id, mut class }) => {
-                let value = class.coerce(activation, value)?;
+            Some(Property::Slot { slot_id }) => {
+                let value = self
+                    .vtable()
+                    .unwrap()
+                    .coerce_trait_value(slot_id, value, activation)?;
                 self.base_mut(activation.context.gc_context).set_slot(
                     slot_id,
                     value,
@@ -246,9 +252,11 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         activation: &mut Activation<'_, 'gc, '_>,
     ) -> Result<(), Error> {
         match self.vtable().and_then(|vtable| vtable.get_trait(multiname)) {
-            Some(Property::Slot { slot_id, mut class })
-            | Some(Property::ConstSlot { slot_id, mut class }) => {
-                let value = class.coerce(activation, value)?;
+            Some(Property::Slot { slot_id }) | Some(Property::ConstSlot { slot_id }) => {
+                let value = self
+                    .vtable()
+                    .unwrap()
+                    .coerce_trait_value(slot_id, value, activation)?;
                 self.base_mut(activation.context.gc_context).set_slot(
                     slot_id,
                     value,
@@ -302,8 +310,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         activation: &mut Activation<'_, 'gc, '_>,
     ) -> Result<Value<'gc>, Error> {
         match self.vtable().and_then(|vtable| vtable.get_trait(multiname)) {
-            Some(Property::Slot { slot_id, class: _ })
-            | Some(Property::ConstSlot { slot_id, class: _ }) => {
+            Some(Property::Slot { slot_id }) | Some(Property::ConstSlot { slot_id }) => {
                 let obj = self.base().get_slot(slot_id)?.as_callable(
                     activation,
                     Some(multiname),
@@ -581,7 +588,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         mc: MutationContext<'gc, '_>,
         name: AvmString<'gc>,
         is_enumerable: bool,
-    ) -> Result<(), Error> {
+    ) {
         let mut base = self.base_mut(mc);
 
         base.set_local_property_is_enumerable(name, is_enumerable)
@@ -895,6 +902,10 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         None
     }
 
+    fn as_loader_info_object(&self) -> Option<&LoaderInfoObject<'gc>> {
+        None
+    }
+
     fn as_array_object(&self) -> Option<ArrayObject<'gc>> {
         None
     }
@@ -1000,11 +1011,6 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
 
     /// Unwrap this object as a mutable regexp.
     fn as_regexp_mut(&self, _mc: MutationContext<'gc, '_>) -> Option<RefMut<RegExp<'gc>>> {
-        None
-    }
-
-    /// Unwrap this object's loader stream
-    fn as_loader_stream(&self) -> Option<Ref<LoaderStream<'gc>>> {
         None
     }
 

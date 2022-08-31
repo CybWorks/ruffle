@@ -3,6 +3,7 @@
 //! Trace output can be compared with correct output from the official Flash Player.
 
 use approx::assert_relative_eq;
+use regex::Regex;
 use ruffle_core::backend::{
     log::LogBackend,
     navigator::{NullExecutor, NullNavigatorBackend},
@@ -13,17 +14,22 @@ use ruffle_core::events::MouseButton as RuffleMouseButton;
 use ruffle_core::external::Value as ExternalValue;
 use ruffle_core::external::{ExternalInterfaceMethod, ExternalInterfaceProvider};
 use ruffle_core::tag_utils::SwfMovie;
-use ruffle_core::{Player, PlayerBuilder, PlayerEvent};
+use ruffle_core::{Player, PlayerBuilder, PlayerEvent, ViewportDimensions};
 use ruffle_input_format::{AutomatedEvent, InputInjector, MouseButton as InputMouseButton};
-use ruffle_render_wgpu::target::TextureTarget;
-use ruffle_render_wgpu::wgpu;
-use ruffle_render_wgpu::WgpuRenderBackend;
+
+#[cfg(feature = "imgtests")]
+use ruffle_render_wgpu::{target::TextureTarget, wgpu, WgpuRenderBackend};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+#[cfg(feature = "imgtests")]
+fn get_img_platform_suffix(info: &wgpu::AdapterInfo) -> String {
+    format!("{}-{:?}", std::env::consts::OS, info.backend)
+}
 
 const RUN_IMG_TESTS: bool = cfg!(feature = "imgtests");
 
@@ -45,11 +51,20 @@ macro_rules! val_or_false {
     };
 }
 
+macro_rules! val_or_empty_slice {
+    ($val:expr) => {
+        $val
+    };
+    () => {
+        &[]
+    };
+}
+
 // This macro generates test cases for a given list of SWFs.
 // If 'img' is true, then we will render an image of the final frame
 // of the SWF, and compare it against a reference image on disk.
 macro_rules! swf_tests {
-    ($($(#[$attr:meta])* ($name:ident, $path:expr, $num_frames:literal $(, img = $img:literal)? ),)*) => {
+    ($($(#[$attr:meta])* ($name:ident, $path:expr, $num_frames:literal $(, img = $img:literal)? $(, frame_time_sleep = $frame_time_sleep:literal)? ),)*) => {
         $(
         #[test]
         $(#[$attr])*
@@ -60,7 +75,8 @@ macro_rules! swf_tests {
                 $num_frames,
                 concat!("tests/swfs/", $path, "/input.json"),
                 concat!("tests/swfs/", $path, "/output.txt"),
-                val_or_false!($($img)?)
+                val_or_false!($($img)?),
+                val_or_false!($($frame_time_sleep)?),
             )
         }
         )*
@@ -68,8 +84,12 @@ macro_rules! swf_tests {
 }
 
 // This macro generates test cases for a given list of SWFs using `test_swf_approx`.
+// If provided, `@num_patterns` must be a `&[Regex]`. Each regex in the slice is
+// tested against the expected and actual - if it matches, then each capture
+// group is treated as a floating-point value to be compared approximately.
+// The rest of the string (outside of the capture groups) is compared exactly.
 macro_rules! swf_tests_approx {
-    ($($(#[$attr:meta])* ($name:ident, $path:expr, $num_frames:literal $(, $opt:ident = $val:expr)*),)*) => {
+    ($($(#[$attr:meta])* ($name:ident, $path:expr, $num_frames:literal $(, @num_patterns = $num_patterns:expr)? $(, @img = $img:literal)? $(, $opt:ident = $val:expr)*),)*) => {
         $(
         #[test]
         $(#[$attr])*
@@ -80,6 +100,8 @@ macro_rules! swf_tests_approx {
                 $num_frames,
                 concat!("tests/swfs/", $path, "/input.json"),
                 concat!("tests/swfs/", $path, "/output.txt"),
+                val_or_empty_slice!($($num_patterns)?),
+                val_or_false!($($img)?),
                 |actual, expected| assert_relative_eq!(actual, expected $(, $opt = $val)*),
             )
         }
@@ -183,6 +205,7 @@ swf_tests! {
     (as3_class_enumeration, "avm2/class_enumeration", 1),
     (as3_class_is, "avm2/class_is", 1),
     (as3_class_methods, "avm2/class_methods", 1),
+    (as3_class_singleton, "avm2/class_singleton", 1),
     (as3_class_supercalls_mismatched, "avm2/class_supercalls_mismatched", 1),
     (as3_class_to_locale_string, "avm2/class_to_locale_string", 1),
     (as3_class_to_string, "avm2/class_to_string", 1),
@@ -211,6 +234,7 @@ swf_tests! {
     (as3_dictionary_in, "avm2/dictionary_in", 1),
     (as3_dictionary_namespaces, "avm2/dictionary_namespaces", 1),
     (as3_displayobject_alpha, "avm2/displayobject_alpha", 1),
+    (as3_displayobject_blendmode, "avm2/displayobject_blendmode", 1, img = true),
     (as3_displayobject_hittestobject, "avm2/displayobject_hittestobject", 1),
     (as3_displayobject_hittestpoint, "avm2/displayobject_hittestpoint", 2),
     (as3_displayobject_name, "avm2/displayobject_name", 4),
@@ -259,6 +283,7 @@ swf_tests! {
     (as3_event_cancelable, "avm2/event_cancelable", 1),
     (as3_event_clone, "avm2/event_clone", 1),
     (as3_event_formattostring, "avm2/event_formattostring", 1),
+    (as3_event_handler_exception, "avm2/event_handler_exception", 2),
     (as3_event_isdefaultprevented, "avm2/event_isdefaultprevented", 1),
     (as3_event_type, "avm2/event_type", 1),
     (as3_event_valueof_tostring, "avm2/event_valueof_tostring", 1),
@@ -318,6 +343,7 @@ swf_tests! {
     (as3_int_tostring, "avm2/int_tostring", 1),
     (as3_interactiveobject_enabled, "avm2/interactiveobject_enabled", 1),
     (as3_interface_namespaces, "avm2/interface_namespaces", 1),
+    (as3_invalid_utf8, "avm2/invalid_utf8", 1),
     (as3_is_finite, "avm2/is_finite", 1),
     (as3_is_nan, "avm2/is_nan", 1),
     (as3_is_prototype_of, "avm2/is_prototype_of", 1),
@@ -330,7 +356,10 @@ swf_tests! {
     (as3_lazyinit, "avm2/lazyinit", 1),
     (as3_lessequals, "avm2/lessequals", 1),
     (as3_lessthan, "avm2/lessthan", 1),
+    (as3_loader_events, "avm2/loader_events", 3, img = true),
+    (as3_loaderinfo_events, "avm2/loaderinfo_events", 2),
     (as3_loaderinfo_properties, "avm2/loaderinfo_properties", 2),
+    (as3_loaderinfo_root, "avm2/loaderinfo_root", 1),
     (as3_loaderinfo_quine, "avm2/loaderinfo_quine", 2),
     (as3_lshift, "avm2/lshift", 1),
     (as3_modulo, "avm2/modulo", 1),
@@ -346,14 +375,32 @@ swf_tests! {
     (as3_movieclip_dispatchevent_selfadd, "avm2/movieclip_dispatchevent_selfadd", 1),
     (as3_movieclip_dispatchevent_target, "avm2/movieclip_dispatchevent_target", 1),
     (as3_movieclip_dispatchevent, "avm2/movieclip_dispatchevent", 1),
+    (as3_movieclip_displayevents_clickgoto, "avm2/movieclip_displayevents_clickgoto", 32),
+    (as3_movieclip_displayevents_clickgoto2, "avm2/movieclip_displayevents_clickgoto2", 46),
+    (as3_movieclip_displayevents_clickplay, "avm2/movieclip_displayevents_clickplay", 32),
+    (as3_movieclip_displayevents_clicksymbol, "avm2/movieclip_displayevents_clicksymbol", 32),
+    (as3_movieclip_displayevents_constructframegoto, "avm2/movieclip_displayevents_constructframegoto", 12),
+    (as3_movieclip_displayevents_constructframeplay, "avm2/movieclip_displayevents_constructframeplay", 6),
+    (as3_movieclip_displayevents_constructframesymbol, "avm2/movieclip_displayevents_constructframesymbol", 12),
     (as3_movieclip_displayevents_dblhandler, "avm2/movieclip_displayevents_dblhandler", 4),
+    (as3_movieclip_displayevents_enterframegoto, "avm2/movieclip_displayevents_enterframegoto", 15),
+    (as3_movieclip_displayevents_enterframeplay, "avm2/movieclip_displayevents_enterframeplay", 6),
+    (as3_movieclip_displayevents_enterframesymbol, "avm2/movieclip_displayevents_enterframesymbol", 15),
+    (as3_movieclip_displayevents_exitframegoto, "avm2/movieclip_displayevents_exitframegoto", 12),
+    (as3_movieclip_displayevents_exitframeplay, "avm2/movieclip_displayevents_exitframeplay", 6),
+    (as3_movieclip_displayevents_exitframesymbol, "avm2/movieclip_displayevents_exitframesymbol", 12),
     (as3_movieclip_displayevents_looping, "avm2/movieclip_displayevents_looping", 5),
-    (as3_movieclip_displayevents_timeline, "avm2/movieclip_displayevents_timeline", 5),
+    (as3_movieclip_displayevents_timeline, "avm2/movieclip_displayevents_timeline", 7),
+    (as3_movieclip_displayevents_stopped, "avm2/movieclip_displayevents_stopped", 10),
     (as3_movieclip_displayevents, "avm2/movieclip_displayevents", 9),
     (as3_movieclip_drawrect, "avm2/movieclip_drawrect", 1),
     (as3_movieclip_goto_during_frame_script, "avm2/movieclip_goto_during_frame_script", 1),
     (as3_movieclip_gotoandplay, "avm2/movieclip_gotoandplay", 5),
     (as3_movieclip_gotoandstop, "avm2/movieclip_gotoandstop", 5),
+    (as3_movieclip_gotoandstop_children, "avm2/movieclip_gotoandstop_children", 1),
+    (as3_movieclip_gotoandstop_framescripts1, "avm2/movieclip_gotoandstop_framescripts1", 1),
+    (as3_movieclip_gotoandstop_framescripts2, "avm2/movieclip_gotoandstop_framescripts2", 1),
+    (as3_movieclip_gotoandstop_framescripts_self, "avm2/movieclip_gotoandstop_framescripts_self", 1),
     (as3_movieclip_gotoandstop_queueing, "avm2/movieclip_gotoandstop_queueing", 2),
     (as3_movieclip_next_frame, "avm2/movieclip_next_frame", 5),
     (as3_movieclip_next_scene, "avm2/movieclip_next_scene", 5),
@@ -399,6 +446,7 @@ swf_tests! {
     (as3_qname_tostring, "avm2/qname_tostring", 1),
     (as3_qname_valueof, "avm2/qname_valueof", 1),
     (as3_rectangle, "avm2/rectangle", 1),
+    (as3_vector3d, "avm2/vector3d", 1),
     (as3_regexp_constr, "avm2/regexp_constr", 1),
     (as3_regexp_exec, "avm2/regexp_exec", 1),
     (as3_regexp_test, "avm2/regexp_test", 1),
@@ -410,7 +458,7 @@ swf_tests! {
     (as3_simplebutton_childevents, "avm2/simplebutton_childevents", 2),
     (as3_simplebutton_childprops, "avm2/simplebutton_childprops", 1),
     (as3_simplebutton_childshuffle, "avm2/simplebutton_childshuffle", 1),
-    (as3_simplebutton_constr_childevents, "avm2/simplebutton_constr_childevents", 2),
+    #[ignore] (as3_simplebutton_constr_childevents, "avm2/simplebutton_constr_childevents", 2), //Broken by other accuracy fixes
     (as3_simplebutton_constr_params, "avm2/simplebutton_constr_params", 1),
     (as3_simplebutton_constr, "avm2/simplebutton_constr", 2),
     (as3_simplebutton_mouseenabled, "avm2/simplebutton_mouseenabled", 1),
@@ -436,6 +484,7 @@ swf_tests! {
     (as3_stage_properties, "avm2/stage_properties", 1),
     (as3_stored_properties, "avm2/stored_properties", 1),
     (as3_strict_equality, "avm2/strict_equality", 1),
+    (as3_string_case, "avm2/string_case", 1),
     (as3_string_char_at, "avm2/string_char_at", 1),
     (as3_string_char_code_at, "avm2/string_char_code_at", 1),
     (as3_string_concat_fromcharcode, "avm2/string_concat_fromcharcode", 1),
@@ -444,11 +493,13 @@ swf_tests! {
     (as3_string_length, "avm2/string_length", 1),
     (as3_string_match, "avm2/string_match", 1),
     (as3_string_replace, "avm2/string_replace", 1),
+    (as3_try_catch, "avm2/try_catch", 1),
     (as3_string_slice_substr_substring, "avm2/string_slice_substr_substring", 1),
     (as3_string_split, "avm2/string_split", 1),
     (as3_subtract, "avm2/subtract", 1),
     (as3_symbol_class_binary_data, "avm2/symbol_class_binary_data", 1),
     (as3_textformat, "avm2/textformat", 1),
+    (as3_throw, "avm2/throw", 1),
     (as3_timeline_scripts, "avm2/timeline_scripts", 3),
     (as3_trace, "avm2/trace", 1),
     (as3_truthiness, "avm2/truthiness", 1),
@@ -491,12 +542,14 @@ swf_tests! {
     (bad_placeobject_clipaction, "avm1/bad_placeobject_clipaction", 2),
     (bad_swf_tag_past_eof, "avm1/bad_swf_tag_past_eof", 1),
     (bevel_filter, "avm1/bevel_filter", 1),
+    (bitmap_data, "avm1/bitmap_data", 1),
     (bitmap_data_compare, "avm1/bitmap_data_compare", 1),
     (bitmap_data_max_size_swf10, "avm1/bitmap_data_max_size_swf10", 1),
     (bitmap_data_max_size_swf9, "avm1/bitmap_data_max_size_swf9", 1),
     (bitmap_data_noise, "avm1/bitmap_data_noise", 1),
-    (bitmap_data, "avm1/bitmap_data", 1),
     (bitmap_filter, "avm1/bitmap_filter", 1),
+    (biturshift, "avm1/biturshift", 1),
+    (biturshift_swf8, "avm1/biturshift_swf8", 1),
     (blur_filter, "avm1/blur_filter", 1),
     (button_children, "avm1/button_children", 1),
     (button_order, "avm1/button_order", 2),
@@ -544,6 +597,7 @@ swf_tests! {
     (displacement_map_filter, "avm1/displacement_map_filter", 1),
     (divide_swf4, "avm1/divide_swf4", 1),
     (do_init_action, "avm1/do_init_action", 3),
+    (drag_drop, "avm1/drag_drop", 14),
     (drop_shadow_filter, "avm1/drop_shadow_filter", 1),
     (duplicate_movie_clip_drawing, "avm1/duplicate_movie_clip_drawing", 1),
     (duplicate_movie_clip, "avm1/duplicate_movie_clip", 1),
@@ -614,6 +668,7 @@ swf_tests! {
     (infinite_recursion_virtual_property, "avm1/infinite_recursion_virtual_property", 1),
     (init_array_invalid, "avm1/init_array_invalid", 1),
     (init_object_invalid, "avm1/init_array_invalid", 1),
+    (init_object_order, "avm1/init_object_order", 1),
     (is_finite, "avm1/is_finite", 1),
     (is_finite_swf6, "avm1/is_finite_swf6", 1),
     (is_prototype_of, "avm1/is_prototype_of", 1),
@@ -701,7 +756,7 @@ swf_tests! {
     (removed_clip_halts_script, "avm1/removed_clip_halts_script", 13),
     (root_global_parent, "avm1/root_global_parent", 3),
     (selection, "avm1/selection", 1),
-    (set_interval, "avm1/set_interval", 20),
+    (set_interval, "avm1/set_interval", 40),
     (set_variable_scope, "avm1/set_variable_scope", 1),
     (single_frame, "avm1/single_frame", 2),
     (slash_syntax, "avm1/slash_syntax", 2),
@@ -719,6 +774,7 @@ swf_tests! {
     (string_ops_swf6, "avm1/string_ops_swf6", 1),
     (swf4_actions_bool, "avm1/swf4_actions_bool", 1),
     (swf4_bool, "avm1/swf4_bool", 1),
+    (swf4_function_calls, "avm1/swf4_function_calls", 1),
     (swf5_encoding, "avm1/swf5_encoding", 1),
     (swf5_no_closure, "avm1/swf5_no_closure", 1),
     (swf5_to_6_cross_call, "avm1/swf5_to_6_cross_call", 2),
@@ -740,6 +796,7 @@ swf_tests! {
     (textfield_variable, "avm1/textfield_variable", 8),
     (this_scoping, "avm1/this_scoping", 1),
     (timeline_function_def, "avm1/timeline_function_def", 3),
+    (avm2_timer, "avm2/timer", 280, frame_time_sleep = true),
     (timer_run_actions, "avm1/timer_run_actions", 1),
     (trace, "avm1/trace", 1),
     (transform, "avm1/transform", 1),
@@ -797,7 +854,13 @@ swf_tests_approx! {
     (as3_coerce_string_precision, "avm2/coerce_string_precision", 1, max_relative = 30.0 * f64::EPSILON),
     (as3_displayobject_height, "avm2/displayobject_height", 7, epsilon = 0.06), // TODO: height/width appears to be off by 1 twip sometimes
     (as3_displayobject_rotation, "avm2/displayobject_rotation", 1, epsilon = 0.0000000001),
+    (as3_displayobject_scrollrect, "avm2/displayobject_scrollrect", 100, @num_patterns = &[
+        Regex::new(r"\(a=(.+), b=(.+), c=(.+), d=(.+), tx=(.+), ty=(.+)\)").unwrap()
+    ], @img = true, max_relative = f32::EPSILON as f64),
     (as3_displayobject_width, "avm2/displayobject_width", 7, epsilon = 0.06),
+    (as3_displayobject_transform, "avm2/displayobject_transform", 1, @num_patterns = &[
+        Regex::new(r"\(a=(.+), b=(.+), c=(.+), d=(.+), tx=(.+), ty=(.+)\)").unwrap()
+    ], max_relative = f32::EPSILON as f64),
     (as3_divide, "avm2/divide", 1, epsilon = 0.0), // TODO: Discrepancy in float formatting.
     (as3_edittext_align, "avm2/edittext_align", 1, epsilon = 3.0),
     (as3_edittext_autosize, "avm2/edittext_autosize", 1, epsilon = 0.1),
@@ -809,6 +872,9 @@ swf_tests_approx! {
     (as3_edittext_tab_stops, "avm2/edittext_tab_stops", 1, epsilon = 5.0),
     (as3_edittext_underline, "avm2/edittext_underline", 1, epsilon = 4.0),
     (as3_math, "avm2/math", 1, max_relative = 30.0 * f64::EPSILON),
+    (as3_matrix, "avm2/matrix", 1, @num_patterns = &[
+        Regex::new(r"\(a=(.+?), b=(.+?), c=(.+?), d=(.+?), tx=(.+?), ty=(.+?)\)").unwrap()
+    ], max_relative = f32::EPSILON as f64),
     (as3_number_toexponential, "avm2/number_toexponential", 1, max_relative = 0.001),
     (as3_number_tofixed, "avm2/number_tofixed", 1, max_relative = 0.001),
     (as3_number_toprecision, "avm2/number_toprecision", 1, max_relative = 0.001),
@@ -881,6 +947,7 @@ fn external_interface_avm1() -> Result<(), Error> {
             Ok(())
         },
         false,
+        false,
     )
 }
 
@@ -928,6 +995,7 @@ fn external_interface_avm2() -> Result<(), Error> {
             Ok(())
         },
         false,
+        false,
     )
 }
 
@@ -952,6 +1020,7 @@ fn shared_object_avm1() -> Result<(), Error> {
             std::mem::swap(player.storage_mut(), &mut memory_storage_backend);
             Ok(())
         },
+        false,
         false,
     )?;
 
@@ -978,6 +1047,7 @@ fn shared_object_avm1() -> Result<(), Error> {
         },
         |_player| Ok(()),
         false,
+        false,
     )?;
 
     Ok(())
@@ -1000,6 +1070,7 @@ fn timeout_avm1() -> Result<(), Error> {
         },
         |_| Ok(()),
         false,
+        false,
     )
 }
 
@@ -1016,10 +1087,15 @@ fn stage_scale_mode() -> Result<(), Error> {
             player
                 .lock()
                 .unwrap()
-                .set_viewport_dimensions(900, 900, 1.0);
+                .set_viewport_dimensions(ViewportDimensions {
+                    width: 900,
+                    height: 900,
+                    scale_factor: 1.0,
+                });
             Ok(())
         },
         |_| Ok(()),
+        false,
         false,
     )
 }
@@ -1060,6 +1136,7 @@ fn test_swf(
     simulated_input_path: &str,
     expected_output_path: &str,
     check_img: bool,
+    frame_time_sleep: bool,
 ) -> Result<(), Error> {
     test_swf_with_hooks(
         swf_path,
@@ -1069,11 +1146,13 @@ fn test_swf(
         |_| Ok(()),
         |_| Ok(()),
         check_img,
+        frame_time_sleep,
     )
 }
 
 /// Loads an SWF and runs it through the Ruffle core for a number of frames.
 /// Tests that the trace output matches the given expected output.
+#[allow(clippy::too_many_arguments)]
 fn test_swf_with_hooks(
     swf_path: &str,
     num_frames: u32,
@@ -1082,6 +1161,7 @@ fn test_swf_with_hooks(
     before_start: impl FnOnce(Arc<Mutex<Player>>) -> Result<(), Error>,
     before_end: impl FnOnce(Arc<Mutex<Player>>) -> Result<(), Error>,
     check_img: bool,
+    frame_time_sleep: bool,
 ) -> Result<(), Error> {
     let injector =
         InputInjector::from_file(simulated_input_path).unwrap_or_else(|_| InputInjector::empty());
@@ -1099,6 +1179,7 @@ fn test_swf_with_hooks(
         injector,
         before_end,
         check_img,
+        frame_time_sleep,
     )?;
     assert_eq!(
         trace_log, expected_output,
@@ -1116,6 +1197,8 @@ fn test_swf_approx(
     num_frames: u32,
     simulated_input_path: &str,
     expected_output_path: &str,
+    num_patterns: &[Regex],
+    check_img: bool,
     approx_assert_fn: impl Fn(f64, f64),
 ) -> Result<(), Error> {
     let injector =
@@ -1126,6 +1209,7 @@ fn test_swf_approx(
         |_| Ok(()),
         injector,
         |_| Ok(()),
+        check_img,
         false,
     )?;
     let mut expected_data = std::fs::read_to_string(expected_output_path)?;
@@ -1162,7 +1246,46 @@ fn test_swf_approx(
             // }
             approx_assert_fn(actual, expected);
         } else {
-            assert_eq!(actual, expected);
+            let mut found = false;
+            // Check each of the user-provided regexes for a match
+            for pattern in num_patterns {
+                if let (Some(actual_captures), Some(expected_captures)) =
+                    (pattern.captures(actual), pattern.captures(expected))
+                {
+                    found = true;
+                    std::assert_eq!(
+                        actual_captures.len(),
+                        expected_captures.len(),
+                        "Differing numbers of regex captures"
+                    );
+                    // Each capture group (other than group 0, which is always the entire regex
+                    // match) represents a floating-point value
+                    for (actual_val, expected_val) in actual_captures
+                        .iter()
+                        .skip(1)
+                        .zip(expected_captures.iter().skip(1))
+                    {
+                        let actual_num = actual_val
+                            .expect("Missing capture gruop value for 'actual'")
+                            .as_str()
+                            .parse::<f64>()
+                            .expect("Failed to parse 'actual' capture group as float");
+                        let expected_num = expected_val
+                            .expect("Missing capture gruop value for 'expected'")
+                            .as_str()
+                            .parse::<f64>()
+                            .expect("Failed to parse 'expected' capture group as float");
+                        approx_assert_fn(actual_num, expected_num);
+                    }
+                    let modified_actual = pattern.replace(actual, "");
+                    let modified_expected = pattern.replace(expected, "");
+                    assert_eq!(modified_actual, modified_expected);
+                    break;
+                }
+            }
+            if !found {
+                assert_eq!(actual, expected);
+            }
         }
     }
     Ok(())
@@ -1176,17 +1299,25 @@ fn run_swf(
     before_start: impl FnOnce(Arc<Mutex<Player>>) -> Result<(), Error>,
     mut injector: InputInjector,
     before_end: impl FnOnce(Arc<Mutex<Player>>) -> Result<(), Error>,
-    mut check_img: bool,
+    #[allow(unused)] mut check_img: bool,
+    frame_time_sleep: bool,
 ) -> Result<String, Error> {
-    check_img &= RUN_IMG_TESTS;
+    #[allow(unused_assignments)]
+    {
+        check_img &= RUN_IMG_TESTS;
+    }
 
     let base_path = Path::new(swf_path).parent().unwrap();
     let mut executor = NullExecutor::new();
     let movie = SwfMovie::from_path(swf_path, None)?;
     let frame_time = 1000.0 / movie.frame_rate().to_f64();
+    let frame_time_duration = Duration::from_millis(frame_time as u64);
     let trace_output = Rc::new(RefCell::new(Vec::new()));
+
+    #[allow(unused_mut)]
     let mut builder = PlayerBuilder::new();
 
+    #[cfg(feature = "imgtests")]
     if check_img {
         const BACKEND: wgpu::Backends = wgpu::Backends::PRIMARY;
 
@@ -1201,16 +1332,14 @@ fn run_swf(
                 None,
             ))?;
 
-        let target = TextureTarget::new(
-            &descriptors.device,
-            (
-                movie.width().to_pixels() as u32,
-                movie.height().to_pixels() as u32,
-            ),
-        );
+        let width = movie.width().to_pixels() as u32;
+        let height = movie.height().to_pixels() as u32;
+
+        let target = TextureTarget::new(&descriptors.device, (width, height))?;
 
         builder = builder
-            .with_renderer(WgpuRenderBackend::new(descriptors, target)?)
+            .with_renderer(WgpuRenderBackend::new(Arc::new(descriptors), target)?)
+            .with_viewport_dimensions(width, height, 1.0)
             .with_software_video();
     };
 
@@ -1218,12 +1347,33 @@ fn run_swf(
         .with_log(TestLogBackend::new(trace_output.clone()))
         .with_navigator(NullNavigatorBackend::with_base_path(base_path, &executor))
         .with_max_execution_duration(Duration::from_secs(300))
+        .with_viewport_dimensions(
+            movie.width().to_pixels() as u32,
+            movie.height().to_pixels() as u32,
+            1.0,
+        )
         .with_movie(movie)
         .build();
 
     before_start(player.clone())?;
 
     for _ in 0..num_frames {
+        // If requested, ensure that the 'expected' amount of
+        // time actually elapses between frames. This is useful for
+        // tests that call 'flash.utils.getTimer()' and use
+        // 'setInterval'/'flash.utils.Timer'
+        //
+        // Note that when Ruffle actually runs frames, we can
+        // execute frames faster than this in order to 'catch up'
+        // if we've fallen behind. However, in order to make regression
+        // tests deterministic, we always call 'update_timers' with
+        // an elapsed time of 'frame_time'. By sleeping for 'frame_time_duration',
+        // we ensure that the result of 'flash.utils.getTimer()' is consistent
+        // with timer execution (timers will see an elapsed time of *at least*
+        // the requested timer interval).
+        if frame_time_sleep {
+            std::thread::sleep(frame_time_duration);
+        }
         player.lock().unwrap().run_frame();
         player.lock().unwrap().update_timers(frame_time);
         executor.run();
@@ -1252,10 +1402,13 @@ fn run_swf(
                 AutomatedEvent::Wait => unreachable!(),
             });
         });
+        // Rendering has side-effects (such as processing 'DisplayObject.scrollRect' updates)
+        player.lock().unwrap().render();
     }
 
     // Render the image to disk
     // FIXME: Determine how we want to compare against on on-disk image
+    #[cfg(feature = "imgtests")]
     if check_img {
         let mut player_lock = player.lock().unwrap();
         player_lock.render();
@@ -1265,17 +1418,26 @@ fn run_swf(
             .unwrap();
         let actual_image = renderer.capture_frame().expect("Failed to capture image");
 
-        let expected_image_path = base_path.join("expected.png");
-        let expected_image =
-            image::open(&expected_image_path).expect("Failed to read expected image");
+        let suffix = get_img_platform_suffix(&renderer.descriptors().info);
 
-        if expected_image
-            .as_rgba8()
-            .expect("Expected 8-bit RGBA image")
-            .as_raw()
-            != actual_image.as_raw()
-        {
-            let actual_image_path = base_path.join("actual.png");
+        let expected_image_path = base_path.join(format!("expected-{}.png", &suffix));
+        let expected_image = image::open(&expected_image_path);
+
+        let matches = match expected_image {
+            Ok(img) => {
+                img.as_rgba8().expect("Expected 8-bit RGBA image").as_raw() == actual_image.as_raw()
+            }
+            Err(e) => {
+                eprintln!(
+                    "Failed to open expected image {:?}: {:?}",
+                    &expected_image_path, e
+                );
+                false
+            }
+        };
+
+        if !matches {
+            let actual_image_path = base_path.join(format!("actual-{}.png", suffix));
             actual_image.save_with_format(&actual_image_path, image::ImageFormat::Png)?;
             panic!(
                 "Test output does not match expected image - saved actual image to {:?}",

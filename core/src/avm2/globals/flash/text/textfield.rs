@@ -3,15 +3,15 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::class::{Class, ClassAttributes};
 use crate::avm2::method::{Method, NativeMethodImpl};
-use crate::avm2::names::{Namespace, QName};
 use crate::avm2::object::{Object, TObject, TextFormatObject};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
+use crate::avm2::Namespace;
+use crate::avm2::QName;
 use crate::display_object::{AutoSizeMode, EditText, TDisplayObject, TextSelection};
 use crate::html::TextFormat;
 use crate::string::AvmString;
 use crate::tag_utils::SwfMovie;
-use crate::vminterface::AvmType;
 use gc_arena::{GcCell, MutationContext};
 use std::sync::Arc;
 
@@ -26,12 +26,6 @@ pub fn instance_init<'gc>(
 
         if this.as_display_object().is_none() {
             let movie = Arc::new(SwfMovie::empty(activation.context.swf.version()));
-            let movie_library = activation
-                .context
-                .library
-                .library_for_movie_mut(movie.clone());
-            movie_library.force_avm_type(AvmType::Avm2);
-
             let new_do = EditText::new(&mut activation.context, movie, 0.0, 0.0, 100.0, 100.0);
 
             this.init_display_object(activation.context.gc_context, new_do.into());
@@ -379,7 +373,7 @@ pub fn set_html_text<'gc>(
             .coerce_to_string(activation)?;
 
         this.set_is_html(&mut activation.context, true);
-        this.set_html_text(&html_text, &mut activation.context)?;
+        this.set_html_text(&html_text, &mut activation.context);
     }
 
     Ok(Value::Undefined)
@@ -502,7 +496,7 @@ pub fn set_text<'gc>(
             .coerce_to_string(activation)?;
 
         this.set_is_html(&mut activation.context, false);
-        this.set_text(&text, &mut activation.context)?;
+        this.set_text(&text, &mut activation.context);
     }
 
     Ok(Value::Undefined)
@@ -880,6 +874,24 @@ pub fn set_text_format<'gc>(
     Ok(Value::Undefined)
 }
 
+pub fn anti_alias_type<'gc>(
+    _activation: &mut Activation<'_, 'gc, '_>,
+    _this: Option<Object<'gc>>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error> {
+    log::warn!("TextField.antiAliasType getter: not yet implemented");
+    Ok(Value::Undefined)
+}
+
+pub fn set_anti_alias_type<'gc>(
+    _activation: &mut Activation<'_, 'gc, '_>,
+    _this: Option<Object<'gc>>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error> {
+    log::warn!("TextField.antiAliasType setter: not yet implemented");
+    Ok(Value::Undefined)
+}
+
 /// Construct `TextField`'s class.
 pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>> {
     let class = Class::new(
@@ -929,6 +941,11 @@ pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>
         ("textWidth", Some(text_width), None),
         ("type", Some(get_type), Some(set_type)),
         ("wordWrap", Some(word_wrap), Some(set_word_wrap)),
+        (
+            "antiAliasType",
+            Some(anti_alias_type),
+            Some(set_anti_alias_type),
+        ),
     ];
     write.define_public_builtin_instance_properties(mc, PUBLIC_INSTANCE_PROPERTIES);
 

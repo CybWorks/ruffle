@@ -3,11 +3,13 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::class::Class;
 use crate::avm2::method::{Method, NativeMethodImpl};
-use crate::avm2::names::{Multiname, Namespace, QName};
 use crate::avm2::object::{FunctionObject, Object, TObject};
 use crate::avm2::traits::Trait;
 use crate::avm2::value::Value;
 use crate::avm2::Error;
+use crate::avm2::Multiname;
+use crate::avm2::Namespace;
+use crate::avm2::QName;
 use gc_arena::{GcCell, MutationContext};
 
 /// Implements `Object`'s instance initializer.
@@ -137,29 +139,21 @@ pub fn class_init<'gc>(
             activation,
         )?;
 
-        object_proto.set_local_property_is_enumerable(
-            gc_context,
-            "hasOwnProperty".into(),
-            false,
-        )?;
+        object_proto.set_local_property_is_enumerable(gc_context, "hasOwnProperty".into(), false);
         object_proto.set_local_property_is_enumerable(
             gc_context,
             "propertyIsEnumerable".into(),
             false,
-        )?;
+        );
         object_proto.set_local_property_is_enumerable(
             gc_context,
             "setPropertyIsEnumerable".into(),
             false,
-        )?;
-        object_proto.set_local_property_is_enumerable(gc_context, "isPrototypeOf".into(), false)?;
-        object_proto.set_local_property_is_enumerable(gc_context, "toString".into(), false)?;
-        object_proto.set_local_property_is_enumerable(
-            gc_context,
-            "toLocaleString".into(),
-            false,
-        )?;
-        object_proto.set_local_property_is_enumerable(gc_context, "valueOf".into(), false)?;
+        );
+        object_proto.set_local_property_is_enumerable(gc_context, "isPrototypeOf".into(), false);
+        object_proto.set_local_property_is_enumerable(gc_context, "toString".into(), false);
+        object_proto.set_local_property_is_enumerable(gc_context, "toLocaleString".into(), false);
+        object_proto.set_local_property_is_enumerable(gc_context, "valueOf".into(), false);
     }
 
     Ok(Value::Undefined)
@@ -258,7 +252,7 @@ pub fn set_property_is_enumerable<'gc>(
     let name = name?.coerce_to_string(activation)?;
 
     if let Some(Value::Bool(is_enum)) = args.get(1) {
-        this.set_local_property_is_enumerable(activation.context.gc_context, name, *is_enum)?;
+        this.set_local_property_is_enumerable(activation.context.gc_context, name, *is_enum);
     }
 
     Ok(Value::Undefined)

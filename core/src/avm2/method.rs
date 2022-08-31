@@ -1,11 +1,11 @@
 //! AVM2 methods
 
 use crate::avm2::activation::Activation;
-use crate::avm2::names::Multiname;
 use crate::avm2::object::Object;
 use crate::avm2::script::TranslationUnit;
 use crate::avm2::value::{abc_default_value, Value};
 use crate::avm2::Error;
+use crate::avm2::Multiname;
 use crate::string::AvmString;
 use gc_arena::{Collect, CollectionContext, Gc, MutationContext};
 use std::borrow::Cow;
@@ -351,6 +351,18 @@ impl<'gc> Method<'gc> {
                 is_variadic: true,
             },
         ))
+    }
+
+    /// Access the bytecode of this method.
+    ///
+    /// This function returns `Err` if there is no bytecode for this method.
+    pub fn into_bytecode(self) -> Result<Gc<'gc, BytecodeMethod<'gc>>, Error> {
+        match self {
+            Method::Native { .. } => {
+                Err("Attempted to unwrap a native method as a user-defined one".into())
+            }
+            Method::Bytecode(bm) => Ok(bm),
+        }
     }
 
     /// Check if this method needs `arguments`.

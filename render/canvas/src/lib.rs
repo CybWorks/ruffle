@@ -1,21 +1,21 @@
 use fnv::FnvHashMap;
-use ruffle_core::backend::render::{
-    swf, Bitmap, BitmapFormat, BitmapHandle, BitmapSource, Color, NullBitmapSource, RenderBackend,
-    ShapeHandle, Transform,
-};
-use ruffle_core::color_transform::ColorTransform;
-use ruffle_core::matrix::Matrix;
-use ruffle_core::shape_utils::{DistilledShape, DrawCommand, LineScaleMode, LineScales};
+use ruffle_render::backend::null::NullBitmapSource;
+use ruffle_render::backend::{RenderBackend, ShapeHandle, ViewportDimensions};
+use ruffle_render::bitmap::{Bitmap, BitmapFormat, BitmapHandle, BitmapSource};
+use ruffle_render::color_transform::ColorTransform;
+use ruffle_render::error::Error;
+use ruffle_render::matrix::Matrix;
+use ruffle_render::shape_utils::{DistilledShape, DrawCommand, LineScaleMode, LineScales};
+use ruffle_render::transform::Transform;
 use ruffle_web_common::{JsError, JsResult};
-use wasm_bindgen::{Clamped, JsCast};
+use swf::{BlendMode, Color};
+use wasm_bindgen::{Clamped, JsCast, JsValue};
 use web_sys::{
     CanvasGradient, CanvasPattern, CanvasRenderingContext2d, CanvasWindingRule, DomMatrix, Element,
     HtmlCanvasElement, ImageData, Path2d,
 };
 
 const GRADIENT_TRANSFORM_THRESHOLD: f32 = 0.0001;
-
-type Error = Box<dyn std::error::Error>;
 
 pub struct WebCanvasRenderBackend {
     canvas: HtmlCanvasElement,
@@ -28,6 +28,11 @@ pub struct WebCanvasRenderBackend {
     rect: Path2d,
     mask_state: MaskState,
     next_bitmap_handle: BitmapHandle,
+    blend_modes: Vec<BlendMode>,
+
+    // This is currnetly unused - we just store it to report
+    // in `get_viewport_dimensions`
+    viewport_scale_factor: f64,
 }
 
 /// Canvas-drawable shape data extracted from an SWF file.
@@ -133,7 +138,7 @@ struct BitmapData {
 
 impl BitmapData {
     /// Puts the image data into a newly created <canvas>, and caches it.
-    fn new(bitmap: Bitmap) -> Result<Self, Error> {
+    fn new(bitmap: Bitmap) -> Result<Self, JsValue> {
         let bitmap = bitmap.to_rgba();
         let image_data =
             ImageData::new_with_u8_clamped_array(Clamped(bitmap.data()), bitmap.width())
@@ -285,9 +290,11 @@ impl WebCanvasRenderBackend {
             bitmaps: Default::default(),
             viewport_width: 0,
             viewport_height: 0,
+            viewport_scale_factor: 1.0,
             rect,
             mask_state: MaskState::DrawContent,
             next_bitmap_handle: BitmapHandle(0),
+            blend_modes: vec![BlendMode::Normal],
         };
         Ok(renderer)
     }
@@ -344,12 +351,47 @@ impl WebCanvasRenderBackend {
         self.context.set_filter("none");
         self.context.set_global_alpha(1.0);
     }
+
+    fn apply_blend_mode(&mut self, blend: BlendMode) {
+        // TODO: Objects with a blend mode need to be rendered to an intermediate buffer first,
+        // but for now we render each child directly to the canvas. This should look reasonable for most
+        // common cases.
+        // While canvas has built in support for most of the blend modes, a few aren't supported.
+        let mode = match blend {
+            BlendMode::Normal => "source-over",
+            BlendMode::Layer => "source-over", // Requires intermediate buffer.
+            BlendMode::Multiply => "multiply",
+            BlendMode::Screen => "screen",
+            BlendMode::Lighten => "lighten",
+            BlendMode::Darken => "darken",
+            BlendMode::Difference => "difference",
+            BlendMode::Add => "lighter",
+            BlendMode::Subtract => "difference", // Not exposed by canvas, rendered as difference.
+            BlendMode::Invert => "source-over",  // Not exposed by canvas.
+            BlendMode::Alpha => "source-over",   // Requires intermediate buffer.
+            BlendMode::Erase => "source-over",   // Requires intermediate buffer.
+            BlendMode::Overlay => "overlay",
+            BlendMode::HardLight => "hard-light",
+        };
+        self.context
+            .set_global_composite_operation(mode)
+            .expect("Failed to update BlendMode");
+    }
 }
 
 impl RenderBackend for WebCanvasRenderBackend {
-    fn set_viewport_dimensions(&mut self, width: u32, height: u32) {
-        self.viewport_width = width;
-        self.viewport_height = height;
+    fn set_viewport_dimensions(&mut self, dimensions: ViewportDimensions) {
+        self.viewport_width = dimensions.width;
+        self.viewport_height = dimensions.height;
+        self.viewport_scale_factor = dimensions.scale_factor;
+    }
+
+    fn viewport_dimensions(&self) -> ViewportDimensions {
+        ViewportDimensions {
+            width: self.viewport_width,
+            height: self.viewport_height,
+            scale_factor: self.viewport_scale_factor,
+        }
     }
 
     fn register_shape(
@@ -376,7 +418,7 @@ impl RenderBackend for WebCanvasRenderBackend {
     }
 
     fn register_glyph_shape(&mut self, glyph: &swf::Glyph) -> ShapeHandle {
-        let shape = ruffle_core::shape_utils::swf_glyph_to_shape(glyph);
+        let shape = ruffle_render::shape_utils::swf_glyph_to_shape(glyph);
         self.register_shape((&shape).into(), &NullBitmapSource)
     }
 
@@ -672,6 +714,22 @@ impl RenderBackend for WebCanvasRenderBackend {
         }
     }
 
+    fn push_blend_mode(&mut self, blend: BlendMode) {
+        if Some(&blend) != self.blend_modes.last() {
+            self.apply_blend_mode(blend);
+        }
+        self.blend_modes.push(blend);
+    }
+
+    fn pop_blend_mode(&mut self) {
+        let old = self.blend_modes.pop();
+        // We should never pop our base 'BlendMode::Normal'
+        let current = *self.blend_modes.last().unwrap();
+        if old != Some(current) {
+            self.apply_blend_mode(current);
+        }
+    }
+
     fn get_bitmap_pixels(&mut self, bitmap: BitmapHandle) -> Option<Bitmap> {
         let bitmap = &self.bitmaps[&bitmap];
         bitmap.get_pixels()
@@ -680,14 +738,13 @@ impl RenderBackend for WebCanvasRenderBackend {
     fn register_bitmap(&mut self, bitmap: Bitmap) -> Result<BitmapHandle, Error> {
         let handle = self.next_bitmap_handle;
         self.next_bitmap_handle = BitmapHandle(self.next_bitmap_handle.0 + 1);
-        let bitmap_data = BitmapData::new(bitmap)?;
+        let bitmap_data = BitmapData::new(bitmap).map_err(Error::JavascriptError)?;
         self.bitmaps.insert(handle, bitmap_data);
         Ok(handle)
     }
 
-    fn unregister_bitmap(&mut self, bitmap: BitmapHandle) -> Result<(), Error> {
+    fn unregister_bitmap(&mut self, bitmap: BitmapHandle) {
         self.bitmaps.remove(&bitmap);
-        Ok(())
     }
 
     fn update_texture(
@@ -701,7 +758,8 @@ impl RenderBackend for WebCanvasRenderBackend {
         // in case it is already stored as a canvas+context.
         self.bitmaps.insert(
             handle,
-            BitmapData::new(Bitmap::new(width, height, BitmapFormat::Rgba, rgba))?,
+            BitmapData::new(Bitmap::new(width, height, BitmapFormat::Rgba, rgba))
+                .map_err(Error::JavascriptError)?,
         );
         Ok(handle)
     }
@@ -741,7 +799,7 @@ fn swf_shape_to_canvas_commands(
     bitmaps: &FnvHashMap<BitmapHandle, BitmapData>,
     context: &CanvasRenderingContext2d,
 ) -> ShapeData {
-    use ruffle_core::shape_utils::DrawPath;
+    use ruffle_render::shape_utils::DrawPath;
     use swf::{FillStyle, LineCapStyle, LineJoinStyle};
 
     // Some browsers will vomit if you try to load/draw an image with 0 width/height.
@@ -796,7 +854,7 @@ fn swf_shape_to_canvas_commands(
                         is_smoothed,
                         is_repeating,
                     } => {
-                        let bitmap = if let Ok(bitmap) = create_bitmap_pattern(
+                        let bitmap = if let Some(bitmap) = create_bitmap_pattern(
                             *id,
                             *matrix,
                             *is_smoothed,
@@ -847,7 +905,7 @@ fn swf_shape_to_canvas_commands(
                         is_smoothed,
                         is_repeating,
                     } => {
-                        let bitmap = if let Ok(bitmap) = create_bitmap_pattern(
+                        let bitmap = if let Some(bitmap) = create_bitmap_pattern(
                             *id,
                             *matrix,
                             *is_smoothed,
@@ -1099,7 +1157,7 @@ fn create_bitmap_pattern(
     bitmap_source: &dyn BitmapSource,
     bitmaps: &FnvHashMap<BitmapHandle, BitmapData>,
     context: &CanvasRenderingContext2d,
-) -> Result<CanvasBitmap, Error> {
+) -> Option<CanvasBitmap> {
     if let Some(bitmap) = bitmap_source
         .bitmap(id)
         .and_then(|bitmap| bitmaps.get(&bitmap.handle))
@@ -1117,18 +1175,18 @@ fn create_bitmap_pattern(
             Ok(Some(pattern)) => pattern,
             _ => {
                 log::warn!("Unable to create bitmap pattern for bitmap ID {}", id);
-                return Err("Unable to create bitmap pattern".into());
+                return None;
             }
         };
         pattern.set_transform(matrix.to_dom_matrix().unchecked_ref());
-        Ok(CanvasBitmap {
+        Some(CanvasBitmap {
             pattern,
             matrix: matrix.into(),
             smoothed: is_smoothed,
         })
     } else {
         log::warn!("Couldn't fill shape with unknown bitmap {}", id);
-        Err("Unable to create bitmap pattern".into())
+        None
     }
 }
 

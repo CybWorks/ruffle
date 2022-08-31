@@ -3,10 +3,12 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::class::Class;
 use crate::avm2::method::{Method, NativeMethodImpl};
-use crate::avm2::names::{Multiname, Namespace, QName};
 use crate::avm2::object::{primitive_allocator, FunctionObject, Object, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
+use crate::avm2::Multiname;
+use crate::avm2::Namespace;
+use crate::avm2::QName;
 use gc_arena::{GcCell, MutationContext};
 
 /// Implements `Boolean`'s instance initializer.
@@ -80,8 +82,8 @@ fn class_init<'gc>(
             .into(),
             activation,
         )?;
-        boolean_proto.set_local_property_is_enumerable(gc_context, "toString".into(), false)?;
-        boolean_proto.set_local_property_is_enumerable(gc_context, "valueOf".into(), false)?;
+        boolean_proto.set_local_property_is_enumerable(gc_context, "toString".into(), false);
+        boolean_proto.set_local_property_is_enumerable(gc_context, "valueOf".into(), false);
     }
 
     Ok(Value::Undefined)

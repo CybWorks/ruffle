@@ -31,7 +31,7 @@ pub fn function<'gc>(
         Ok(arg.to_owned())
     } else {
         // Calling `Function()` seems to give a prototypeless bare object.
-        Ok(ScriptObject::object(activation.context.gc_context, None).into())
+        Ok(ScriptObject::new(activation.context.gc_context, None).into())
     }
 }
 
@@ -117,8 +117,12 @@ pub fn apply<'gc>(
 /// returned object is also a bare object, which will need to be linked into
 /// the prototype of `Object`.
 pub fn create_proto<'gc>(gc_context: MutationContext<'gc, '_>, proto: Object<'gc>) -> Object<'gc> {
-    let function_proto = ScriptObject::object_cell(gc_context, Some(proto));
-    let object = function_proto.as_script_object().unwrap();
-    define_properties_on(PROTO_DECLS, gc_context, object, function_proto);
-    function_proto
+    let function_proto = ScriptObject::new(gc_context, Some(proto));
+    define_properties_on(
+        PROTO_DECLS,
+        gc_context,
+        function_proto,
+        function_proto.into(),
+    );
+    function_proto.into()
 }

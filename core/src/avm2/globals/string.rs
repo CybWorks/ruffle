@@ -3,11 +3,12 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::class::{Class, ClassAttributes};
 use crate::avm2::method::{Method, NativeMethodImpl};
-use crate::avm2::names::{Namespace, QName};
 use crate::avm2::object::{primitive_allocator, Object, TObject};
 use crate::avm2::regexp::RegExpFlags;
 use crate::avm2::value::Value;
 use crate::avm2::Error;
+use crate::avm2::Namespace;
+use crate::avm2::QName;
 use crate::avm2::{ArrayObject, ArrayStorage};
 use crate::string::{AvmString, WString};
 use gc_arena::{GcCell, MutationContext};
@@ -496,6 +497,46 @@ fn substring<'gc>(
     Ok(Value::Undefined)
 }
 
+/// Implements `String.toLowerCase`
+fn to_lower_case<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    this: Option<Object<'gc>>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error> {
+    if let Some(this) = this {
+        let this_val = Value::from(this);
+        let this = this_val.coerce_to_string(activation)?;
+        return Ok(AvmString::new(
+            activation.context.gc_context,
+            this.iter()
+                .map(crate::string::utils::swf_to_lowercase)
+                .collect::<WString>(),
+        )
+        .into());
+    }
+    Ok(Value::Undefined)
+}
+
+/// Implements `String.toUpperCase`
+fn to_upper_case<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    this: Option<Object<'gc>>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error> {
+    if let Some(this) = this {
+        let this_val = Value::from(this);
+        let this = this_val.coerce_to_string(activation)?;
+        return Ok(AvmString::new(
+            activation.context.gc_context,
+            this.iter()
+                .map(crate::string::utils::swf_to_uppercase)
+                .collect::<WString>(),
+        )
+        .into());
+    }
+    Ok(Value::Undefined)
+}
+
 /// Construct `String`'s class.
 pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>> {
     let class = Class::new(
@@ -529,6 +570,8 @@ pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>
         ("split", split),
         ("substr", substr),
         ("substring", substring),
+        ("toLowerCase", to_lower_case),
+        ("toUpperCase", to_upper_case),
     ];
     write.define_as3_builtin_instance_methods(mc, AS3_INSTANCE_METHODS);
 

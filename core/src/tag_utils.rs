@@ -1,9 +1,29 @@
-use crate::vminterface::AvmType;
 use gc_arena::Collect;
 use std::sync::Arc;
-use swf::{Fixed8, HeaderExt, Rectangle, TagCode, Twips};
+use swf::{CharacterId, Fixed8, HeaderExt, Rectangle, TagCode, Twips};
+use thiserror::Error;
 
-pub type Error = Box<dyn std::error::Error>;
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("Couldn't read SWF")]
+    InvalidSwf(#[from] swf::error::Error),
+
+    #[error("Couldn't register bitmap")]
+    InvalidBitmap(#[from] ruffle_render::error::Error),
+
+    #[error("Attempted to set symbol classes on movie without any")]
+    NoSymbolClasses,
+
+    #[error("Attempted to preload video frames into non-video character {0}")]
+    PreloadVideoIntoInvalidCharacter(CharacterId),
+
+    #[error("IO Error")]
+    IOError(#[from] std::io::Error),
+
+    #[error("Invalid SWF url")]
+    InvalidSwfUrl,
+}
+
 pub type DecodeResult = Result<(), Error>;
 pub type SwfStream<'a> = swf::read::Reader<'a>;
 
@@ -58,7 +78,7 @@ impl SwfMovie {
         let data = std::fs::read(&path)?;
 
         let abs_path = path.as_ref().canonicalize()?;
-        let url = url::Url::from_file_path(abs_path).map_err(|()| "Invalid SWF URL")?;
+        let url = url::Url::from_file_path(abs_path).map_err(|()| Error::InvalidSwfUrl)?;
 
         Self::from_data(&data, Some(url.into()), loader_url)
     }
@@ -140,12 +160,8 @@ impl SwfMovie {
         self.header.uncompressed_len()
     }
 
-    pub fn avm_type(&self) -> AvmType {
-        if self.header.is_action_script_3() {
-            AvmType::Avm2
-        } else {
-            AvmType::Avm1
-        }
+    pub fn is_action_script_3(&self) -> bool {
+        self.header.is_action_script_3()
     }
 
     pub fn stage_size(&self) -> &Rectangle {
@@ -200,22 +216,28 @@ impl SwfSlice {
         }
     }
 
+    /// Creates an empty SwfSlice of the same movie.
+    #[inline]
+    pub fn copy_empty(&self) -> Self {
+        Self::empty(self.movie.clone())
+    }
+
     /// Construct a new SwfSlice from a regular slice.
     ///
     /// This function returns None if the given slice is not a subslice of the
     /// current slice.
-    pub fn to_subslice(&self, slice: &[u8]) -> Option<Self> {
+    pub fn to_subslice(&self, slice: &[u8]) -> Self {
         let self_pval = self.movie.data().as_ptr() as usize;
         let slice_pval = slice.as_ptr() as usize;
 
         if (self_pval + self.start) <= slice_pval && slice_pval < (self_pval + self.end) {
-            Some(Self {
+            Self {
                 movie: self.movie.clone(),
                 start: slice_pval - self_pval,
                 end: (slice_pval - self_pval) + slice.len(),
-            })
+            }
         } else {
-            None
+            self.copy_empty()
         }
     }
 
@@ -223,19 +245,19 @@ impl SwfSlice {
     ///
     /// This function allows subslices outside the current slice to be formed,
     /// as long as they are valid subslices of the movie itself.
-    pub fn to_unbounded_subslice(&self, slice: &[u8]) -> Option<Self> {
+    pub fn to_unbounded_subslice(&self, slice: &[u8]) -> Self {
         let self_pval = self.movie.data().as_ptr() as usize;
         let self_len = self.movie.data().len();
         let slice_pval = slice.as_ptr() as usize;
 
         if self_pval <= slice_pval && slice_pval < (self_pval + self_len) {
-            Some(Self {
+            Self {
                 movie: self.movie.clone(),
                 start: slice_pval - self_pval,
                 end: (slice_pval - self_pval) + slice.len(),
-            })
+            }
         } else {
-            None
+            self.copy_empty()
         }
     }
 
@@ -248,8 +270,8 @@ impl SwfSlice {
     /// The returned slice may or may not be a subslice of the current slice.
     /// If the resulting slice would be outside the bounds of the underlying
     /// movie, or the given reader refers to a different underlying movie, this
-    /// function returns None.
-    pub fn resize_to_reader(&self, reader: &mut SwfStream<'_>, size: usize) -> Option<Self> {
+    /// function returns an empty slice.
+    pub fn resize_to_reader(&self, reader: &mut SwfStream<'_>, size: usize) -> Self {
         if self.movie.data().as_ptr() as usize <= reader.get_ref().as_ptr() as usize
             && (reader.get_ref().as_ptr() as usize)
                 < self.movie.data().as_ptr() as usize + self.movie.data().len()
@@ -262,33 +284,37 @@ impl SwfSlice {
             let len = self.movie.data().len();
 
             if new_start < len && new_end < len {
-                Some(Self {
+                Self {
                     movie: self.movie.clone(),
                     start: new_start,
                     end: new_end,
-                })
+                }
             } else {
-                None
+                self.copy_empty()
             }
         } else {
-            None
+            self.copy_empty()
         }
     }
 
     /// Construct a new SwfSlice from a start and an end.
     ///
     /// The start and end values will be relative to the current slice.
-    /// Furthermore, this function will yield None if the calculated slice
+    /// Furthermore, this function will yield an empty slice if the calculated slice
     /// would be invalid (e.g. negative length) or would extend past the end of
     /// the current slice.
-    pub fn to_start_and_end(&self, start: usize, end: usize) -> Option<Self> {
+    pub fn to_start_and_end(&self, start: usize, end: usize) -> Self {
         let new_start = self.start + start;
         let new_end = self.start + end;
 
         if new_start <= new_end {
-            self.to_subslice(self.movie.data().get(new_start..new_end)?)
+            if let Some(result) = self.movie.data().get(new_start..new_end) {
+                self.to_subslice(result)
+            } else {
+                self.copy_empty()
+            }
         } else {
-            None
+            self.copy_empty()
         }
     }
 
@@ -300,6 +326,11 @@ impl SwfSlice {
     /// Get the version of the SWF this data comes from.
     pub fn version(&self) -> u8 {
         self.movie.header().version()
+    }
+
+    /// Checks if this slice is empty
+    pub fn is_empty(&self) -> bool {
+        self.end == self.start
     }
 
     /// Construct a reader for this slice.

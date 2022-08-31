@@ -2,13 +2,15 @@
 use crate::avm1::{
     Avm1, Object as Avm1Object, StageObject, TObject as Avm1TObject, Value as Avm1Value,
 };
+use crate::avm2::object::LoaderInfoObject;
+use crate::avm2::object::LoaderStream;
 use crate::avm2::Activation as Avm2Activation;
 use crate::avm2::{
     Avm2, ClassObject as Avm2ClassObject, Error as Avm2Error, Namespace as Avm2Namespace,
     Object as Avm2Object, QName as Avm2QName, StageObject as Avm2StageObject,
     TObject as Avm2TObject, Value as Avm2Value,
 };
-use crate::backend::audio::{PreloadStreamHandle, SoundHandle, SoundInstanceHandle};
+use crate::backend::audio::{SoundHandle, SoundInstanceHandle};
 use crate::backend::ui::MouseCursor;
 use bitflags::bitflags;
 
@@ -30,10 +32,11 @@ use crate::display_object::{
 use crate::drawing::Drawing;
 use crate::events::{ButtonKeyCode, ClipEvent, ClipEventResult};
 use crate::font::Font;
+use crate::frame_lifecycle::catchup_display_object_to_frame;
 use crate::prelude::*;
 use crate::string::{AvmString, WStr, WString};
-use crate::tag_utils::{self, DecodeResult, SwfMovie, SwfSlice, SwfStream};
-use crate::vminterface::{AvmObject, AvmType, Instantiator};
+use crate::tag_utils::{self, DecodeResult, Error, SwfMovie, SwfSlice, SwfStream};
+use crate::vminterface::{AvmObject, Instantiator};
 use gc_arena::{Collect, Gc, GcCell, MutationContext};
 use smallvec::SmallVec;
 use std::cell::{Ref, RefMut};
@@ -98,6 +101,13 @@ pub struct MovieClipData<'gc> {
     queued_script_frame: Option<FrameNumber>,
     queued_goto_frame: Option<FrameNumber>,
     drop_target: Option<DisplayObject<'gc>>,
+
+    /// The tag stream start and stop positions for each frame in the clip.
+    #[cfg(feature = "timeline_debug")]
+    tag_frame_boundaries: HashMap<FrameNumber, (u64, u64)>,
+
+    /// List of tags queued up for the current frame.
+    queued_tags: HashMap<Depth, QueuedTagList>,
 }
 
 impl<'gc> MovieClip<'gc> {
@@ -127,6 +137,10 @@ impl<'gc> MovieClip<'gc> {
                 queued_script_frame: None,
                 queued_goto_frame: None,
                 drop_target: None,
+
+                #[cfg(feature = "timeline_debug")]
+                tag_frame_boundaries: Default::default(),
+                queued_tags: HashMap::new(),
             },
         ))
     }
@@ -162,10 +176,15 @@ impl<'gc> MovieClip<'gc> {
                 queued_script_frame: None,
                 queued_goto_frame: None,
                 drop_target: None,
+
+                #[cfg(feature = "timeline_debug")]
+                tag_frame_boundaries: Default::default(),
+                queued_tags: HashMap::new(),
             },
         ))
     }
 
+    /// Constructs a non-root movie
     pub fn new_with_data(
         gc_context: MutationContext<'gc, '_>,
         id: CharacterId,
@@ -178,7 +197,7 @@ impl<'gc> MovieClip<'gc> {
                 base: Default::default(),
                 static_data: Gc::allocate(
                     gc_context,
-                    MovieClipStatic::with_data(id, swf, num_frames, gc_context),
+                    MovieClipStatic::with_data(id, swf, num_frames, None, gc_context),
                 ),
                 tag_stream_pos: 0,
                 current_frame: 0,
@@ -200,20 +219,46 @@ impl<'gc> MovieClip<'gc> {
                 queued_script_frame: None,
                 queued_goto_frame: None,
                 drop_target: None,
+
+                #[cfg(feature = "timeline_debug")]
+                tag_frame_boundaries: Default::default(),
+                queued_tags: HashMap::new(),
             },
         ))
     }
 
-    /// Construct a movie clip that represents an entire movie.
-    pub fn from_movie(gc_context: MutationContext<'gc, '_>, movie: Arc<SwfMovie>) -> Self {
+    /// Construct a movie clip that represents the root movie
+    /// for the entire `Player`.
+    pub fn player_root_movie(
+        activation: &mut Avm2Activation<'_, 'gc, '_>,
+        movie: Arc<SwfMovie>,
+    ) -> Self {
         let num_frames = movie.num_frames();
+
+        let loader_info = if movie.is_action_script_3() {
+            // The root movie doesn't have a `Loader`
+            // We will replace this with a `LoaderStream::Swf` later in this function
+            Some(
+                LoaderInfoObject::not_yet_loaded(activation, movie.clone(), None)
+                    .expect("Failed to construct LoaderInfoObject"),
+            )
+        } else {
+            None
+        };
+
         let mc = MovieClip(GcCell::allocate(
-            gc_context,
+            activation.context.gc_context,
             MovieClipData {
                 base: Default::default(),
                 static_data: Gc::allocate(
-                    gc_context,
-                    MovieClipStatic::with_data(0, movie.into(), num_frames, gc_context),
+                    activation.context.gc_context,
+                    MovieClipStatic::with_data(
+                        0,
+                        movie.clone().into(),
+                        num_frames,
+                        loader_info,
+                        activation.context.gc_context,
+                    ),
                 ),
                 tag_stream_pos: 0,
                 current_frame: 0,
@@ -235,25 +280,71 @@ impl<'gc> MovieClip<'gc> {
                 queued_script_frame: None,
                 queued_goto_frame: None,
                 drop_target: None,
+
+                #[cfg(feature = "timeline_debug")]
+                tag_frame_boundaries: Default::default(),
+                queued_tags: HashMap::new(),
             },
         ));
-        mc.set_is_root(gc_context, true);
+
+        if movie.is_action_script_3() {
+            mc.0.read()
+                .static_data
+                .loader_info
+                .as_ref()
+                .unwrap()
+                .as_loader_info_object()
+                .unwrap()
+                .set_loader_stream(
+                    LoaderStream::Swf(movie, mc.into()),
+                    activation.context.gc_context,
+                );
+        }
+        mc.set_is_root(activation.context.gc_context, true);
         mc
     }
 
-    /// Replace the current MovieClip with a completely new SwfMovie.
+    /// Replace the current MovieClipData with a completely new SwfMovie.
     ///
     /// Playback will start at position zero, any existing streamed audio will
-    /// be terminated, and so on. Children and AVM data will be kept across the
-    /// load boundary.
+    /// be terminated, and so on. Children and AVM data will NOT be kept across
+    /// the load boundary.
+    ///
+    /// If no movie is provided, then the movie clip will be replaced with an
+    /// empty movie of the same SWF version.
     pub fn replace_with_movie(
         &mut self,
-        gc_context: MutationContext<'gc, '_>,
+        context: &mut UpdateContext<'_, 'gc, '_>,
         movie: Option<Arc<SwfMovie>>,
+        loader_info: Option<LoaderInfoObject<'gc>>,
     ) {
-        self.0
-            .write(gc_context)
-            .replace_with_movie(gc_context, movie)
+        let mut mc = self.0.write(context.gc_context);
+        let is_swf = movie.is_some();
+        let movie = movie.unwrap_or_else(|| Arc::new(SwfMovie::empty(mc.movie().version())));
+        let total_frames = movie.num_frames();
+        assert_eq!(
+            mc.static_data.loader_info, None,
+            "Called replace_movie on a clip with LoaderInfo set"
+        );
+
+        mc.base.base.reset_for_movie_load();
+        mc.static_data = Gc::allocate(
+            context.gc_context,
+            MovieClipStatic::with_data(
+                0,
+                movie.into(),
+                total_frames,
+                loader_info.map(|l| l.into()),
+                context.gc_context,
+            ),
+        );
+        mc.tag_stream_pos = 0;
+        mc.flags = MovieClipFlags::PLAYING;
+        mc.base.base.set_is_root(is_swf);
+        mc.current_frame = 0;
+        mc.audio_stream = None;
+        mc.container = ChildContainer::new();
+        drop(mc);
     }
 
     pub fn preload(self, context: &mut UpdateContext<'_, 'gc, '_>) {
@@ -264,7 +355,8 @@ impl<'gc> MovieClip<'gc> {
         let data = self.0.read().static_data.swf.clone();
         let mut reader = data.read_from(0);
         let mut cur_frame = 1;
-        let mut preload_stream_handle = None;
+        let mut start_pos = 0;
+
         let tag_callback = |reader: &mut SwfStream<'_>, tag_code, tag_len| match tag_code {
             TagCode::CsmTextSettings => self
                 .0
@@ -375,7 +467,7 @@ impl<'gc> MovieClip<'gc> {
                 .write(context.gc_context)
                 .define_text(context, reader, 2),
             TagCode::DoInitAction => self.do_init_action(context, reader, tag_len),
-            TagCode::DoAbc => self.do_abc(context, reader, tag_len),
+            TagCode::DoAbc => self.do_abc(context, reader),
             TagCode::SymbolClass => self.symbol_class(context, reader),
             TagCode::DefineSceneAndFrameLabelData => {
                 self.scene_and_frame_labels(reader, &mut static_data)
@@ -395,44 +487,31 @@ impl<'gc> MovieClip<'gc> {
                 .0
                 .write(context.gc_context)
                 .jpeg_tables(context, reader, tag_len),
-            TagCode::ShowFrame => {
-                self.0
-                    .write(context.gc_context)
-                    .preload_show_frame(context, reader, &mut cur_frame)
-            }
+            TagCode::ShowFrame => self.0.write(context.gc_context).preload_show_frame(
+                context,
+                reader,
+                tag_len,
+                &mut cur_frame,
+                &mut start_pos,
+            ),
             TagCode::ScriptLimits => self
                 .0
                 .write(context.gc_context)
                 .script_limits(reader, context.avm1),
-            TagCode::SoundStreamHead => self.0.write(context.gc_context).preload_sound_stream_head(
-                context,
-                reader,
-                &mut preload_stream_handle,
-                &mut static_data,
-                1,
-            ),
+            TagCode::SoundStreamHead => {
+                self.0
+                    .write(context.gc_context)
+                    .sound_stream_head(reader, &mut static_data, 1)
+            }
+            TagCode::SoundStreamHead2 => {
+                self.0
+                    .write(context.gc_context)
+                    .sound_stream_head(reader, &mut static_data, 2)
+            }
             TagCode::VideoFrame => self
                 .0
                 .write(context.gc_context)
                 .preload_video_frame(context, reader),
-            TagCode::SoundStreamHead2 => {
-                self.0.write(context.gc_context).preload_sound_stream_head(
-                    context,
-                    reader,
-                    &mut preload_stream_handle,
-                    &mut static_data,
-                    2,
-                )
-            }
-            TagCode::SoundStreamBlock => {
-                self.0.write(context.gc_context).preload_sound_stream_block(
-                    context,
-                    reader,
-                    preload_stream_handle,
-                    cur_frame,
-                    tag_len,
-                )
-            }
             TagCode::DefineBinaryData => self
                 .0
                 .write(context.gc_context)
@@ -441,12 +520,11 @@ impl<'gc> MovieClip<'gc> {
         };
         let _ = tag_utils::decode_tags(&mut reader, tag_callback, TagCode::End);
 
-        // Finalize audio stream.
-        if let Some(stream) = preload_stream_handle {
-            if let Some(sound) = context.audio.preload_sound_stream_end(stream) {
-                static_data.audio_stream_handle = Some(sound);
-            }
-        }
+        // End-of-clip should be treated as ShowFrame
+        self.0
+            .write(context.gc_context)
+            .preload_show_frame(context, &mut reader, 0, &mut cur_frame, &mut start_pos)
+            .unwrap();
 
         self.0.write(context.gc_context).static_data =
             Gc::allocate(context.gc_context, static_data);
@@ -459,7 +537,7 @@ impl<'gc> MovieClip<'gc> {
         reader: &mut SwfStream<'_>,
         tag_len: usize,
     ) -> DecodeResult {
-        if context.avm_type() != AvmType::Avm1 {
+        if context.is_action_script_3() {
             log::warn!("DoInitAction tag in AVM2 movie");
             return Ok(());
         }
@@ -476,15 +554,11 @@ impl<'gc> MovieClip<'gc> {
             .read()
             .static_data
             .swf
-            .resize_to_reader(reader, tag_len - num_read)
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "Invalid source or tag length when running init action",
-                )
-            })?;
+            .resize_to_reader(reader, tag_len - num_read);
 
-        Avm1::run_stack_frame_for_init_action(self.into(), slice, context);
+        if !slice.is_empty() {
+            Avm1::run_stack_frame_for_init_action(self.into(), slice, context);
+        }
 
         Ok(())
     }
@@ -494,24 +568,20 @@ impl<'gc> MovieClip<'gc> {
         self,
         context: &mut UpdateContext<'_, 'gc, '_>,
         reader: &mut SwfStream<'_>,
-        tag_len: usize,
     ) -> DecodeResult {
-        let movie = self.movie().unwrap();
-        if context.avm_type() != AvmType::Avm2 {
+        if !context.is_action_script_3() {
             log::warn!("DoABC tag in AVM1 movie");
             return Ok(());
         }
 
-        let domain = context.library.library_for_movie_mut(movie).avm2_domain();
+        let do_abc = reader.read_do_abc()?;
+        if !do_abc.data.is_empty() {
+            let movie = self.movie().unwrap();
+            let domain = context.library.library_for_movie_mut(movie).avm2_domain();
 
-        if let Err(e) = Avm2::load_abc_from_do_abc(
-            context,
-            &self.0.read().static_data.swf,
-            domain,
-            reader,
-            tag_len,
-        ) {
-            log::warn!("Error loading ABC file: {}", e);
+            if let Err(e) = Avm2::do_abc(context, do_abc, domain) {
+                log::warn!("Error loading ABC file: {}", e);
+            }
         }
 
         Ok(())
@@ -523,9 +593,7 @@ impl<'gc> MovieClip<'gc> {
         context: &mut UpdateContext<'_, 'gc, '_>,
         reader: &mut SwfStream<'_>,
     ) -> DecodeResult {
-        let movie = self
-            .movie()
-            .ok_or("Attempted to set symbol classes on movie without any")?;
+        let movie = self.movie().ok_or(Error::NoSymbolClasses)?;
         let mut activation = Avm2Activation::from_nothing(context.reborrow());
 
         let num_symbols = reader.read_u16()?;
@@ -716,7 +784,9 @@ impl<'gc> MovieClip<'gc> {
         // Clamp frame number in bounds.
         let frame = frame.max(1);
 
-        if frame != self.current_frame() {
+        // In AS3, no-op gotos have side effects that are visible to user code.
+        // Hence, we have to run them anyway.
+        if frame != self.current_frame() || context.is_action_script_3() {
             if self
                 .0
                 .read()
@@ -998,19 +1068,22 @@ impl<'gc> MovieClip<'gc> {
             let clip = self.0.read();
             let mut reader = clip.static_data.swf.read_from(0);
             while cur_frame <= frame && !reader.get_ref().is_empty() {
-                let tag_callback = |reader: &mut Reader<'_>, tag_code, tag_len| match tag_code {
-                    TagCode::ShowFrame => {
-                        cur_frame += 1;
-                        Ok(())
-                    }
-                    TagCode::DoAction if cur_frame == frame => {
-                        // On the target frame, add any DoAction tags to the array.
-                        if let Some(code) = clip.static_data.swf.resize_to_reader(reader, tag_len) {
-                            actions.push(code);
+                let tag_callback = |reader: &mut Reader<'_>, tag_code, tag_len| {
+                    match tag_code {
+                        TagCode::ShowFrame => {
+                            cur_frame += 1;
+                            Ok(())
                         }
-                        Ok(())
+                        TagCode::DoAction if cur_frame == frame => {
+                            // On the target frame, add any DoAction tags to the array.
+                            let slice = clip.static_data.swf.resize_to_reader(reader, tag_len);
+                            if !slice.is_empty() {
+                                actions.push(slice);
+                            }
+                            Ok(())
+                        }
+                        _ => Ok(()),
                     }
-                    _ => Ok(()),
                 };
 
                 let _ = tag_utils::decode_tags(&mut reader, tag_callback, TagCode::ShowFrame);
@@ -1035,8 +1108,12 @@ impl<'gc> MovieClip<'gc> {
         self,
         context: &mut UpdateContext<'_, 'gc, '_>,
         run_display_actions: bool,
+        run_sounds: bool,
     ) {
-        match self.determine_next_frame() {
+        let next_frame = self.determine_next_frame();
+        match next_frame {
+            // AS3 removals need to happen before frame advance (see below)
+            NextFrame::Next if context.is_action_script_3() => {}
             NextFrame::Next => self.0.write(context.gc_context).current_frame += 1,
             NextFrame::First => return self.run_goto(context, 1, true),
             NextFrame::Same => self.stop(context),
@@ -1048,33 +1125,74 @@ impl<'gc> MovieClip<'gc> {
         let mut reader = data.read_from(mc.tag_stream_pos);
         drop(mc);
 
-        let vm_type = context.avm_type();
-
         use swf::TagCode;
         let tag_callback = |reader: &mut SwfStream<'_>, tag_code, tag_len| match tag_code {
             TagCode::DoAction => self.do_action(context, reader, tag_len),
-            TagCode::PlaceObject if run_display_actions && vm_type == AvmType::Avm1 => {
+            TagCode::PlaceObject if run_display_actions && !context.is_action_script_3() => {
                 self.place_object(context, reader, tag_len, 1)
             }
-            TagCode::PlaceObject2 if run_display_actions && vm_type == AvmType::Avm1 => {
+            TagCode::PlaceObject2 if run_display_actions && !context.is_action_script_3() => {
                 self.place_object(context, reader, tag_len, 2)
             }
-            TagCode::PlaceObject3 if run_display_actions && vm_type == AvmType::Avm1 => {
+            TagCode::PlaceObject3 if run_display_actions && !context.is_action_script_3() => {
                 self.place_object(context, reader, tag_len, 3)
             }
-            TagCode::PlaceObject4 if run_display_actions && vm_type == AvmType::Avm1 => {
+            TagCode::PlaceObject4 if run_display_actions && !context.is_action_script_3() => {
                 self.place_object(context, reader, tag_len, 4)
             }
-            TagCode::RemoveObject if run_display_actions => self.remove_object(context, reader, 1),
-            TagCode::RemoveObject2 if run_display_actions => self.remove_object(context, reader, 2),
+            TagCode::RemoveObject if run_display_actions && !context.is_action_script_3() => {
+                self.remove_object(context, reader, 1)
+            }
+            TagCode::RemoveObject2 if run_display_actions && !context.is_action_script_3() => {
+                self.remove_object(context, reader, 2)
+            }
+            TagCode::PlaceObject if run_display_actions && context.is_action_script_3() => {
+                self.queue_place_object(context, reader, tag_len, 1)
+            }
+            TagCode::PlaceObject2 if run_display_actions && context.is_action_script_3() => {
+                self.queue_place_object(context, reader, tag_len, 2)
+            }
+            TagCode::PlaceObject3 if run_display_actions && context.is_action_script_3() => {
+                self.queue_place_object(context, reader, tag_len, 3)
+            }
+            TagCode::PlaceObject4 if run_display_actions && context.is_action_script_3() => {
+                self.queue_place_object(context, reader, tag_len, 4)
+            }
+            TagCode::RemoveObject if run_display_actions && context.is_action_script_3() => {
+                self.queue_remove_object(context, reader, tag_len, 1)
+            }
+            TagCode::RemoveObject2 if run_display_actions && context.is_action_script_3() => {
+                self.queue_remove_object(context, reader, tag_len, 2)
+            }
             TagCode::SetBackgroundColor => self.set_background_color(context, reader),
-            TagCode::StartSound => self.start_sound_1(context, reader),
-            TagCode::SoundStreamBlock => self.sound_stream_block(context, reader),
+            TagCode::StartSound if run_sounds => self.start_sound_1(context, reader),
+            TagCode::SoundStreamBlock if run_sounds => self.sound_stream_block(context, reader),
             _ => Ok(()),
         };
         let _ = tag_utils::decode_tags(&mut reader, tag_callback, TagCode::ShowFrame);
 
+        // On AS3, we deliberately run all removals before the frame number or
+        // tag position updates. This ensures that code that runs gotos when a
+        // display object is added or removed does not catch the movie clip in
+        // an invalid state.
+        let remove_actions = self.unqueue_removes(context);
+
+        for (_, tag) in remove_actions {
+            let mut reader = data.read_from(tag.tag_start);
+            let version = match tag.tag_type {
+                QueuedTagAction::Remove(v) => v,
+                _ => unreachable!(),
+            };
+
+            if let Err(e) = self.remove_object(context, &mut reader, version) {
+                log::error!("Error running queued tag: {:?}, got {}", tag.tag_type, e);
+            }
+        }
+
+        // It is now safe to update the tag position and frame number.
+        // TODO: Determine if explicit gotos override these or not.
         let mut write = self.0.write(context.gc_context);
+
         write.tag_stream_pos = reader.get_ref().as_ptr() as u64 - tag_stream_start;
 
         // Check if our audio track has finished playing.
@@ -1084,8 +1202,17 @@ impl<'gc> MovieClip<'gc> {
             }
         }
 
-        let frame_id = write.current_frame;
-        write.queued_script_frame = Some(frame_id);
+        if matches!(next_frame, NextFrame::Next) && context.is_action_script_3() {
+            write.current_frame += 1;
+        }
+
+        write.queued_script_frame = Some(write.current_frame);
+        if write.last_queued_script_frame != Some(write.current_frame) {
+            // We explicitly clear this variable since AS3 may later GOTO back
+            // to the already-ran frame. Since the frame number *has* changed
+            // in the meantime, it should absolutely run again.
+            write.last_queued_script_frame = None;
+        }
     }
 
     /// Instantiate a given child object on the timeline at a given depth.
@@ -1096,8 +1223,8 @@ impl<'gc> MovieClip<'gc> {
         depth: Depth,
         place_object: &swf::PlaceObject,
     ) -> Option<DisplayObject<'gc>> {
-        let library = context.library.library_for_movie_mut(self.movie().unwrap()); //TODO
-        let avm_type = library.avm_type();
+        let movie = self.movie().unwrap();
+        let library = context.library.library_for_movie_mut(movie.clone());
         match library.instantiate_by_id(id, context.gc_context) {
             Ok(child) => {
                 // Remove previous child from children list,
@@ -1109,13 +1236,7 @@ impl<'gc> MovieClip<'gc> {
                     child.set_instantiated_by_timeline(context.gc_context, true);
                     child.set_depth(context.gc_context, depth);
                     child.set_parent(context.gc_context, Some(self.into()));
-                    if avm_type == AvmType::Avm2 {
-                        // In AVM2 instantiation happens before frame advance so we
-                        // have to special-case that
-                        child.set_place_frame(context.gc_context, self.current_frame() + 1);
-                    } else {
-                        child.set_place_frame(context.gc_context, self.current_frame());
-                    }
+                    child.set_place_frame(context.gc_context, self.current_frame());
 
                     // Apply PlaceObject parameters.
                     child.apply_place_object(context, place_object);
@@ -1136,34 +1257,24 @@ impl<'gc> MovieClip<'gc> {
                         (&place_object.clip_actions, child.as_movie_clip())
                     {
                         // Convert from `swf::ClipAction` to Ruffle's `ClipEventHandler`.
-                        if let Some(movie) = self.movie() {
-                            clip.set_clip_event_handlers(
-                                context.gc_context,
-                                clip_actions
-                                    .iter()
-                                    .cloned()
-                                    .map(|a| {
-                                        ClipEventHandler::from_action_and_movie(
-                                            a,
-                                            Arc::clone(&movie),
-                                        )
-                                    })
-                                    .collect(),
-                            );
-                        } else {
-                            // This probably shouldn't happen; we should always have a movie.
-                            log::error!("No movie when trying to set clip event");
-                        }
+                        clip.set_clip_event_handlers(
+                            context.gc_context,
+                            clip_actions
+                                .iter()
+                                .cloned()
+                                .map(|a| ClipEventHandler::from_action_and_movie(a, movie.clone()))
+                                .collect(),
+                        );
                     }
                     // TODO: Missing PlaceObject properties: amf_data, filters
 
                     // Run first frame.
-                    child.construct_frame(context);
+                    catchup_display_object_to_frame(context, child);
                     child.post_instantiation(context, None, Instantiator::Movie, false);
                     // In AVM1, children are added in `run_frame` so this is necessary.
                     // In AVM2 we add them in `construct_frame` so calling this causes
                     // duplicate frames
-                    if avm_type == AvmType::Avm1 {
+                    if !movie.is_action_script_3() {
                         child.run_frame(context);
                     }
                 }
@@ -1204,12 +1315,89 @@ impl<'gc> MovieClip<'gc> {
         }
     }
 
+    #[cfg(not(feature = "timeline_debug"))]
+    fn assert_expected_tag_start(self) {}
+
+    #[cfg(feature = "timeline_debug")]
+    fn assert_expected_tag_start(self) {
+        let read = self.0.read();
+
+        assert_eq!(
+            Some(read.tag_stream_pos),
+            read.tag_frame_boundaries
+                .get(&read.current_frame)
+                .map(|(_start, end)| *end), // Yes, this is correct, at least for AVM1.
+            "[{}] Gotos must start from the correct tag position for frame {}",
+            read.base.base.name,
+            read.current_frame
+        );
+    }
+
+    #[cfg(not(feature = "timeline_debug"))]
+    fn assert_expected_tag_end(
+        self,
+        _context: &mut UpdateContext<'_, 'gc, '_>,
+        _hit_target_frame: bool,
+    ) {
+    }
+
+    #[cfg(feature = "timeline_debug")]
+    fn assert_expected_tag_end(
+        self,
+        context: &mut UpdateContext<'_, 'gc, '_>,
+        hit_target_frame: bool,
+    ) {
+        // Gotos that do *not* hit their target frame will not update their tag
+        // stream position, as they do not run the final frame's tags, and thus
+        // cannot derive the end position of the clip anyway. This is not
+        // observable to user code as any further timeline interaction would
+        // trigger a rewind, so we ignore it here for now.
+        if hit_target_frame {
+            let read = self.0.read();
+
+            assert_eq!(
+                Some(read.tag_stream_pos),
+                read.tag_frame_boundaries
+                    .get(&read.current_frame)
+                    .map(|(_start, end)| *end),
+                "[{}] Gotos must end at the correct tag position for frame {}",
+                read.base.base.name,
+                read.current_frame
+            );
+        } else {
+            // Of course, the target frame desync absolutely will break our
+            // other asserts, so fix them up here.
+            let mut write = self.0.write(context.gc_context);
+
+            if let Some((_, end)) = write
+                .tag_frame_boundaries
+                .get(&write.current_frame)
+                .cloned()
+            {
+                write.tag_stream_pos = end;
+            }
+        }
+    }
+
     pub fn run_goto(
         mut self,
         context: &mut UpdateContext<'_, 'gc, '_>,
         frame: FrameNumber,
         is_implicit: bool,
     ) {
+        if cfg!(feature = "timeline_debug") {
+            log::debug!(
+                "[{}]: {} from frame {} to frame {}",
+                self.name(),
+                if is_implicit { "looping" } else { "goto" },
+                self.current_frame(),
+                frame
+            );
+            self.assert_expected_tag_start();
+        }
+
+        let frame_before_rewind = self.current_frame();
+
         // Flash gotos are tricky:
         // 1) Conceptually, a goto should act like the playhead is advancing forward or
         //    backward to a frame.
@@ -1229,41 +1417,32 @@ impl<'gc> MovieClip<'gc> {
 
         self.0.write(context.gc_context).stop_audio_stream(context);
 
-        let is_rewind = if frame < self.current_frame() {
+        let is_rewind = if frame <= self.current_frame() {
             // Because we can only step forward, we have to start at frame 1
-            // when rewinding.
+            // when rewinding. We don't actually remove children yet because
+            // otherwise AS3 can observe byproducts of the rewinding process.
             self.0.write(context.gc_context).tag_stream_pos = 0;
             self.0.write(context.gc_context).current_frame = 0;
 
-            // Remove all display objects that were created after the destination frame.
-            // TODO: We want to do something like self.children.retain here,
-            // but BTreeMap::retain does not exist.
-            // TODO: AS3 children don't live on the depth list. Do they respect
-            // or ignore GOTOs?
-            let children: SmallVec<[_; 16]> = self
-                .0
-                .read()
-                .container
-                .iter_children_by_depth()
-                .filter_map(|(depth, clip)| {
-                    if clip.place_frame() > frame {
-                        Some((depth, clip))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            for (_depth, child) in children {
-                if !child.placed_by_script() {
-                    self.remove_child(context, child, Lists::all());
-                } else {
-                    self.remove_child(context, child, Lists::DEPTH);
-                }
-            }
             true
         } else {
             false
         };
+
+        let from_frame = self.current_frame();
+
+        // Explicit gotos in the middle of an AS3 loop cancel the loop's queued
+        // tags. The rest of the goto machinery can handle the side effects of
+        // a half-executed loop.
+        let mut write = self.0.write(context.gc_context);
+        if write.loop_queued() {
+            write.queued_tags = HashMap::new();
+        }
+
+        if is_implicit {
+            write.set_loop_queued();
+        }
+        drop(write);
 
         // Step through the intermediate frames, and aggregate the deltas of each frame.
         let mc = self.0.read();
@@ -1277,13 +1456,15 @@ impl<'gc> MovieClip<'gc> {
         let clamped_frame = frame.min(mc.total_frames());
         drop(mc);
 
+        let mut removed_frame_scripts: Vec<DisplayObject<'gc>> = vec![];
+
         let mut reader = data.read_from(frame_pos);
         while self.current_frame() < clamped_frame && !reader.get_ref().is_empty() {
             self.0.write(context.gc_context).current_frame += 1;
             frame_pos = reader.get_ref().as_ptr() as u64 - tag_stream_start;
 
             use swf::TagCode;
-            let tag_callback = |reader: &mut SwfStream<'gc>, tag_code, tag_len| match tag_code {
+            let tag_callback = |reader: &mut _, tag_code, tag_len| match tag_code {
                 TagCode::PlaceObject => {
                     index += 1;
                     let mut mc = self.0.write(context.gc_context);
@@ -1308,17 +1489,62 @@ impl<'gc> MovieClip<'gc> {
 
                     mc.goto_place_object(reader, tag_len, 4, &mut goto_commands, is_rewind, index)
                 }
-                TagCode::RemoveObject => {
-                    self.goto_remove_object(reader, 1, context, &mut goto_commands, is_rewind)
-                }
-                TagCode::RemoveObject2 => {
-                    self.goto_remove_object(reader, 2, context, &mut goto_commands, is_rewind)
-                }
+                TagCode::RemoveObject => self.goto_remove_object(
+                    reader,
+                    1,
+                    context,
+                    &mut goto_commands,
+                    is_rewind,
+                    from_frame,
+                    &mut removed_frame_scripts,
+                ),
+                TagCode::RemoveObject2 => self.goto_remove_object(
+                    reader,
+                    2,
+                    context,
+                    &mut goto_commands,
+                    is_rewind,
+                    from_frame,
+                    &mut removed_frame_scripts,
+                ),
                 _ => Ok(()),
             };
             let _ = tag_utils::decode_tags(&mut reader, tag_callback, TagCode::ShowFrame);
         }
         let hit_target_frame = self.0.read().current_frame == frame;
+
+        if is_rewind {
+            // Remove all display objects that were created after the
+            // destination frame.
+            //
+            // We do this after reading the clip timeline so that AS3 can't
+            // observe side effects of the rewinding process.
+            //
+            // TODO: We want to do something like self.children.retain here,
+            // but BTreeMap::retain does not exist.
+            // TODO: AS3 children don't live on the depth list. Do they respect
+            // or ignore GOTOs?
+            let children: SmallVec<[_; 16]> = self
+                .0
+                .read()
+                .container
+                .iter_children_by_depth()
+                .filter_map(|(depth, clip)| {
+                    if clip.place_frame() > frame {
+                        Some((depth, clip))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for (_depth, child) in children {
+                if !child.placed_by_script() {
+                    self.remove_child(context, child, Lists::all());
+                } else {
+                    self.remove_child(context, child, Lists::DEPTH);
+                }
+            }
+        }
 
         // Run the list of goto commands to actually create and update the display objects.
         let run_goto_command = |clip: MovieClip<'gc>,
@@ -1326,6 +1552,29 @@ impl<'gc> MovieClip<'gc> {
                                 params: &GotoPlaceObject<'_>| {
             use swf::PlaceObjectAction;
             let child_entry = clip.child_by_depth(params.depth());
+            if context.is_action_script_3() && is_implicit && child_entry.is_none() {
+                // Looping gotos do not run their PlaceObject commands at goto
+                // time. They are instead held to frameConstructed like normal
+                // playback.
+                //
+                // TODO: We can only queue *new* object placement, existing
+                // objects still get updated too early.
+                let mut write = self.0.write(context.gc_context);
+                let new_tag = QueuedTag {
+                    tag_type: QueuedTagAction::Place(params.version),
+                    tag_start: params.tag_start,
+                    tag_len: params.tag_len,
+                };
+                let bucket = write
+                    .queued_tags
+                    .entry(params.place_object.depth as Depth)
+                    .or_insert_with(|| QueuedTagList::None);
+
+                bucket.queue_add(new_tag);
+
+                return;
+            }
+
             match (params.place_object.action, child_entry, is_rewind) {
                 // Apply final delta to display parameters.
                 // For rewinds, if an object was created before the final frame,
@@ -1374,18 +1623,18 @@ impl<'gc> MovieClip<'gc> {
             .filter(|params| params.frame < frame)
             .for_each(|goto| run_goto_command(self, context, goto));
 
-        if !is_implicit {
-            self.frame_constructed(context);
-        }
-
         // Next, run the final frame for the parent clip.
-        // Re-run the final frame without display tags (DoAction, StartSound, etc.)
+        // Re-run the final frame without display tags (DoAction, etc.)
         // Note that this only happens if the frame exists and is loaded;
         // e.g. gotoAndStop(9999) displays the final frame, but actions don't run!
         if hit_target_frame {
             self.0.write(context.gc_context).current_frame -= 1;
             self.0.write(context.gc_context).tag_stream_pos = frame_pos;
-            self.run_frame_internal(context, false);
+            // If we changed frames, then trigger any sounds in our target frame.
+            // However, if we executed a 'no-op goto' (start and end frames are the same),
+            // then do *not* run sounds. Some SWFS (e.g. 'This is the only level too')
+            // rely on this behavior.
+            self.run_frame_internal(context, false, frame != frame_before_rewind);
         } else {
             self.0.write(context.gc_context).current_frame = clamped_frame;
         }
@@ -1396,12 +1645,27 @@ impl<'gc> MovieClip<'gc> {
             .filter(|params| params.frame >= frame)
             .for_each(|goto| run_goto_command(self, context, goto));
 
+        // On AVM2, all explicit gotos act the same way as a normal new frame,
+        // save for the lack of an enterFrame event. Since this must happen
+        // before AS3 continues execution, this is effectively a "recursive
+        // frame".
+        //
+        // Our queued place tags will now run at this time, too.
         if !is_implicit {
+            self.construct_frame(context);
+            self.frame_constructed(context);
             self.avm2_root(context)
                 .unwrap_or_else(|| self.into())
                 .run_frame_scripts(context);
+
+            for child in removed_frame_scripts {
+                child.run_frame_scripts(context);
+            }
+
             self.exit_frame(context);
         }
+
+        self.assert_expected_tag_end(context, hit_target_frame);
     }
 
     fn construct_as_avm1_object(
@@ -1443,7 +1707,9 @@ impl<'gc> MovieClip<'gc> {
                     }
 
                     if let Some(init_object) = init_object {
-                        for key in init_object.get_keys(&mut activation) {
+                        // AVM1 sets keys in reverse order (compared to enumeration order).
+                        // This behavior is visible to setters, and some SWFs depend on it.
+                        for key in init_object.get_keys(&mut activation).into_iter().rev() {
                             if let Ok(value) = init_object.get(key, &mut activation) {
                                 let _ = object.set(key, value, &mut activation);
                             }
@@ -1577,7 +1843,14 @@ impl<'gc> MovieClip<'gc> {
             let result: Result<(), Avm2Error> = constr_thing();
 
             if let Err(e) = result {
-                log::error!("Got {} when constructing AVM2 side of movie clip", e);
+                log::error!(
+                    "Got {} when constructing AVM2 side of movie clip of type {}",
+                    e,
+                    class_object
+                        .try_inner_class_definition()
+                        .map(|c| c.read().name().to_qualified_name(context.gc_context))
+                        .unwrap_or_else(|_| "[BorrowError!]".into())
+                );
             }
         }
     }
@@ -1601,6 +1874,7 @@ impl<'gc> MovieClip<'gc> {
 
     /// Handle a RemoveObject tag when running a goto action.
     #[inline]
+    #[allow(clippy::too_many_arguments)]
     fn goto_remove_object<'a>(
         mut self,
         reader: &mut SwfStream<'a>,
@@ -1608,6 +1882,8 @@ impl<'gc> MovieClip<'gc> {
         context: &mut UpdateContext<'_, 'gc, '_>,
         goto_commands: &mut Vec<GotoPlaceObject<'a>>,
         is_rewind: bool,
+        from_frame: FrameNumber,
+        removed_frame_scripts: &mut Vec<DisplayObject<'gc>>,
     ) -> DecodeResult {
         let remove_object = if version == 1 {
             reader.read_remove_object_1()
@@ -1624,15 +1900,23 @@ impl<'gc> MovieClip<'gc> {
             // Don't do this for rewinds, because they conceptually
             // start from an empty display list, and we also want to examine
             // the old children to decide if they persist (place_frame <= goto_frame).
-            let read = self.0.read();
-            if let Some(child) = read.container.get_depth(depth) {
-                drop(read);
+            //
+            // We also have to reset the frame number as this emits AS3 events.
+            let to_frame = self.current_frame();
+            self.0.write(context.gc_context).current_frame = from_frame;
+
+            let child = self.0.read().container.get_depth(depth);
+            if let Some(child) = child {
                 if !child.placed_by_script() {
                     self.remove_child(context, child, Lists::all());
                 } else {
                     self.remove_child(context, child, Lists::DEPTH);
                 }
+
+                removed_frame_scripts.push(child);
             }
+
+            self.0.write(context.gc_context).current_frame = to_frame;
         }
         Ok(())
     }
@@ -1695,6 +1979,46 @@ impl<'gc> MovieClip<'gc> {
                 .any(|handler| object.has_property(&mut activation, handler.into()))
         }
     }
+
+    /// Remove all `PlaceObject` tags off the internal tag queue.
+    fn unqueue_adds(&self, context: &mut UpdateContext<'_, 'gc, '_>) -> Vec<(Depth, QueuedTag)> {
+        let mut write = self.0.write(context.gc_context);
+        let mut unqueued: Vec<_> = write
+            .queued_tags
+            .iter_mut()
+            .filter_map(|(d, b)| b.unqueue_add().map(|b| (*d, b)))
+            .collect();
+
+        unqueued.sort_by(|(_, t1), (_, t2)| t1.tag_start.cmp(&t2.tag_start));
+
+        for (depth, _tag) in unqueued.iter() {
+            if matches!(write.queued_tags.get(depth), Some(QueuedTagList::None)) {
+                write.queued_tags.remove(depth);
+            }
+        }
+
+        unqueued
+    }
+
+    /// Remove all `RemoveObject` tags off the internal tag queue.
+    fn unqueue_removes(&self, context: &mut UpdateContext<'_, 'gc, '_>) -> Vec<(Depth, QueuedTag)> {
+        let mut write = self.0.write(context.gc_context);
+        let mut unqueued: Vec<_> = write
+            .queued_tags
+            .iter_mut()
+            .filter_map(|(d, b)| b.unqueue_remove().map(|b| (*d, b)))
+            .collect();
+
+        unqueued.sort_by(|(_, t1), (_, t2)| t1.tag_start.cmp(&t2.tag_start));
+
+        for (depth, _tag) in unqueued.iter() {
+            if matches!(write.queued_tags.get(depth), Some(QueuedTagList::None)) {
+                write.queued_tags.remove(depth);
+            }
+        }
+
+        unqueued
+    }
 }
 
 impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
@@ -1726,6 +2050,21 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
         self.0.read().movie().version()
     }
 
+    fn enter_frame(&self, context: &mut UpdateContext<'_, 'gc, '_>) {
+        //Child removals from looping gotos appear to resolve in reverse order.
+        for child in self.iter_render_list().rev() {
+            child.enter_frame(context);
+        }
+
+        if context.is_action_script_3() {
+            let is_playing = self.playing();
+
+            if is_playing {
+                self.run_frame_internal(context, true, true);
+            }
+        }
+    }
+
     /// Construct objects placed on this frame.
     fn construct_frame(&self, context: &mut UpdateContext<'_, 'gc, '_>) {
         // New children will be constructed when they are instantiated and thus
@@ -1736,31 +2075,31 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
 
         // AVM1 code expects to execute in line with timeline instructions, so
         // it's exempted from frame construction.
-        if context.avm_type() == AvmType::Avm2 {
+        if context.is_action_script_3() {
             let needs_construction = if matches!(self.object2(), Avm2Value::Undefined) {
                 self.allocate_as_avm2_object(context, (*self).into());
-
                 true
             } else {
                 false
             };
 
-            if self.determine_next_frame() != NextFrame::First {
-                let mc = self.0.read();
-                let data = mc.static_data.swf.clone();
-                let mut reader = data.read_from(mc.tag_stream_pos);
-                drop(mc);
+            // PlaceObject tags execute at this time.
+            let data = self.0.read().static_data.swf.clone();
+            let place_actions = self.unqueue_adds(context);
 
-                use swf::TagCode;
-                let tag_callback = |reader: &mut SwfStream<'_>, tag_code, tag_len| match tag_code {
-                    TagCode::PlaceObject => self.place_object(context, reader, tag_len, 1),
-                    TagCode::PlaceObject2 => self.place_object(context, reader, tag_len, 2),
-                    TagCode::PlaceObject3 => self.place_object(context, reader, tag_len, 3),
-                    TagCode::PlaceObject4 => self.place_object(context, reader, tag_len, 4),
-                    _ => Ok(()),
+            for (_, tag) in place_actions {
+                let mut reader = data.read_from(tag.tag_start);
+                let version = match tag.tag_type {
+                    QueuedTagAction::Place(v) => v,
+                    _ => unreachable!(),
                 };
-                let _ = tag_utils::decode_tags(&mut reader, tag_callback, TagCode::ShowFrame);
+
+                if let Err(e) = self.place_object(context, &mut reader, tag.tag_len, version) {
+                    log::error!("Error running queued tag: {:?}, got {}", tag.tag_type, e);
+                }
             }
+
+            self.0.write(context.gc_context).unset_loop_queued();
 
             if needs_construction {
                 self.construct_as_avm2_object(context);
@@ -1771,9 +2110,8 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
                 // we can't fire the events until we run our first frame, so we
                 // have to actually check if we've just built the root and act
                 // like it just got added to the timeline.
-                let root = self.avm2_root(context);
                 let self_dobj: DisplayObject<'gc> = (*self).into();
-                if DisplayObject::option_ptr_eq(Some(self_dobj), root) {
+                if self_dobj.is_root() {
                     dispatch_added_event_only(self_dobj, context);
                     dispatch_added_to_stage_event_only(self_dobj, context);
                 }
@@ -1783,7 +2121,7 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
 
     fn run_frame(&self, context: &mut UpdateContext<'_, 'gc, '_>) {
         // Run my load/enterFrame clip event.
-        let is_load_frame = !self.0.read().initialized();
+        let is_load_frame = !self.0.read().flags.contains(MovieClipFlags::INITIALIZED);
         if is_load_frame {
             self.event_dispatch(context, ClipEvent::Load);
             self.0.write(context.gc_context).set_initialized(true);
@@ -1792,15 +2130,16 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
         }
 
         // Run my SWF tags.
-        if self.playing() {
-            self.run_frame_internal(context, true);
+        // In AVM2, SWF tags are processed at enterFrame time.
+        if self.playing() && !context.is_action_script_3() {
+            self.run_frame_internal(context, true, true);
         }
     }
 
     fn run_frame_scripts(self, context: &mut UpdateContext<'_, 'gc, '_>) {
         let mut index = 0;
         let mut write = self.0.write(context.gc_context);
-        let avm2_object = write.object.and_then(|o| o.as_avm2_object().ok());
+        let avm2_object = write.object.and_then(|o| o.as_avm2_object());
 
         if let Some(avm2_object) = avm2_object {
             if let Some(frame_id) = write.queued_script_frame {
@@ -1866,7 +2205,28 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
         }
     }
 
-    fn render_self(&self, context: &mut RenderContext<'_, 'gc>) {
+    fn on_exit_frame(&self, context: &mut UpdateContext<'_, 'gc, '_>) {
+        // Attempt to fire an "init" event on our `LoaderInfo`.
+        // This fires after we've exited our first frame, but before
+        // but before we enter a new frame. `loader_stream_init`
+        // keeps track if an "init" event has already been fired,
+        // so this becomes a no-op after the event has been fired.
+        if self.0.read().initialized() {
+            if let Some(loader_info) = self
+                .loader_info()
+                .as_ref()
+                .and_then(|o| o.as_loader_info_object())
+            {
+                loader_info.fire_init_and_complete_events(context);
+            }
+        }
+
+        for child in self.iter_render_list() {
+            child.on_exit_frame(context);
+        }
+    }
+
+    fn render_self(&self, context: &mut RenderContext<'_, 'gc, '_>) {
         self.0.read().drawing.render(context);
         self.render_children(context);
     }
@@ -1954,7 +2314,7 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
     ) {
         self.set_default_instance_name(context);
 
-        if context.avm_type() == AvmType::Avm1 {
+        if !context.is_action_script_3() {
             context
                 .avm1
                 .add_to_exec_list(context.gc_context, (*self).into());
@@ -1967,7 +2327,7 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
         self.0
             .read()
             .object
-            .and_then(|o| o.as_avm1_object().ok())
+            .and_then(|o| o.as_avm1_object())
             .map(Avm1Value::from)
             .unwrap_or(Avm1Value::Undefined)
     }
@@ -1976,7 +2336,7 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
         self.0
             .read()
             .object
-            .and_then(|o| o.as_avm2_object().ok())
+            .and_then(|o| o.as_avm2_object())
             .map(Avm2Value::from)
             .unwrap_or(Avm2Value::Undefined)
     }
@@ -2015,6 +2375,10 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
         }
         self.event_dispatch(context, ClipEvent::Unload);
         self.set_removed(context.gc_context, true);
+    }
+
+    fn loader_info(&self) -> Option<Avm2Object<'gc>> {
+        self.0.read().static_data.loader_info
     }
 
     fn allow_as_mask(&self) -> bool {
@@ -2176,6 +2540,11 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
             // but a child button can have an invisible hit area outside the parent's bounds.
             let mut hit_depth = 0;
             let mut result = None;
+            let mut options = HitTestOptions::SKIP_INVISIBLE;
+            options.set(HitTestOptions::SKIP_MASK, self.maskee().is_none());
+            // AVM2 allows movie clips to recieve mouse events without explicitly enabling button mode.
+            let check_non_interactive =
+                !require_button_mode || matches!(self.object2(), Avm2Value::Object(_));
 
             for child in self.iter_render_list().rev() {
                 if child.clip_depth() > 0 {
@@ -2187,9 +2556,12 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
                         }
                     }
                 } else if result.is_none() {
-                    result = child
-                        .as_interactive()
-                        .and_then(|c| c.mouse_pick(context, point, require_button_mode));
+                    if let Some(child) = child.as_interactive() {
+                        result = child.mouse_pick(context, point, require_button_mode);
+                    } else if check_non_interactive && child.hit_test_shape(context, point, options)
+                    {
+                        result = Some(this);
+                    }
 
                     if result.is_some() {
                         hit_depth = child.depth();
@@ -2201,12 +2573,11 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
                 return result;
             }
 
-            // AVM2 allows movie clips to recieve mouse events without
-            // explicitly enabling button mode.
-            if !require_button_mode || matches!(self.object2(), Avm2Value::Object(_)) {
-                let mut options = HitTestOptions::SKIP_INVISIBLE;
-                options.set(HitTestOptions::SKIP_MASK, self.maskee().is_none());
-                if self.hit_test_shape(context, point, options) {
+            // Check drawing.
+            if check_non_interactive {
+                let local_matrix = self.global_to_local_matrix();
+                let point = local_matrix * point;
+                if self.0.read().drawing.hit_test(point, &local_matrix) {
                     return Some(this);
                 }
             }
@@ -2225,36 +2596,6 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
 }
 
 impl<'gc> MovieClipData<'gc> {
-    /// Replace the current MovieClipData with a completely new SwfMovie.
-    ///
-    /// Playback will start at position zero, any existing streamed audio will
-    /// be terminated, and so on. Children and AVM data will NOT be kept across
-    /// the load boundary.
-    ///
-    /// If no movie is provided, then the movie clip will be replaced with an
-    /// empty movie of the same SWF version.
-    pub fn replace_with_movie(
-        &mut self,
-        gc_context: MutationContext<'gc, '_>,
-        movie: Option<Arc<SwfMovie>>,
-    ) {
-        let is_swf = movie.is_some();
-        let movie = movie.unwrap_or_else(|| Arc::new(SwfMovie::empty(self.movie().version())));
-        let total_frames = movie.num_frames();
-
-        self.base.base.reset_for_movie_load();
-        self.static_data = Gc::allocate(
-            gc_context,
-            MovieClipStatic::with_data(0, movie.into(), total_frames, gc_context),
-        );
-        self.tag_stream_pos = 0;
-        self.flags = MovieClipFlags::PLAYING;
-        self.base.base.set_is_root(is_swf);
-        self.current_frame = 0;
-        self.audio_stream = None;
-        self.container = ChildContainer::new();
-    }
-
     fn id(&self) -> CharacterId {
         self.static_data.id
     }
@@ -2281,6 +2622,18 @@ impl<'gc> MovieClipData<'gc> {
 
     fn set_programmatically_played(&mut self) {
         self.flags |= MovieClipFlags::PROGRAMMATICALLY_PLAYED;
+    }
+
+    fn loop_queued(&self) -> bool {
+        self.flags.contains(MovieClipFlags::LOOP_QUEUED)
+    }
+
+    fn set_loop_queued(&mut self) {
+        self.flags |= MovieClipFlags::LOOP_QUEUED;
+    }
+
+    fn unset_loop_queued(&mut self) {
+        self.flags.remove(MovieClipFlags::LOOP_QUEUED);
     }
 
     fn play(&mut self) {
@@ -2310,6 +2663,8 @@ impl<'gc> MovieClipData<'gc> {
         is_rewind: bool,
         index: usize,
     ) -> DecodeResult {
+        let tag_start =
+            reader.get_ref().as_ptr() as u64 - self.static_data.swf.as_ref().as_ptr() as u64;
         let place_object = if version == 1 {
             reader.read_place_object(tag_len)
         } else {
@@ -2318,8 +2673,15 @@ impl<'gc> MovieClipData<'gc> {
 
         // We merge the deltas from this PlaceObject with the previous command.
         let depth: Depth = place_object.depth.into();
-        let mut goto_place =
-            GotoPlaceObject::new(self.current_frame(), place_object, is_rewind, index);
+        let mut goto_place = GotoPlaceObject::new(
+            self.current_frame(),
+            place_object,
+            is_rewind,
+            index,
+            tag_start,
+            tag_len,
+            version,
+        );
         if let Some(i) = goto_commands.iter().position(|o| o.depth() == depth) {
             goto_commands[i].merge(&mut goto_place);
         } else {
@@ -2443,36 +2805,13 @@ impl<'gc, 'a> MovieClipData<'gc> {
     }
 
     #[inline]
-    fn preload_sound_stream_block(
+    fn sound_stream_head(
         &mut self,
-        context: &mut UpdateContext<'_, 'gc, '_>,
         reader: &mut SwfStream<'a>,
-        stream: Option<PreloadStreamHandle>,
-        cur_frame: FrameNumber,
-        tag_len: usize,
-    ) -> DecodeResult {
-        if let Some(stream) = stream {
-            let data = &reader.get_ref()[..tag_len];
-            context
-                .audio
-                .preload_sound_stream_block(stream, cur_frame, data);
-        }
-
-        Ok(())
-    }
-
-    #[inline]
-    fn preload_sound_stream_head(
-        &mut self,
-        context: &mut UpdateContext<'_, 'gc, '_>,
-        reader: &mut SwfStream<'a>,
-        stream: &mut Option<PreloadStreamHandle>,
         static_data: &mut MovieClipStatic,
         _version: u8,
     ) -> DecodeResult {
-        let audio_stream_info = reader.read_sound_stream_head()?;
-        *stream = context.audio.preload_sound_stream_head(&audio_stream_info);
-        static_data.audio_stream_info = Some(audio_stream_info);
+        static_data.audio_stream_info = Some(reader.read_sound_stream_head()?);
         Ok(())
     }
 
@@ -2520,11 +2859,7 @@ impl<'gc, 'a> MovieClipData<'gc> {
 
                 Ok(())
             }
-            _ => Err(format!(
-                "Attempted to preload video frames into non-video character {}",
-                vframe.stream_id
-            )
-            .into()),
+            _ => Err(Error::PreloadVideoIntoInvalidCharacter(vframe.stream_id)),
         }
     }
 
@@ -2655,26 +2990,21 @@ impl<'gc, 'a> MovieClipData<'gc> {
         swf_button: swf::Button<'a>,
     ) -> DecodeResult {
         let movie = self.movie();
-        let library = context.library.library_for_movie_mut(movie.clone());
-        if library.avm_type() == AvmType::Avm1 {
-            let button = Avm1Button::from_swf_tag(
+        let button = if movie.is_action_script_3() {
+            Character::Avm2Button(Avm2Button::from_swf_tag(
                 &swf_button,
                 &self.static_data.swf,
-                context.library,
-                context.gc_context,
-            );
-            context
-                .library
-                .library_for_movie_mut(movie)
-                .register_character(swf_button.id, Character::Avm1Button(button));
+                context,
+            ))
         } else {
-            let button = Avm2Button::from_swf_tag(&swf_button, &self.static_data.swf, context);
-            context
-                .library
-                .library_for_movie_mut(movie)
-                .register_character(swf_button.id, Character::Avm2Button(button));
-        }
-
+            Character::Avm1Button(Avm1Button::from_swf_tag(
+                &swf_button,
+                &self.static_data.swf,
+                context.gc_context,
+            ))
+        };
+        let library = context.library.library_for_movie_mut(movie);
+        library.register_character(swf_button.id, button);
         Ok(())
     }
 
@@ -2790,8 +3120,7 @@ impl<'gc, 'a> MovieClipData<'gc> {
             context.renderer,
             font,
             reader.encoding(),
-        )
-        .unwrap();
+        );
         context
             .library
             .library_for_movie_mut(self.movie())
@@ -2812,8 +3141,7 @@ impl<'gc, 'a> MovieClipData<'gc> {
             context.renderer,
             font,
             reader.encoding(),
-        )
-        .unwrap();
+        );
         context
             .library
             .library_for_movie_mut(self.movie())
@@ -2834,8 +3162,7 @@ impl<'gc, 'a> MovieClipData<'gc> {
             context.renderer,
             font,
             reader.encoding(),
-        )
-        .unwrap();
+        );
         context
             .library
             .library_for_movie_mut(self.movie())
@@ -2907,13 +3234,7 @@ impl<'gc, 'a> MovieClipData<'gc> {
             id,
             self.static_data
                 .swf
-                .resize_to_reader(reader, tag_len - num_read)
-                .ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "Cannot define sprite with invalid offset and length!",
-                    )
-                })?,
+                .resize_to_reader(reader, tag_len - num_read),
             num_frames,
         );
 
@@ -3042,13 +3363,41 @@ impl<'gc, 'a> MovieClipData<'gc> {
     }
 
     #[inline]
+    #[cfg(not(feature = "timeline_debug"))]
     fn preload_show_frame(
         &mut self,
         _context: &mut UpdateContext<'_, 'gc, '_>,
         _reader: &mut SwfStream<'a>,
+        _tag_len: usize,
         cur_frame: &mut FrameNumber,
+        _start_pos: &mut u64,
     ) -> DecodeResult {
         *cur_frame += 1;
+        Ok(())
+    }
+
+    #[inline]
+    #[cfg(feature = "timeline_debug")]
+    fn preload_show_frame(
+        &mut self,
+        _context: &mut UpdateContext<'_, 'gc, '_>,
+        reader: &mut SwfStream<'a>,
+        tag_len: usize,
+        cur_frame: &mut FrameNumber,
+        start_pos: &mut u64,
+    ) -> DecodeResult {
+        let tag_stream_start = self.static_data.swf.as_ref().as_ptr() as u64;
+        let end_pos = reader.get_ref().as_ptr() as u64 - tag_stream_start;
+
+        // We add tag_len because the reader position doesn't take it into
+        // account. Strictly speaking ShowFrame should not have tag data, but
+        // who *knows* what weird obfuscation hacks people have done with it.
+        self.tag_frame_boundaries
+            .insert(*cur_frame, (*start_pos, end_pos + tag_len as u64));
+
+        *start_pos = end_pos;
+        *cur_frame += 1;
+
         Ok(())
     }
 }
@@ -3062,7 +3411,7 @@ impl<'gc, 'a> MovieClip<'gc> {
         reader: &mut SwfStream<'a>,
         tag_len: usize,
     ) -> DecodeResult {
-        if context.avm_type() != AvmType::Avm1 {
+        if context.is_action_script_3() {
             log::warn!("DoAction tag in AVM2 movie");
             return Ok(());
         }
@@ -3073,18 +3422,45 @@ impl<'gc, 'a> MovieClip<'gc> {
             .read()
             .static_data
             .swf
-            .resize_to_reader(reader, tag_len)
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "Invalid source or tag length when running action",
-                )
-            })?;
-        context.action_queue.queue_actions(
-            self.into(),
-            ActionType::Normal { bytecode: slice },
-            false,
-        );
+            .resize_to_reader(reader, tag_len);
+        if !slice.is_empty() {
+            context.action_queue.queue_actions(
+                self.into(),
+                ActionType::Normal { bytecode: slice },
+                false,
+            );
+        }
+        Ok(())
+    }
+
+    fn queue_place_object(
+        self,
+        context: &mut UpdateContext<'_, 'gc, '_>,
+        reader: &mut SwfStream<'a>,
+        tag_len: usize,
+        version: u8,
+    ) -> DecodeResult {
+        let mut write = self.0.write(context.gc_context);
+        let tag_start =
+            reader.get_ref().as_ptr() as u64 - write.static_data.swf.as_ref().as_ptr() as u64;
+        let place_object = if version == 1 {
+            reader.read_place_object(tag_len)
+        } else {
+            reader.read_place_object_2_or_3(version)
+        }?;
+
+        let new_tag = QueuedTag {
+            tag_type: QueuedTagAction::Place(version),
+            tag_start,
+            tag_len,
+        };
+        let bucket = write
+            .queued_tags
+            .entry(place_object.depth as Depth)
+            .or_insert_with(|| QueuedTagList::None);
+
+        bucket.queue_add(new_tag);
+
         Ok(())
     }
 
@@ -3109,13 +3485,7 @@ impl<'gc, 'a> MovieClip<'gc> {
                 if let Some(child) = self.child_by_depth(place_object.depth.into()) {
                     child.replace_with(context, id);
                     child.apply_place_object(context, &place_object);
-                    if context.avm_type() == AvmType::Avm2 {
-                        // In AVM2 instantiation happens before frame advance so we
-                        // have to special-case that
-                        child.set_place_frame(context.gc_context, self.current_frame() + 1);
-                    } else {
-                        child.set_place_frame(context.gc_context, self.current_frame());
-                    }
+                    child.set_place_frame(context.gc_context, self.current_frame());
                 }
             }
             PlaceObjectAction::Modify => {
@@ -3153,6 +3523,38 @@ impl<'gc, 'a> MovieClip<'gc> {
     }
 
     #[inline]
+    fn queue_remove_object(
+        self,
+        context: &mut UpdateContext<'_, 'gc, '_>,
+        reader: &mut SwfStream<'a>,
+        tag_len: usize,
+        version: u8,
+    ) -> DecodeResult {
+        let mut write = self.0.write(context.gc_context);
+        let tag_start =
+            reader.get_ref().as_ptr() as u64 - write.static_data.swf.as_ref().as_ptr() as u64;
+        let remove_object = if version == 1 {
+            reader.read_remove_object_1()
+        } else {
+            reader.read_remove_object_2()
+        }?;
+
+        let new_tag = QueuedTag {
+            tag_type: QueuedTagAction::Remove(version),
+            tag_start,
+            tag_len,
+        };
+        let bucket = write
+            .queued_tags
+            .entry(remove_object.depth as Depth)
+            .or_insert_with(|| QueuedTagList::None);
+
+        bucket.queue_remove(new_tag);
+
+        Ok(())
+    }
+
+    #[inline]
     fn set_background_color(
         self,
         context: &mut UpdateContext<'_, 'gc, '_>,
@@ -3184,13 +3586,7 @@ impl<'gc, 'a> MovieClip<'gc> {
                 let slice = mc
                     .static_data
                     .swf
-                    .to_start_and_end(mc.tag_stream_pos as usize, mc.tag_stream_len())
-                    .ok_or_else(|| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            "Invalid slice generated when constructing sound stream block",
-                        )
-                    })?;
+                    .to_start_and_end(mc.tag_stream_pos as usize, mc.tag_stream_len());
                 let audio_stream = context.start_stream(
                     mc.static_data.audio_stream_handle,
                     self,
@@ -3287,17 +3683,26 @@ struct MovieClipStatic<'gc> {
     /// The last known symbol name under which this movie clip was exported.
     /// Used for looking up constructors registered with `Object.registerClass`.
     exported_name: GcCell<'gc, Option<AvmString<'gc>>>,
+    /// Only set if this MovieClip is the root movie in an SWF
+    /// (either the root SWF initially loaded by the player,
+    /// or an SWF dynamically loaded by `Loader`)
+    ///
+    /// This is always `None` for the AVM1 root movie.
+    /// However, it will be set for an AVM1 movie loaded from AVM2
+    /// via `Loader`
+    loader_info: Option<Avm2Object<'gc>>,
 }
 
 impl<'gc> MovieClipStatic<'gc> {
     fn empty(movie: Arc<SwfMovie>, gc_context: MutationContext<'gc, '_>) -> Self {
-        Self::with_data(0, SwfSlice::empty(movie), 1, gc_context)
+        Self::with_data(0, SwfSlice::empty(movie), 1, None, gc_context)
     }
 
     fn with_data(
         id: CharacterId,
         swf: SwfSlice,
         total_frames: FrameNumber,
+        loader_info: Option<Avm2Object<'gc>>,
         gc_context: MutationContext<'gc, '_>,
     ) -> Self {
         Self {
@@ -3309,6 +3714,7 @@ impl<'gc> MovieClipStatic<'gc> {
             audio_stream_info: None,
             audio_stream_handle: None,
             exported_name: GcCell::allocate(gc_context, None),
+            loader_info,
         }
     }
 }
@@ -3323,6 +3729,18 @@ struct GotoPlaceObject<'a> {
     place_object: swf::PlaceObject<'a>,
     /// Increasing index of this place command, for sorting.
     index: usize,
+
+    /// The location of the *first* SWF tag that created this command.
+    ///
+    /// NOTE: Only intended to be used in looping gotos, where tag merging is
+    /// not possible and we want to add children after the goto completes.
+    tag_start: u64,
+
+    /// The length of the PlaceObject tag at `tag_start`.
+    tag_len: usize,
+
+    /// The version of the PlaceObject tag at `tag_start`.
+    version: u8,
 }
 
 impl<'a> GotoPlaceObject<'a> {
@@ -3331,6 +3749,9 @@ impl<'a> GotoPlaceObject<'a> {
         mut place_object: swf::PlaceObject<'a>,
         is_rewind: bool,
         index: usize,
+        tag_start: u64,
+        tag_len: usize,
+        version: u8,
     ) -> Self {
         if is_rewind {
             if let swf::PlaceObjectAction::Place(_) = place_object.action {
@@ -3366,6 +3787,9 @@ impl<'a> GotoPlaceObject<'a> {
             frame,
             place_object,
             index,
+            tag_start,
+            tag_len,
+            version,
         }
     }
 
@@ -3416,6 +3840,94 @@ impl<'a> GotoPlaceObject<'a> {
     }
 }
 
+/// A list of add/remove tags to process on a given depth this frame.
+///
+/// There are only a handful of valid tag configurations per depth: namely,
+/// no tags, one removal, one add, or a removal followed by an add.
+///
+/// Any other configuration in the SWF tag stream is normalized to one of
+/// these patterns.
+#[derive(Default, Debug, Eq, PartialEq, Clone, Copy, Collect)]
+#[collect(require_static)]
+pub enum QueuedTagList {
+    #[default]
+    None,
+    Add(QueuedTag),
+    Remove(QueuedTag),
+    RemoveThenAdd(QueuedTag, QueuedTag),
+}
+
+impl QueuedTagList {
+    fn queue_add(&mut self, add_tag: QueuedTag) {
+        let new = match self {
+            QueuedTagList::None => QueuedTagList::Add(add_tag),
+            QueuedTagList::Add(_) => QueuedTagList::Add(add_tag),
+            QueuedTagList::Remove(r) => QueuedTagList::RemoveThenAdd(*r, add_tag),
+            QueuedTagList::RemoveThenAdd(r, _) => QueuedTagList::RemoveThenAdd(*r, add_tag),
+        };
+
+        *self = new;
+    }
+
+    fn queue_remove(&mut self, remove_tag: QueuedTag) {
+        let new = match self {
+            QueuedTagList::None => QueuedTagList::Remove(remove_tag),
+            QueuedTagList::Add(_) => QueuedTagList::None,
+            QueuedTagList::Remove(_) => QueuedTagList::Remove(remove_tag),
+            QueuedTagList::RemoveThenAdd(r, _) => QueuedTagList::Remove(*r),
+        };
+
+        *self = new;
+    }
+
+    fn unqueue_add(&mut self) -> Option<QueuedTag> {
+        let (new_queue, return_val) = match self {
+            QueuedTagList::None => (QueuedTagList::None, None),
+            QueuedTagList::Add(a) => (QueuedTagList::None, Some(*a)),
+            QueuedTagList::Remove(r) => (QueuedTagList::Remove(*r), None),
+            QueuedTagList::RemoveThenAdd(r, a) => (QueuedTagList::Remove(*r), Some(*a)),
+        };
+
+        *self = new_queue;
+
+        return_val
+    }
+
+    fn unqueue_remove(&mut self) -> Option<QueuedTag> {
+        let (new_queue, return_val) = match self {
+            QueuedTagList::None => (QueuedTagList::None, None),
+            QueuedTagList::Add(a) => (QueuedTagList::Add(*a), None),
+            QueuedTagList::Remove(r) => (QueuedTagList::None, Some(*r)),
+            QueuedTagList::RemoveThenAdd(r, a) => (QueuedTagList::Add(*a), Some(*r)),
+        };
+
+        *self = new_queue;
+
+        return_val
+    }
+}
+
+/// A single tag we encountered this frame that we intend to process on a queue.
+///
+/// No more than one queued action is allowed to be processed on-queue.
+#[derive(Debug, Eq, PartialEq, Clone, Copy, Collect)]
+#[collect(require_static)]
+pub struct QueuedTag {
+    pub tag_type: QueuedTagAction,
+    pub tag_start: u64,
+    pub tag_len: usize,
+}
+
+/// The type of queued tag.
+///
+/// The u8 parameter is the tag version.
+#[derive(Debug, Eq, PartialEq, Clone, Copy, Collect)]
+#[collect(require_static)]
+pub enum QueuedTagAction {
+    Place(u8),
+    Remove(u8),
+}
+
 bitflags! {
     /// Boolean state flags used by `MovieClip`.
     #[derive(Collect)]
@@ -3437,6 +3949,12 @@ bitflags! {
         ///
         /// This causes any goto action to be queued and executed at the end of the script.
         const EXECUTING_AVM2_FRAME_SCRIPT = 1 << 3;
+
+        /// Flag set when AVM2 loops to the next frame.
+        ///
+        /// Because AVM2 queues PlaceObject tags to run later, explicit gotos
+        /// that happen while those tags run should cancel the loop.
+        const LOOP_QUEUED = 1 << 4;
     }
 }
 
@@ -3468,9 +3986,7 @@ impl ClipEventHandler {
         } else {
             ButtonKeyCode::Unknown
         };
-        let action_data = SwfSlice::from(movie)
-            .to_unbounded_subslice(other.action_data)
-            .unwrap();
+        let action_data = SwfSlice::from(movie).to_unbounded_subslice(other.action_data);
         Self {
             events: other.events,
             key_code,

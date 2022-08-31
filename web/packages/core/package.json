@@ -26,7 +26,7 @@
         "//5": "# This just chains together the three commands after it.",
         "build:cargo_bindgen_opt": "npm run build:cargo && npm run build:wasm-bindgen && npm run build:wasm-opt",
 
-        "build:cargo": "cross-env-shell cargo build --profile \"$CARGO_PROFILE\" --target wasm32-unknown-unknown --features \\\"$CARGO_FEATURES\\\"",
+        "build:cargo": "cross-env-shell cargo build --profile \"$CARGO_PROFILE\" --target wasm32-unknown-unknown --features \\\"$CARGO_FEATURES\\\" $CARGO_FLAGS",
         "build:wasm-bindgen": "cross-env-shell wasm-bindgen \"../../../target/wasm32-unknown-unknown/${CARGO_PROFILE}/ruffle_web.wasm\" --target web --out-dir ./pkg --out-name \"$OUT_NAME\"",
         "build:wasm-opt": "cross-env-shell wasm-opt -o \"./pkg/${OUT_NAME}_bg.wasm\" -O -g \"./pkg/${OUT_NAME}_bg.wasm\" || npm run build:wasm-opt-failed",
 
@@ -41,15 +41,15 @@
     },
     "devDependencies": {
         "@types/mocha": "^9.1.1",
-        "@typescript-eslint/eslint-plugin": "^5.27.1",
-        "@typescript-eslint/parser": "^5.30.3",
-        "eslint": "^8.18.0",
-        "eslint-plugin-jsdoc": "^39.3.2",
+        "@typescript-eslint/eslint-plugin": "^5.32.0",
+        "@typescript-eslint/parser": "^5.32.0",
+        "eslint": "^8.21.0",
+        "eslint-plugin-jsdoc": "^39.3.4",
         "mocha": "^10.0.0",
         "replace-in-file": "^6.3.5",
         "shx": "^0.3.3",
         "ts-node": "^10.7.0",
-        "typedoc": "^0.23.3",
+        "typedoc": "^0.23.10",
         "typescript": "^4.7.3"
     }
 }

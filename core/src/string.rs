@@ -36,15 +36,9 @@ impl<'gc> AvmString<'gc> {
         }
     }
 
-    pub fn new_utf8_bytes<'b, B: Into<Cow<'b, [u8]>>>(
-        gc_context: MutationContext<'gc, '_>,
-        bytes: B,
-    ) -> Result<Self, std::str::Utf8Error> {
-        let utf8 = match bytes.into() {
-            Cow::Owned(b) => Cow::Owned(String::from_utf8(b).map_err(|e| e.utf8_error())?),
-            Cow::Borrowed(b) => Cow::Borrowed(std::str::from_utf8(b)?),
-        };
-        Ok(Self::new_utf8(gc_context, utf8))
+    pub fn new_utf8_bytes(gc_context: MutationContext<'gc, '_>, bytes: &[u8]) -> Self {
+        let buf = WString::from_utf8_bytes(bytes.to_vec());
+        Self::new(gc_context, buf)
     }
 
     pub fn new<S: Into<WString>>(gc_context: MutationContext<'gc, '_>, string: S) -> Self {

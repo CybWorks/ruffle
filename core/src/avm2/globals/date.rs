@@ -3,10 +3,12 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::class::Class;
 use crate::avm2::method::{Method, NativeMethodImpl};
-use crate::avm2::names::{Multiname, Namespace, QName};
 use crate::avm2::object::{date_allocator, DateObject, FunctionObject, Object, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
+use crate::avm2::Multiname;
+use crate::avm2::Namespace;
+use crate::avm2::QName;
 use crate::locale::{get_current_date_time, get_timezone};
 use crate::string::{utils as string_utils, AvmString, WStr};
 use chrono::{DateTime, Datelike, Duration, FixedOffset, LocalResult, TimeZone, Timelike, Utc};
@@ -314,7 +316,7 @@ pub fn class_init<'gc>(
                 .into(),
                 activation,
             )?;
-            date_proto.set_local_property_is_enumerable(gc_context, (*name).into(), false)?;
+            date_proto.set_local_property_is_enumerable(gc_context, (*name).into(), false);
         }
     }
     Ok(Value::Undefined)

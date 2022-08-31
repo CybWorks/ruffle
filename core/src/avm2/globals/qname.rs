@@ -3,10 +3,11 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::class::Class;
 use crate::avm2::method::{Method, NativeMethodImpl};
-use crate::avm2::names::{Namespace, QName};
 use crate::avm2::object::{qname_allocator, FunctionObject, Object, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
+use crate::avm2::Namespace;
+use crate::avm2::QName;
 use gc_arena::{GcCell, MutationContext};
 
 /// Implements `QName`'s instance initializer.
@@ -98,12 +99,12 @@ pub fn class_init<'gc>(
         activation.context.gc_context,
         "toString".into(),
         false,
-    )?;
+    );
     qname_proto.set_local_property_is_enumerable(
         activation.context.gc_context,
         "valueOf".into(),
         false,
-    )?;
+    );
 
     Ok(Value::Undefined)
 }

@@ -1,10 +1,11 @@
 use gc_arena::Collect;
 
 use crate::avm2::{Object as Avm2Object, Value as Avm2Value};
-use crate::backend::render::{Bitmap, BitmapFormat, BitmapHandle, RenderBackend};
 use crate::bitmap::color_transform_params::ColorTransformParams;
 use crate::bitmap::turbulence::Turbulence;
 use bitflags::bitflags;
+use ruffle_render::backend::RenderBackend;
+use ruffle_render::bitmap::{Bitmap, BitmapFormat, BitmapHandle};
 use std::ops::Range;
 
 /// An implementation of the Lehmer/Park-Miller random number generator
@@ -173,9 +174,7 @@ impl<'gc> BitmapData<'gc> {
         self.height = 0;
         self.pixels.clear();
         if let Some(handle) = self.bitmap_handle {
-            if let Err(e) = renderer.unregister_bitmap(handle) {
-                log::warn!("Failed to unregister bitmap {:?}: {:?}", handle, e);
-            }
+            renderer.unregister_bitmap(handle);
             self.bitmap_handle = None;
         }
         // There's no longer a handle to update

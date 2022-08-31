@@ -7,21 +7,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use swf::avm1::types::SendVarsMethod;
-use url::{ParseError, Url};
-
-/// Attempt to convert a relative URL into an absolute URL, using the base URL
-/// if necessary.
-///
-/// If the relative URL is actually absolute, then the base will not be used.
-pub fn url_from_relative_url(base: &str, relative: &str) -> Result<Url, ParseError> {
-    let parsed = Url::parse(relative);
-    if let Err(ParseError::RelativeUrlWithoutBase) = parsed {
-        let base = Url::parse(base)?;
-        return base.join(relative);
-    }
-
-    parsed
-}
+use url::Url;
 
 /// Enumerates all possible navigation methods.
 #[derive(Copy, Clone)]
@@ -88,6 +74,12 @@ impl Request {
         }
     }
 
+    /// Construct a request with the given method and data
+    #[allow(clippy::self_named_constructors)]
+    pub fn request(method: NavigationMethod, url: String, body: Option<(Vec<u8>, String)>) -> Self {
+        Self { url, method, body }
+    }
+
     /// Retrieve the URL of this request.
     pub fn url(&self) -> &str {
         &self.url
@@ -125,8 +117,8 @@ pub trait NavigatorBackend {
     /// be meaningful for all environments: for example, `javascript:` URLs may
     /// not be executable in a desktop context.
     ///
-    /// The `window` parameter, if provided, should be treated identically to
-    /// the `window` parameter on an HTML `<a>nchor` tag.
+    /// The `target` parameter, should be treated identically to the `target`
+    /// parameter on an HTML `<a>nchor` tag.
     ///
     /// This function may be used to send variables to an eligible target. If
     /// desired, the `vars_method` will be specified with a suitable
@@ -144,7 +136,7 @@ pub trait NavigatorBackend {
     fn navigate_to_url(
         &self,
         url: String,
-        window: Option<String>,
+        target: String,
         vars_method: Option<(NavigationMethod, IndexMap<String, String>)>,
     );
 
@@ -285,7 +277,7 @@ impl NavigatorBackend for NullNavigatorBackend {
     fn navigate_to_url(
         &self,
         _url: String,
-        _window: Option<String>,
+        _target: String,
         _vars_method: Option<(NavigationMethod, IndexMap<String, String>)>,
     ) {
     }

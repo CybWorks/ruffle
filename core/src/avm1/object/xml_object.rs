@@ -85,11 +85,11 @@ impl<'gc> XmlObject<'gc> {
         let object = Self(GcCell::allocate(
             gc_context,
             XmlObjectData {
-                base: ScriptObject::object(gc_context, proto),
+                base: ScriptObject::new(gc_context, proto),
                 root,
                 xml_decl: None,
                 doctype: None,
-                id_map: ScriptObject::bare_object(gc_context),
+                id_map: ScriptObject::new(gc_context, None),
                 status: XmlStatus::NoError,
             },
         ));
@@ -172,7 +172,7 @@ impl<'gc> XmlObject<'gc> {
                     let is_whitespace_char = |c: &u8| matches!(*c, b'\t' | b'\n' | b'\r' | b' ');
                     let is_whitespace_text = text.iter().all(is_whitespace_char);
                     if !(text.is_empty() || ignore_white && is_whitespace_text) {
-                        let text = AvmString::new_utf8_bytes(activation.context.gc_context, text)?;
+                        let text = AvmString::new_utf8_bytes(activation.context.gc_context, &text);
                         let child =
                             XmlNode::new(activation.context.gc_context, TEXT_NODE, Some(text));
                         open_tags

@@ -506,16 +506,7 @@ impl<'a> Reader<'a> {
                 splitter_rect: tag_reader.read_rectangle()?,
             },
 
-            TagCode::DoAbc => {
-                let flags = tag_reader.read_u32()?;
-                let name = tag_reader.read_str()?;
-                let abc_data = tag_reader.read_slice_to_end();
-                Tag::DoAbc(DoAbc {
-                    name,
-                    is_lazy_initialize: flags & 1 != 0,
-                    data: abc_data,
-                })
-            }
+            TagCode::DoAbc => Tag::DoAbc(tag_reader.read_do_abc()?),
 
             TagCode::DoAction => {
                 let action_data = tag_reader.read_slice_to_end();
@@ -1274,12 +1265,7 @@ impl<'a> Reader<'a> {
                     flags & 0b1 != 0,
                 )
             } else {
-                (
-                    start_shape_bounds.clone(),
-                    end_shape_bounds.clone(),
-                    true,
-                    false,
-                )
+                (start_shape_bounds, end_shape_bounds, true, false)
             };
 
         self.read_u32()?; // Offset to EndEdges.
@@ -1529,7 +1515,7 @@ impl<'a> Reader<'a> {
                     (flags & 0b1) != 0,
                 )
             } else {
-                (shape_bounds.clone(), false, true, false)
+                (shape_bounds, false, true, false)
             };
         let (styles, num_fill_bits, num_line_bits) = self.read_shape_styles(version)?;
         let mut records = Vec::new();
@@ -2550,6 +2536,13 @@ impl<'a> Reader<'a> {
         })
     }
 
+    pub fn read_do_abc(&mut self) -> Result<DoAbc<'a>> {
+        let flags = DoAbcFlag::from_bits_truncate(self.read_u32()?);
+        let name = self.read_str()?;
+        let data = self.read_slice_to_end();
+        Ok(DoAbc { flags, name, data })
+    }
+
     pub fn read_product_info(&mut self) -> Result<ProductInfo> {
         // Not documented in SWF19 reference.
         // See http://wahlers.com.br/claus/blog/undocumented-swf-tags-written-by-mxmlc/
@@ -2707,7 +2700,7 @@ pub mod tests {
             super::read_compression_type(&b"ZWS"[..]).unwrap(),
             Compression::Lzma
         );
-        assert!(super::read_compression_type(&b"ABC"[..]).is_err());
+        super::read_compression_type(&b"ABC"[..]).unwrap_err();
     }
 
     #[test]
@@ -2901,11 +2894,11 @@ pub mod tests {
             assert_eq!(reader.read_str().unwrap(), "Testing");
             assert_eq!(reader.read_str().unwrap(), "More testing");
             assert_eq!(reader.read_str().unwrap(), "");
-            assert!(reader.read_str().is_err());
+            reader.read_str().unwrap_err();
         }
         {
             let mut reader = Reader::new(&[], 1);
-            assert!(reader.read_str().is_err());
+            reader.read_str().unwrap_err();
         }
         {
             let buf = b"\0Testing";

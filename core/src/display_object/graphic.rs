@@ -2,14 +2,14 @@ use crate::avm1::Object as Avm1Object;
 use crate::avm2::{
     Activation as Avm2Activation, Object as Avm2Object, StageObject as Avm2StageObject,
 };
-use crate::backend::render::ShapeHandle;
 use crate::context::{RenderContext, UpdateContext};
 use crate::display_object::{DisplayObjectBase, DisplayObjectPtr, TDisplayObject};
 use crate::drawing::Drawing;
 use crate::prelude::*;
 use crate::tag_utils::SwfMovie;
-use crate::vminterface::{AvmType, Instantiator};
+use crate::vminterface::Instantiator;
 use gc_arena::{Collect, GcCell, MutationContext};
+use ruffle_render::backend::ShapeHandle;
 use std::cell::{Ref, RefMut};
 use std::sync::Arc;
 
@@ -36,7 +36,7 @@ impl<'gc> Graphic<'gc> {
         let library = context.library.library_for_movie(movie.clone()).unwrap();
         let static_data = GraphicStatic {
             id: swf_shape.id,
-            bounds: swf_shape.shape_bounds.clone().into(),
+            bounds: swf_shape.shape_bounds.into(),
             render_handle: Some(
                 context
                     .renderer
@@ -126,7 +126,7 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
     }
 
     fn construct_frame(&self, context: &mut UpdateContext<'_, 'gc, '_>) {
-        if context.avm_type() == AvmType::Avm2 && matches!(self.object2(), Avm2Value::Undefined) {
+        if context.is_action_script_3() && matches!(self.object2(), Avm2Value::Undefined) {
             let shape_constr = context.avm2.classes().shape;
             let mut activation = Avm2Activation::from_nothing(context.reborrow());
 
@@ -192,7 +192,7 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
                 }
             } else {
                 let shape = &self.0.read().static_data.shape;
-                return crate::shape_utils::shape_hit_test(shape, point, &local_matrix);
+                return ruffle_render::shape_utils::shape_hit_test(shape, point, &local_matrix);
             }
         }
 
@@ -206,12 +206,12 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
         _instantiated_by: Instantiator,
         run_frame: bool,
     ) {
-        if context.avm_type() == AvmType::Avm1 {
+        if context.is_action_script_3() {
+            self.set_default_instance_name(context);
+        } else {
             context
                 .avm1
                 .add_to_exec_list(context.gc_context, (*self).into());
-        } else {
-            self.set_default_instance_name(context);
         }
 
         if run_frame {

@@ -43,7 +43,7 @@ impl<'gc> StageObject<'gc> {
         Self(GcCell::allocate(
             gc_context,
             StageObjectData {
-                base: ScriptObject::object(gc_context, proto),
+                base: ScriptObject::new(gc_context, proto),
                 display_object,
                 text_field_bindings: Vec::new(),
             },
@@ -238,7 +238,7 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
                 binding.variable_name.eq_ignore_case(&name)
             }
         }) {
-            let _ = binding.text_field.set_html_text(
+            binding.text_field.set_html_text(
                 &value.coerce_to_string(activation)?,
                 &mut activation.context,
             );

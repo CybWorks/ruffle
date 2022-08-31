@@ -1,9 +1,9 @@
-import { Ruffle } from "../pkg/ruffle_web";
+import type { Ruffle } from "../pkg/ruffle_web";
 
 import { loadRuffle } from "./load-ruffle";
 import { ruffleShadowTemplate } from "./shadow-template";
 import { lookupElement } from "./register-element";
-import { Config } from "./config";
+import type { Config } from "./config";
 import {
     BaseLoadOptions,
     DataLoadOptions,
@@ -12,14 +12,14 @@ import {
     UnmuteOverlay,
     WindowMode,
 } from "./load-options";
-import { MovieMetadata } from "./movie-metadata";
-import { InternalContextMenuItem } from "./context-menu";
+import type { MovieMetadata } from "./movie-metadata";
+import type { InternalContextMenuItem } from "./context-menu";
 import { swfFileName } from "./swf-file-name";
 
 export const FLASH_MIMETYPE = "application/x-shockwave-flash";
 export const FUTURESPLASH_MIMETYPE = "application/futuresplash";
 export const FLASH7_AND_8_MIMETYPE = "application/x-shockwave-flash2-preview";
-export const FLASH_MOVIE_MIMETYPE = "application/vnd.adobe.flash-movie";
+export const FLASH_MOVIE_MIMETYPE = "application/vnd.adobe.flash.movie";
 export const FLASH_ACTIVEX_CLASSID =
     "clsid:D27CDB6E-AE6D-11cf-96B8-444553540000";
 
@@ -672,6 +672,29 @@ export class RufflePlayer extends HTMLElement {
     }
 
     /**
+     * Returns the master volume of the player.
+     *
+     * @returns The volume. 1.0 is 100% volume.
+     */
+    get volume(): number {
+        if (this.instance) {
+            return this.instance.volume();
+        }
+        return 1.0;
+    }
+
+    /**
+     * Sets the master volume of the player.
+     *
+     * @param value The volume. 1.0 is 100% volume.
+     */
+    set volume(value: number) {
+        if (this.instance) {
+            this.instance.set_volume(value);
+        }
+    }
+
+    /**
      * Checks if this player is allowed to be fullscreen by the browser.
      *
      * @returns True if you may call [[enterFullscreen]].
@@ -824,8 +847,16 @@ export class RufflePlayer extends HTMLElement {
         if (this.instance && this.swfUrl && this.showSwfDownload) {
             items.push(null);
             items.push({
-                text: `Download .swf`,
+                text: "Download .swf",
                 onClick: this.downloadSwf.bind(this),
+            });
+        }
+
+        if (window.isSecureContext) {
+            items.push({
+                text: "Copy debug info",
+                onClick: () =>
+                    navigator.clipboard.writeText(this.getPanicData()),
             });
         }
 
@@ -1103,6 +1134,43 @@ export class RufflePlayer extends HTMLElement {
     }
 
     /**
+     * Get data included in any panic of this ruffle-player
+     *
+     * @returns A string containing all the data included in the panic.
+     */
+    private getPanicData(): string {
+        const dataArray = [];
+        dataArray.push("\n# Player Info\n");
+        dataArray.push(this.debugPlayerInfo());
+
+        dataArray.push("\n# Page Info\n");
+        dataArray.push(`Page URL: ${document.location.href}\n`);
+        if (this.swfUrl) dataArray.push(`SWF URL: ${this.swfUrl}\n`);
+
+        dataArray.push("\n# Browser Info\n");
+        dataArray.push(`User Agent: ${window.navigator.userAgent}\n`);
+        dataArray.push(`Platform: ${window.navigator.platform}\n`);
+        dataArray.push(
+            `Has touch support: ${window.navigator.maxTouchPoints > 0}\n`
+        );
+
+        dataArray.push("\n# Ruffle Info\n");
+        dataArray.push(`Version: %VERSION_NUMBER%\n`);
+        dataArray.push(`Name: %VERSION_NAME%\n`);
+        dataArray.push(`Channel: %VERSION_CHANNEL%\n`);
+        dataArray.push(`Built: %BUILD_DATE%\n`);
+        dataArray.push(`Commit: %COMMIT_HASH%\n`);
+        dataArray.push(`Is extension: ${this.isExtension}\n`);
+        dataArray.push("\n# Metadata\n");
+        if (this.metadata) {
+            for (const [key, value] of Object.entries(this.metadata)) {
+                dataArray.push(`${key}: ${value}\n`);
+            }
+        }
+        return dataArray.join("");
+    }
+
+    /**
      * Panics this specific player, forcefully destroying all resources and displays an error message to the user.
      *
      * This should be called when something went absolutely, incredibly and disastrously wrong and there is no chance
@@ -1136,8 +1204,10 @@ export class RufflePlayer extends HTMLElement {
 
         const errorArray: Array<string | null> & {
             stackIndex: number;
+            avmStackIndex: number;
         } = Object.assign([], {
             stackIndex: -1,
+            avmStackIndex: -1,
         });
 
         errorArray.push("# Error Info\n");
@@ -1150,33 +1220,22 @@ export class RufflePlayer extends HTMLElement {
                     errorArray.push(
                         `Error stack:\n\`\`\`\n${error.stack}\n\`\`\`\n`
                     ) - 1;
+                if (error.avmStack) {
+                    const avmStackIndex =
+                        errorArray.push(
+                            `AVM2 stack:\n\`\`\`\n    ${error.avmStack
+                                .trim()
+                                .replace(/\t/g, "    ")}\n\`\`\`\n`
+                        ) - 1;
+                    errorArray.avmStackIndex = avmStackIndex;
+                }
                 errorArray.stackIndex = stackIndex;
             }
         } else {
             errorArray.push(`Error: ${error}\n`);
         }
 
-        errorArray.push("\n# Player Info\n");
-        errorArray.push(this.debugPlayerInfo());
-
-        errorArray.push("\n# Page Info\n");
-        errorArray.push(`Page URL: ${document.location.href}\n`);
-        if (this.swfUrl) errorArray.push(`SWF URL: ${this.swfUrl}\n`);
-
-        errorArray.push("\n# Browser Info\n");
-        errorArray.push(`User Agent: ${window.navigator.userAgent}\n`);
-        errorArray.push(`Platform: ${window.navigator.platform}\n`);
-        errorArray.push(
-            `Has touch support: ${window.navigator.maxTouchPoints > 0}\n`
-        );
-
-        errorArray.push("\n# Ruffle Info\n");
-        errorArray.push(`Version: %VERSION_NUMBER%\n`);
-        errorArray.push(`Name: %VERSION_NAME%\n`);
-        errorArray.push(`Channel: %VERSION_CHANNEL%\n`);
-        errorArray.push(`Built: %BUILD_DATE%\n`);
-        errorArray.push(`Commit: %COMMIT_HASH%\n`);
-        errorArray.push(`Is extension: ${this.isExtension}\n`);
+        errorArray.push(this.getPanicData());
 
         const errorText = errorArray.join("");
 
@@ -1203,6 +1262,9 @@ export class RufflePlayer extends HTMLElement {
                 // Strip the stack error from the array when the produced URL is way too long.
                 // This should prevent "414 Request-URI Too Large" errors on GitHub.
                 errorArray[errorArray.stackIndex] = null;
+                if (errorArray.avmStackIndex > -1) {
+                    errorArray[errorArray.avmStackIndex] = null;
+                }
                 issueBody = encodeURIComponent(errorArray.join(""));
             }
             issueLink += issueBody;
@@ -1630,6 +1692,24 @@ export function isSwfFilename(filename: string | null): boolean {
         }
     }
     return false;
+}
+
+/**
+ * Returns whether the given MIME type is a known flash type.
+ *
+ * @param mime The MIME type to test.
+ * @returns True if the MIME type is a flash MIME type.
+ */
+export function isSwfMimeType(mime: string): boolean {
+    switch (mime.toLowerCase()) {
+        case FLASH_MIMETYPE.toLowerCase():
+        case FUTURESPLASH_MIMETYPE.toLowerCase():
+        case FLASH7_AND_8_MIMETYPE.toLowerCase():
+        case FLASH_MOVIE_MIMETYPE.toLowerCase():
+            return true;
+        default:
+            return false;
+    }
 }
 
 /**

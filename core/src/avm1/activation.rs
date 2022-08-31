@@ -229,9 +229,6 @@ pub struct Activation<'a, 'gc: 'a, 'gc_context: 'a> {
     /// This can be changed with `tellTarget` (via `ActionSetTarget` and `ActionSetTarget2`).
     target_clip: Option<DisplayObject<'gc>>,
 
-    /// Amount of actions performed since the last timeout check
-    actions_since_timeout_check: u16,
-
     /// Whether the base clip was removed when we started this frame.
     base_clip_unloaded: bool,
 
@@ -274,7 +271,6 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             this,
             callee,
             local_registers: None,
-            actions_since_timeout_check: 0,
         }
     }
 
@@ -298,7 +294,6 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             this: self.this,
             callee: self.callee,
             local_registers: self.local_registers,
-            actions_since_timeout_check: 0,
         }
     }
 
@@ -333,7 +328,6 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             this: globals.into(),
             callee: None,
             local_registers: None,
-            actions_since_timeout_check: 0,
         }
     }
 
@@ -445,9 +439,9 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         data: &'b SwfSlice,
         reader: &mut Reader<'b>,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        self.actions_since_timeout_check += 1;
-        if self.actions_since_timeout_check >= 2000 {
-            self.actions_since_timeout_check = 0;
+        *self.context.actions_since_timeout_check += 1;
+        if *self.context.actions_since_timeout_check >= 2000 {
+            *self.context.actions_since_timeout_check = 0;
             if self.context.update_start.elapsed() >= self.context.max_execution_duration {
                 return Err(Error::ExecutionTimeout);
             }
@@ -686,7 +680,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn action_bit_rshift(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let a = self.context.avm1.pop().coerce_to_i32(self)? & 0b11111; // Only 5 bits used for shift count
+        let a = self.context.avm1.pop().coerce_to_u32(self)? & 0b11111; // Only 5 bits used for shift count
         let b = self.context.avm1.pop().coerce_to_i32(self)?;
         let result = b >> a;
         self.context.avm1.push(result.into());
@@ -697,7 +691,13 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let a = self.context.avm1.pop().coerce_to_u32(self)? & 0b11111; // Only 5 bits used for shift count
         let b = self.context.avm1.pop().coerce_to_u32(self)?;
         let result = b >> a;
-        self.context.avm1.push(result.into());
+        let result = if matches!(self.swf_version(), 8..=9) {
+            // In SWF8 and SWF9, unsigned right shift actually has a signed result.
+            (result as i32).into()
+        } else {
+            result.into()
+        };
+        self.context.avm1.push(result);
         Ok(FrameControl::Continue)
     }
 
@@ -861,7 +861,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         parent_data: &SwfSlice,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
         let swf_version = self.swf_version();
-        let func_data = parent_data.to_unbounded_subslice(action.actions).unwrap();
+        let func_data = parent_data.to_unbounded_subslice(action.actions);
         let constant_pool = self.constant_pool();
         let func = Avm1Function::from_swf_function(
             self.context.gc_context,
@@ -873,7 +873,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             self.base_clip(),
         );
         let name = func.name();
-        let prototype = ScriptObject::object(
+        let prototype = ScriptObject::new(
             self.context.gc_context,
             Some(self.context.avm1.prototypes.object),
         )
@@ -976,6 +976,11 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn action_end_drag(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
+        // we might not have had an opportunity to call `update_drag`
+        // if AS did `startDrag(mc);stopDrag();` in one go
+        // so let's do it here
+        crate::player::Player::update_drag(&mut self.context);
+
         *self.context.drag_object = None;
         Ok(FrameControl::Continue)
     }
@@ -983,8 +988,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     fn action_enumerate(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
         let name_value = self.context.avm1.pop();
         let name = name_value.coerce_to_string(self)?;
-        self.context.avm1.push(Value::Null); // Sentinel that indicates end of enumeration
         let object: Value<'gc> = self.get_variable(name)?.into();
+        self.context.avm1.push(Value::Undefined); // Sentinel that indicates end of enumeration
 
         match object {
             Value::Object(ob) => {
@@ -1001,7 +1006,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     fn action_enumerate_2(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
         let value = self.context.avm1.pop();
 
-        self.context.avm1.push(Value::Null); // Sentinel that indicates end of enumeration
+        self.context.avm1.push(Value::Undefined); // Sentinel that indicates end of enumeration
 
         if let Value::Object(object) = value {
             for k in object.get_keys(self).into_iter().rev() {
@@ -1148,7 +1153,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
                     if url.is_empty() {
                         //Blank URL on movie loads = unload!
                         if let Some(mut mc) = level.as_movie_clip() {
-                            mc.replace_with_movie(self.context.gc_context, None)
+                            mc.replace_with_movie(&mut self.context, None, None)
                         }
                     } else {
                         let future = self.context.load_manager.load_movie_into_clip(
@@ -1177,7 +1182,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         } else {
             self.context
                 .navigator
-                .navigate_to_url(url.to_owned(), Some(target.into_owned()), None);
+                .navigate_to_url(url.to_owned(), target.into_owned(), None);
         }
 
         Ok(FrameControl::Continue)
@@ -1264,7 +1269,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
                 if url.is_empty() {
                     // Blank URL on movie loads = unload!
                     if let Some(mut mc) = clip_target.as_movie_clip() {
-                        mc.replace_with_movie(self.context.gc_context, None)
+                        mc.replace_with_movie(&mut self.context, None, None)
                     }
                 } else {
                     let request = self.locals_into_request(
@@ -1285,14 +1290,21 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         } else if level_target > -1 {
             // `loadMovieNum` call.
             if let Some(clip_target) = clip_target {
-                let future = self.context.load_manager.load_movie_into_clip(
-                    self.context.player.clone(),
-                    clip_target,
-                    Request::get(url.to_utf8_lossy().into_owned()),
-                    None,
-                    None,
-                );
-                self.context.navigator.spawn_future(future);
+                if url.is_empty() {
+                    // Blank URL on movie loads = unload!
+                    if let Some(mut mc) = clip_target.as_movie_clip() {
+                        mc.replace_with_movie(&mut self.context, None, None)
+                    }
+                } else {
+                    let future = self.context.load_manager.load_movie_into_clip(
+                        self.context.player.clone(),
+                        clip_target,
+                        Request::get(url.to_utf8_lossy().into_owned()),
+                        None,
+                        None,
+                    );
+                    self.context.navigator.spawn_future(future);
+                }
             }
             return Ok(FrameControl::Continue);
         }
@@ -1305,7 +1317,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
         self.context
             .navigator
-            .navigate_to_url(url.to_string(), Some(target.to_string()), vars);
+            .navigate_to_url(url.to_string(), target.to_string(), vars);
 
         Ok(FrameControl::Continue)
     }
@@ -1404,7 +1416,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             // InitArray pops no args and pushes undefined if num_props is out of range.
             Value::Undefined
         } else {
-            let object = ScriptObject::object(
+            let object = ScriptObject::new(
                 self.context.gc_context,
                 Some(self.context.avm1.prototypes.object),
             );
@@ -2112,8 +2124,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         action: &Try,
         parent_data: &SwfSlice,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let mut result =
-            self.run_actions(parent_data.to_unbounded_subslice(action.try_body).unwrap());
+        let mut result = self.run_actions(parent_data.to_unbounded_subslice(action.try_body));
 
         if let Some((catch_vars, actions)) = &action.catch_body {
             if let Err(Error::ThrownValue(value)) = &result {
@@ -2139,14 +2150,13 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
                     }
                 }
 
-                result =
-                    activation.run_actions(parent_data.to_unbounded_subslice(actions).unwrap());
+                result = activation.run_actions(parent_data.to_unbounded_subslice(actions));
             }
         }
 
         if let Some(actions) = action.finally_body {
             if let ReturnType::Explicit(value) =
-                self.run_actions(parent_data.to_unbounded_subslice(actions).unwrap())?
+                self.run_actions(parent_data.to_unbounded_subslice(actions))?
             {
                 return Ok(FrameControl::Return(ReturnType::Explicit(value)));
             }
@@ -2200,7 +2210,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         action: With,
         parent_data: &SwfSlice,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let code = parent_data.to_unbounded_subslice(action.actions).unwrap();
+        let code = parent_data.to_unbounded_subslice(action.actions);
         let value = self.context.avm1.pop();
         match value {
             // Undefined/null with is ignored.

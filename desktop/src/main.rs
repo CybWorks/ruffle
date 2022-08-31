@@ -15,15 +15,17 @@ mod ui;
 
 use crate::custom_event::RuffleEvent;
 use crate::executor::GlutinAsyncExecutor;
+use anyhow::{anyhow, Context, Error};
 use clap::Parser;
 use isahc::{config::RedirectPolicy, prelude::*, HttpClient};
 use rfd::FileDialog;
 use ruffle_core::{
     config::Letterbox, events::KeyCode, tag_utils::SwfMovie, Player, PlayerBuilder, PlayerEvent,
-    StageDisplayState,
+    StageDisplayState, StaticCallstack, ViewportDimensions,
 };
 use ruffle_render_wgpu::clap::{GraphicsBackend, PowerPreference};
 use ruffle_render_wgpu::WgpuRenderBackend;
+use std::cell::RefCell;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -37,6 +39,10 @@ use winit::event::{
 };
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::{Fullscreen, Icon, Window, WindowBuilder};
+
+thread_local! {
+    static CALLSTACK: RefCell<Option<StaticCallstack>> = RefCell::default();
+}
 
 #[derive(Parser, Debug)]
 #[clap(
@@ -111,16 +117,16 @@ fn trace_path(_opt: &Opt) -> Option<&Path> {
     None
 }
 
-fn parse_url(path: &Path) -> Result<Url, Box<dyn std::error::Error>> {
+fn parse_url(path: &Path) -> Result<Url, Error> {
     Ok(if path.exists() {
         let absolute_path = path.canonicalize().unwrap_or_else(|_| path.to_owned());
         Url::from_file_path(absolute_path)
-            .map_err(|_| "Path must be absolute and cannot be a URL")?
+            .map_err(|_| anyhow!("Path must be absolute and cannot be a URL"))?
     } else {
         Url::parse(path.to_str().unwrap_or_default())
             .ok()
             .filter(|url| url.host().is_some())
-            .ok_or("Input path is not a file and could not be parsed as a URL.")?
+            .ok_or_else(|| anyhow!("Input path is not a file and could not be parsed as a URL."))?
     })
 }
 
@@ -142,20 +148,29 @@ fn pick_file() -> Option<PathBuf> {
         .pick_file()
 }
 
-fn load_movie(url: &Url, opt: &Opt) -> Result<SwfMovie, Box<dyn std::error::Error>> {
+fn load_movie(url: &Url, opt: &Opt) -> Result<SwfMovie, Error> {
     let mut movie = if url.scheme() == "file" {
-        SwfMovie::from_path(url.to_file_path().unwrap(), None)?
+        SwfMovie::from_path(url.to_file_path().unwrap(), None)
+            .map_err(|e| anyhow!(e.to_string()))
+            .context("Couldn't load swf")?
     } else {
         let proxy = opt.proxy.as_ref().and_then(|url| url.as_str().parse().ok());
         let builder = HttpClient::builder()
             .proxy(proxy)
             .redirect_policy(RedirectPolicy::Follow);
-        let client = builder.build()?;
-        let response = client.get(url.to_string())?;
+        let client = builder.build().context("Couldn't create HTTP client")?;
+        let response = client
+            .get(url.to_string())
+            .with_context(|| format!("Couldn't load URL {}", url))?;
         let mut buffer: Vec<u8> = Vec::new();
-        response.into_body().read_to_end(&mut buffer)?;
+        response
+            .into_body()
+            .read_to_end(&mut buffer)
+            .context("Couldn't read response from server")?;
 
-        SwfMovie::from_data(&buffer, Some(url.to_string()), None)?
+        SwfMovie::from_data(&buffer, Some(url.to_string()), None)
+            .map_err(|e| anyhow!(e.to_string()))
+            .context("Couldn't load swf")?
     };
 
     movie.append_parameters(parse_parameters(opt));
@@ -172,20 +187,21 @@ struct App {
 }
 
 impl App {
-    fn new(opt: Opt) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(opt: Opt) -> Result<Self, Error> {
         let path = match opt.input_path.as_ref() {
             Some(path) => Some(std::borrow::Cow::Borrowed(path)),
             None => pick_file().map(std::borrow::Cow::Owned),
         };
         let movie_url = if let Some(path) = path {
-            Some(parse_url(&path)?)
+            Some(parse_url(&path).context("Couldn't load specified path")?)
         } else {
-            shutdown(&Ok(()));
+            shutdown();
             std::process::exit(0);
         };
 
         let icon_bytes = include_bytes!("../assets/favicon-32.rgba");
-        let icon = Icon::from_rgba(icon_bytes.to_vec(), 32, 32)?;
+        let icon =
+            Icon::from_rgba(icon_bytes.to_vec(), 32, 32).context("Couldn't load app icon")?;
 
         let event_loop: EventLoop<RuffleEvent> = EventLoop::with_user_event();
 
@@ -232,7 +248,9 @@ impl App {
             opt.graphics.into(),
             opt.power.into(),
             trace_path(&opt),
-        )?;
+        )
+        .map_err(|e| anyhow!(e.to_string()))
+        .context("Couldn't create wgpu rendering backend")?;
 
         let window = Rc::new(window);
 
@@ -260,6 +278,10 @@ impl App {
                 parse_parameters(&opt).collect(),
                 Box::new(on_metadata),
             );
+
+            CALLSTACK.with(|callstack| {
+                *callstack.borrow_mut() = Some(player.lock().unwrap().callstack());
+            })
         }
 
         Ok(Self {
@@ -326,7 +348,7 @@ impl App {
                 match event {
                     winit::event::Event::LoopDestroyed => {
                         self.player.lock().unwrap().flush_shared_objects();
-                        shutdown(&Ok(()));
+                        shutdown();
                         return;
                     }
 
@@ -364,14 +386,11 @@ impl App {
 
                             let viewport_scale_factor = self.window.scale_factor();
                             let mut player_lock = self.player.lock().unwrap();
-                            player_lock.set_viewport_dimensions(
-                                size.width,
-                                size.height,
-                                viewport_scale_factor,
-                            );
-                            player_lock
-                                .renderer_mut()
-                                .set_viewport_dimensions(size.width, size.height);
+                            player_lock.set_viewport_dimensions(ViewportDimensions {
+                                width: size.width,
+                                height: size.height,
+                                scale_factor: viewport_scale_factor,
+                            });
                             self.window.request_redraw();
                         }
                         WindowEvent::CursorMoved { position, .. } => {
@@ -503,14 +522,11 @@ impl App {
                         let viewport_size = self.window.inner_size();
                         let viewport_scale_factor = self.window.scale_factor();
                         let mut player_lock = self.player.lock().unwrap();
-                        player_lock.set_viewport_dimensions(
-                            viewport_size.width,
-                            viewport_size.height,
-                            viewport_scale_factor,
-                        );
-                        player_lock
-                            .renderer_mut()
-                            .set_viewport_dimensions(viewport_size.width, viewport_size.height);
+                        player_lock.set_viewport_dimensions(ViewportDimensions {
+                            width: viewport_size.width,
+                            height: viewport_size.height,
+                            scale_factor: viewport_scale_factor,
+                        });
 
                         loaded = true;
                     }
@@ -745,13 +761,13 @@ fn winit_key_to_char(key_code: VirtualKeyCode, is_shift_down: bool) -> Option<ch
     })
 }
 
-fn run_timedemo(opt: Opt) -> Result<(), Box<dyn std::error::Error>> {
+fn run_timedemo(opt: Opt) -> Result<(), Error> {
     let path = opt
         .input_path
         .as_ref()
-        .ok_or("Input file necessary for timedemo")?;
+        .ok_or_else(|| anyhow!("Input file necessary for timedemo"))?;
     let movie_url = parse_url(path)?;
-    let movie = load_movie(&movie_url, &opt)?;
+    let movie = load_movie(&movie_url, &opt).context("Couldn't load movie")?;
     let movie_frames = Some(movie.num_frames());
 
     let viewport_width = 1920;
@@ -763,7 +779,10 @@ fn run_timedemo(opt: Opt) -> Result<(), Box<dyn std::error::Error>> {
         opt.graphics.into(),
         opt.power.into(),
         trace_path(&opt),
-    )?;
+    )
+    .map_err(|e| anyhow!(e.to_string()))
+    .context("Couldn't create wgpu rendering backend")?;
+
     let player = PlayerBuilder::new()
         .with_renderer(renderer)
         .with_software_video()
@@ -802,14 +821,24 @@ fn init() {
         AttachConsole(ATTACH_PARENT_PROCESS);
     }
 
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        prev_hook(info);
+        panic_hook();
+    }));
+
     env_logger::init();
 }
 
-fn shutdown(result: &Result<(), Box<dyn std::error::Error>>) {
-    if let Err(e) = result {
-        eprintln!("Fatal error:\n{}", e);
-    }
+fn panic_hook() {
+    CALLSTACK.with(|callstack| {
+        if let Some(callstack) = &*callstack.borrow() {
+            callstack.avm2(|callstack| println!("AVM2 stack trace: {}", callstack))
+        }
+    });
+}
 
+fn shutdown() {
     // Without explicitly detaching the console cmd won't redraw it's prompt.
     #[cfg(windows)]
     unsafe {
@@ -817,7 +846,7 @@ fn shutdown(result: &Result<(), Box<dyn std::error::Error>>) {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Error> {
     init();
     let opt = Opt::parse();
     let result = if opt.timedemo {
@@ -825,6 +854,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         App::new(opt).map(|app| app.run())
     };
-    shutdown(&result);
+    shutdown();
     result
 }

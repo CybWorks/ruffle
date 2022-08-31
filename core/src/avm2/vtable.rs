@@ -1,6 +1,5 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::method::Method;
-use crate::avm2::names::{Multiname, Namespace, QName};
 use crate::avm2::object::{ClassObject, FunctionObject, Object};
 use crate::avm2::property::{Property, PropertyClass};
 use crate::avm2::property_map::PropertyMap;
@@ -8,6 +7,9 @@ use crate::avm2::scope::ScopeChain;
 use crate::avm2::traits::{Trait, TraitKind};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
+use crate::avm2::Multiname;
+use crate::avm2::Namespace;
+use crate::avm2::QName;
 use gc_arena::{Collect, GcCell, MutationContext};
 use std::cell::Ref;
 use std::ops::DerefMut;
@@ -27,7 +29,11 @@ pub struct VTableData<'gc> {
 
     protected_namespace: Option<Namespace<'gc>>,
 
-    resolved_traits: PropertyMap<'gc, Property<'gc>>,
+    resolved_traits: PropertyMap<'gc, Property>,
+
+    /// Stores the `PropertyClass` for each slot,
+    /// indexed by `slot_id`
+    slot_classes: Vec<PropertyClass<'gc>>,
 
     method_table: Vec<ClassBoundMethod<'gc>>,
 
@@ -54,22 +60,69 @@ impl<'gc> VTable<'gc> {
                 scope: None,
                 protected_namespace: None,
                 resolved_traits: PropertyMap::new(),
+                slot_classes: vec![],
                 method_table: vec![],
                 default_slots: vec![],
             },
         ))
     }
 
+    /// A special case for newcatch. A single variable (q)name that maps to slot 1.
+    pub fn newcatch(mc: MutationContext<'gc, '_>, vname: &QName<'gc>) -> Self {
+        let mut rt = PropertyMap::new();
+
+        rt.insert(*vname, Property::Slot { slot_id: 1 });
+
+        let vt = VTable(GcCell::allocate(
+            mc,
+            VTableData {
+                defining_class: None,
+                scope: None,
+                protected_namespace: None,
+                resolved_traits: rt,
+                method_table: vec![],
+                // Compilers expect `setslot 1` to work on the `newcatch` object.
+                // `setslot 1` maps to index 1, so we need two slots here, because Ruffle
+                // maps setslot arg directly to the slot array index, unlike AVM which does the
+                // -1 shift.
+                default_slots: vec![None, None],
+                slot_classes: vec![PropertyClass::Any, PropertyClass::Any],
+            },
+        ));
+
+        vt
+    }
+
     pub fn duplicate(self, mc: MutationContext<'gc, '_>) -> Self {
         VTable(GcCell::allocate(mc, self.0.read().clone()))
     }
 
-    pub fn get_trait(self, name: &Multiname<'gc>) -> Option<Property<'gc>> {
+    pub fn get_trait(self, name: &Multiname<'gc>) -> Option<Property> {
         self.0
             .read()
             .resolved_traits
             .get_for_multiname(name)
             .cloned()
+    }
+
+    /// Coerces `value` to the type of the slot with id `slot_id`
+    pub fn coerce_trait_value(
+        &self,
+        slot_id: u32,
+        value: Value<'gc>,
+        activation: &mut Activation<'_, 'gc, '_>,
+    ) -> Result<Value<'gc>, Error> {
+        // Drop the `write()` guard, as 'slot_class.coerce' may need to access this vtable.
+        let mut slot_class = { self.0.read().slot_classes[slot_id as usize].clone() };
+
+        let (value, changed) = slot_class.coerce(activation, value)?;
+
+        // Calling coerce modified `PropertyClass` to cache the class lookup,
+        // so store the new value back in the vtable.
+        if changed {
+            self.0.write(activation.context.gc_context).slot_classes[slot_id as usize] = slot_class;
+        }
+        Ok(value)
     }
 
     pub fn has_trait(self, name: &Multiname<'gc>) -> bool {
@@ -175,6 +228,7 @@ impl<'gc> VTable<'gc> {
 
         if let Some(superclass_vtable) = superclass_vtable {
             write.resolved_traits = superclass_vtable.0.read().resolved_traits.clone();
+            write.slot_classes = superclass_vtable.0.read().slot_classes.clone();
             write.method_table = superclass_vtable.0.read().method_table.clone();
             write.default_slots = superclass_vtable.0.read().default_slots.clone();
 
@@ -195,10 +249,11 @@ impl<'gc> VTable<'gc> {
             }
         }
 
-        let (resolved_traits, method_table, default_slots) = (
+        let (resolved_traits, method_table, default_slots, slot_classes) = (
             &mut write.resolved_traits,
             &mut write.method_table,
             &mut write.default_slots,
+            &mut write.slot_classes,
         );
 
         for trait_data in traits {
@@ -299,31 +354,38 @@ impl<'gc> VTable<'gc> {
                         slot_id
                     };
 
-                    let new_prop = match trait_data.kind() {
+                    if new_slot_id as usize >= slot_classes.len() {
+                        // We will overwrite `PropertyClass::Any` when we process the slots
+                        // with the ids that we just skipped over.
+                        slot_classes.resize(new_slot_id as usize + 1, PropertyClass::Any);
+                    }
+
+                    let (new_prop, new_class) = match trait_data.kind() {
                         TraitKind::Slot {
                             type_name, unit, ..
-                        } => Property::new_slot(
-                            new_slot_id,
+                        } => (
+                            Property::new_slot(new_slot_id),
                             PropertyClass::name(activation, type_name.clone(), *unit),
                         ),
-                        TraitKind::Function { .. } => Property::new_slot(
-                            new_slot_id,
+                        TraitKind::Function { .. } => (
+                            Property::new_slot(new_slot_id),
                             PropertyClass::Class(activation.avm2().classes().function),
                         ),
                         TraitKind::Const {
                             type_name, unit, ..
-                        } => Property::new_const_slot(
-                            new_slot_id,
+                        } => (
+                            Property::new_const_slot(new_slot_id),
                             PropertyClass::name(activation, type_name.clone(), *unit),
                         ),
-                        TraitKind::Class { .. } => Property::new_const_slot(
-                            new_slot_id,
+                        TraitKind::Class { .. } => (
+                            Property::new_const_slot(new_slot_id),
                             PropertyClass::Class(activation.avm2().classes().class),
                         ),
                         _ => unreachable!(),
                     };
 
                     resolved_traits.insert(trait_data.name(), new_prop);
+                    slot_classes[new_slot_id as usize] = new_class;
                 }
             }
         }
@@ -379,10 +441,10 @@ impl<'gc> VTable<'gc> {
 
         write.default_slots.push(Some(value));
         let new_slot_id = write.default_slots.len() as u32 - 1;
-        write.resolved_traits.insert(
-            name,
-            Property::new_slot(new_slot_id, PropertyClass::Class(class)),
-        );
+        write
+            .resolved_traits
+            .insert(name, Property::new_slot(new_slot_id));
+        write.slot_classes.push(PropertyClass::Class(class));
 
         new_slot_id
     }

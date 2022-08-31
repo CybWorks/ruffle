@@ -10,7 +10,7 @@
 		}
 		
 		function trace_event(event: Event) {
-			trace(this.name + ":" + event);
+			trace(this.name + " (frame " + this.currentFrame + "):" + event);
 		}
 		
 		public function setup() {
@@ -25,6 +25,11 @@
 		}
 		
 		public function destroy() {
+			this.addEventListener(Event.EXIT_FRAME, this.delayed_destroy);
+		}
+		
+		public function delayed_destroy(evt: Event) {
+			this.removeEventListener(Event.EXIT_FRAME, this.delayed_destroy);
 			this.removeEventListener(Event.ENTER_FRAME, this.trace_event);
 			this.removeEventListener(Event.EXIT_FRAME, this.trace_event);
 			this.removeEventListener(Event.ADDED, this.trace_event);

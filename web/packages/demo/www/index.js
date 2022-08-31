@@ -1,12 +1,8 @@
 import "./index.css";
 
-import { SourceAPI, PublicAPI } from "ruffle-core";
+import { PublicAPI } from "ruffle-core";
 
-window.RufflePlayer = PublicAPI.negotiate(
-    window.RufflePlayer,
-    "local",
-    new SourceAPI("local")
-);
+window.RufflePlayer = PublicAPI.negotiate(window.RufflePlayer, "local");
 const ruffle = window.RufflePlayer.newest();
 
 let player;
@@ -21,6 +17,9 @@ const sampleFileInputContainer = document.getElementById(
 const localFileInput = document.getElementById("local-file");
 const sampleFileInput = document.getElementById("sample-swfs");
 const localFileName = document.getElementById("local-file-name");
+const closeModal = document.getElementById("close-modal");
+const openModal = document.getElementById("open-modal");
+const metadataModal = document.getElementById("metadata-modal");
 // prettier-ignore
 const optionGroups = {
     "Animation": document.getElementById("anim-optgroup"),
@@ -33,9 +32,59 @@ const defaultConfig = {
     logLevel: "warn",
 };
 
+const swfToFlashVersion = {
+    1: "1",
+    2: "2",
+    3: "3",
+    4: "4",
+    5: "5",
+    6: "6",
+    7: "7",
+    8: "8",
+    9: "9.0",
+    10: "10.0/10.1",
+    11: "10.2",
+    12: "10.3",
+    13: "11.0",
+    14: "11.1",
+    15: "11.2",
+    16: "11.3",
+    17: "11.4",
+    18: "11.5",
+    19: "11.6",
+    20: "11.7",
+    21: "11.8",
+    22: "11.9",
+    23: "12",
+    24: "13",
+    25: "14",
+    26: "15",
+    27: "16",
+    28: "17",
+    29: "18",
+    30: "19",
+    31: "20",
+    32: "21",
+    33: "22",
+    34: "23",
+    35: "24",
+    36: "25",
+    37: "26",
+    38: "27",
+    39: "28",
+    40: "29",
+    41: "30",
+    42: "31",
+    43: "32",
+};
+
 function unload() {
     if (player) {
         player.remove();
+        document.querySelectorAll("span.metadata").forEach((el) => {
+            el.textContent = "Loading";
+        });
+        document.getElementById("backgroundColor").value = "#FFFFFF";
     }
 }
 
@@ -45,6 +94,31 @@ function load(options) {
     player.id = "player";
     main.append(player);
     player.load(options);
+    player.addEventListener("loadedmetadata", function () {
+        if (this.metadata) {
+            for (const [key, value] of Object.entries(this.metadata)) {
+                const metadataElement = document.getElementById(key);
+                if (metadataElement) {
+                    switch (key) {
+                        case "backgroundColor":
+                            metadataElement.value = value ?? "#FFFFFF";
+                            break;
+                        case "uncompressedLength":
+                            metadataElement.textContent = `${value >> 10}Kb`;
+                            break;
+                        case "swfVersion":
+                            document.getElementById(
+                                "flashVersion"
+                            ).textContent = swfToFlashVersion[value];
+                        // falls through and executes the default case as well
+                        default:
+                            metadataElement.textContent = value;
+                            break;
+                    }
+                }
+            }
+        }
+    });
 }
 
 function showSample(swfData) {
@@ -131,6 +205,14 @@ localFileInput.addEventListener("drop", (event) => {
     loadFile(event.dataTransfer.files[0]);
 });
 
+closeModal.addEventListener("click", () => {
+    metadataModal.style.display = "none";
+});
+
+openModal.addEventListener("click", () => {
+    metadataModal.style.display = "block";
+});
+
 window.addEventListener("load", () => {
     if (
         navigator.userAgent.match(/iPad/i) ||
@@ -140,6 +222,12 @@ window.addEventListener("load", () => {
     }
     overlay.classList.remove("hidden");
 });
+
+window.onclick = (event) => {
+    if (event.target === metadataModal) {
+        metadataModal.style.display = "none";
+    }
+};
 
 (async () => {
     const response = await fetch("swfs.json");

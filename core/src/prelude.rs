@@ -1,13 +1,13 @@
 pub use crate::avm2::Value as Avm2Value;
-pub use crate::bounding_box::BoundingBox;
-pub use crate::color_transform::ColorTransform;
 pub use crate::display_object::{
     DisplayObject, DisplayObjectContainer, HitTestOptions, Lists, TDisplayObject,
     TDisplayObjectContainer,
 };
 pub use crate::impl_display_object_container;
-pub use crate::matrix::Matrix;
 pub use log::{error, info, trace, warn};
+pub use ruffle_render::bounding_box::BoundingBox;
+pub use ruffle_render::color_transform::ColorTransform;
+pub use ruffle_render::matrix::Matrix;
 pub use std::ops::{Bound, RangeBounds};
 pub use swf::{CharacterId, Color, Twips};
 

@@ -1,8 +1,9 @@
 //! Container mix-in for display objects
 
-use crate::avm2::{Avm2, Event as Avm2Event, EventData as Avm2EventData, Value as Avm2Value};
+use crate::avm2::{Avm2, EventObject as Avm2EventObject, Value as Avm2Value};
 use crate::context::{RenderContext, UpdateContext};
 use crate::display_object::avm1_button::Avm1Button;
+use crate::display_object::loader_display::LoaderDisplay;
 use crate::display_object::movie_clip::MovieClip;
 use crate::display_object::stage::Stage;
 use crate::display_object::{Depth, DisplayObject, TDisplayObject};
@@ -22,9 +23,7 @@ pub fn dispatch_removed_from_stage_event<'gc>(
     context: &mut UpdateContext<'_, 'gc, '_>,
 ) {
     if let Avm2Value::Object(object) = child.object2() {
-        let mut removed_evt = Avm2Event::new("removedFromStage", Avm2EventData::Empty);
-        removed_evt.set_bubbles(false);
-        removed_evt.set_cancelable(false);
+        let removed_evt = Avm2EventObject::bare_default_event(context, "removedFromStage");
 
         if let Err(e) = Avm2::dispatch_event(context, removed_evt, object) {
             log::error!("Encountered AVM2 error when dispatching event: {}", e);
@@ -45,9 +44,7 @@ pub fn dispatch_removed_event<'gc>(
     context: &mut UpdateContext<'_, 'gc, '_>,
 ) {
     if let Avm2Value::Object(object) = child.object2() {
-        let mut removed_evt = Avm2Event::new("removed", Avm2EventData::Empty);
-        removed_evt.set_bubbles(true);
-        removed_evt.set_cancelable(false);
+        let removed_evt = Avm2EventObject::bare_event(context, "removed", true, false);
 
         if let Err(e) = Avm2::dispatch_event(context, removed_evt, object) {
             log::error!("Encountered AVM2 error when dispatching event: {}", e);
@@ -65,11 +62,9 @@ pub fn dispatch_added_to_stage_event_only<'gc>(
     context: &mut UpdateContext<'_, 'gc, '_>,
 ) {
     if let Avm2Value::Object(object) = child.object2() {
-        let mut removed_evt = Avm2Event::new("addedToStage", Avm2EventData::Empty);
-        removed_evt.set_bubbles(false);
-        removed_evt.set_cancelable(false);
+        let added_evt = Avm2EventObject::bare_default_event(context, "addedToStage");
 
-        if let Err(e) = Avm2::dispatch_event(context, removed_evt, object) {
+        if let Err(e) = Avm2::dispatch_event(context, added_evt, object) {
             log::error!("Encountered AVM2 error when dispatching event: {}", e);
         }
     }
@@ -97,11 +92,9 @@ pub fn dispatch_added_event_only<'gc>(
     context: &mut UpdateContext<'_, 'gc, '_>,
 ) {
     if let Avm2Value::Object(object) = child.object2() {
-        let mut removed_evt = Avm2Event::new("added", Avm2EventData::Empty);
-        removed_evt.set_bubbles(true);
-        removed_evt.set_cancelable(false);
+        let added_evt = Avm2EventObject::bare_event(context, "added", true, false);
 
-        if let Err(e) = Avm2::dispatch_event(context, removed_evt, object) {
+        if let Err(e) = Avm2::dispatch_event(context, added_evt, object) {
             log::error!("Encountered AVM2 error when dispatching event: {}", e);
         }
     }
@@ -150,6 +143,7 @@ bitflags! {
         Stage(Stage<'gc>),
         Avm1Button(Avm1Button<'gc>),
         MovieClip(MovieClip<'gc>),
+        LoaderDisplay(LoaderDisplay<'gc>),
     }
 )]
 pub trait TDisplayObjectContainer<'gc>:
@@ -180,9 +174,8 @@ pub trait TDisplayObjectContainer<'gc>:
     /// Returns the number of children on the render list.
     fn num_children(self) -> usize;
 
-    /// Returns the highest depth on the render list, or `None` if no children
-    /// have a depth less than the provided value.
-    fn highest_depth(self, less_than: Depth) -> Option<Depth>;
+    /// Returns the highest depth among children.
+    fn highest_depth(self) -> Depth;
 
     /// Insert a child display object into the container at a specific position
     /// in the depth list, removing any child already at that position.
@@ -285,11 +278,13 @@ pub trait TDisplayObjectContainer<'gc>:
     }
 
     /// Renders the children of this container in render list order.
-    fn render_children(self, context: &mut RenderContext<'_, 'gc>) {
+    fn render_children(self, context: &mut RenderContext<'_, 'gc, '_>) {
         let mut clip_depth = 0;
         let mut clip_depth_stack: Vec<(Depth, DisplayObject<'_>)> = vec![];
         for child in self.iter_render_list() {
             let depth = child.depth();
+
+            child.pre_render(context);
 
             // Check if we need to pop off a mask.
             // This must be a while loop because multiple masks can be popped
@@ -353,8 +348,8 @@ macro_rules! impl_display_object_container {
             self.0.read().$field.num_children()
         }
 
-        fn highest_depth(self, less_than: Depth) -> Option<Depth> {
-            self.0.read().$field.highest_depth(less_than)
+        fn highest_depth(self) -> Depth {
+            self.0.read().$field.highest_depth()
         }
 
         fn replace_at_depth(
@@ -673,14 +668,9 @@ impl<'gc> ChildContainer<'gc> {
         }
     }
 
-    /// Returns the highest depth on the render list, or `None` if no children
-    /// have a depth less than the provided value.
-    pub fn highest_depth(&self, less_than: Depth) -> Option<Depth> {
-        self.depth_list
-            .range(..less_than)
-            .rev()
-            .map(|(k, _v)| *k)
-            .next()
+    /// Returns the highest depth among children.
+    pub fn highest_depth(&self) -> Depth {
+        self.depth_list.keys().next_back().copied().unwrap_or(0)
     }
 
     /// Determine if the render list is empty.

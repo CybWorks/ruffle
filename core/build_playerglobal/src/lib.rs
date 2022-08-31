@@ -1,20 +1,18 @@
 //! An internal Ruffle utility to build our playerglobal
 //! `library.swf`
 
-use convert_case::{Case, Casing};
+use convert_case::{Boundary, Case, Casing};
 use proc_macro2::TokenStream;
 use quote::quote;
 use std::fs::File;
+use std::io::ErrorKind;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
 use swf::avm2::types::*;
 use swf::avm2::write::Writer;
-use swf::DoAbc;
-use swf::Header;
-use swf::SwfStr;
-use swf::Tag;
+use swf::{DoAbc, DoAbcFlag, Header, Tag};
 
 // The metadata name - all metadata in our .as files
 // should be of the form `[Ruffle(key1 = value1, key2 = value2)]`
@@ -37,7 +35,7 @@ pub fn build_playerglobal(
 
     // This will create 'playerglobal.abc', 'playerglobal.cpp', and 'playerglobal.h'
     // in `out_dir`
-    let code = Command::new("java")
+    let status = Command::new("java")
         .args(&[
             "-classpath",
             &asc_path.to_string_lossy(),
@@ -49,11 +47,23 @@ pub fn build_playerglobal(
             "playerglobal",
             "-import",
             &classes_dir.join("stubs.as").to_string_lossy(),
+            // From some reason this has to be passed as a separate argument.
+            &classes_dir.join("Toplevel.as").to_string_lossy(),
             &classes_dir.join("globals.as").to_string_lossy(),
         ])
-        .status()?;
-    if !code.success() {
-        return Err(format!("Compiling failed with code {:?}", code).into());
+        .status();
+    match status {
+        Ok(code) => {
+            if !code.success() {
+                return Err(format!("Compiling failed with code {:?}", code).into());
+            }
+        }
+        Err(err) => {
+            if err.kind() == ErrorKind::NotFound {
+                return Err("Java could not be found on your computer. Please install java, then try compiling again.".into());
+            }
+            return Err(err.into());
+        }
     }
 
     let playerglobal = out_dir.join("playerglobal");
@@ -66,9 +76,9 @@ pub fn build_playerglobal(
 
     bytes = write_native_table(&bytes, &out_dir)?;
 
-    let tags = vec![Tag::DoAbc(DoAbc {
-        name: SwfStr::from_utf8_str(""),
-        is_lazy_initialize: true,
+    let tags = [Tag::DoAbc(DoAbc {
+        flags: DoAbcFlag::LAZY_INITIALIZE,
+        name: "".into(),
         data: &bytes,
     })];
 
@@ -109,7 +119,13 @@ fn flash_to_rust_path(path: &str) -> String {
     // so 'URLLoader' becomes 'url_loader'
     let components = path
         .split('.')
-        .map(|component| component.to_case(Case::Snake))
+        .map(|component| {
+            component
+                .from_case(Case::Camel)
+                // Do not split on a letter followed by a digit, so e.g. `atan2` won't become `atan_2`.
+                .without_boundaries(&[Boundary::UpperDigit, Boundary::LowerDigit])
+                .to_case(Case::Snake)
+        })
         .collect::<Vec<_>>();
     // Form a Rust path from the snake-case components
     components.join("::")
@@ -132,8 +148,11 @@ fn rust_method_path(
         // For example, a namespace of "flash.system" and a name of "Security"
         // turns into the path "flash::system::security"
         let multiname = &abc.constant_pool.multinames[parent.0 as usize - 1];
-        path += &flash_to_rust_path(resolve_multiname_ns(&abc, multiname));
-        path += "::";
+        let ns = flash_to_rust_path(resolve_multiname_ns(&abc, multiname));
+        if !ns.is_empty() {
+            path += &ns;
+            path += "::";
+        }
         path += &flash_to_rust_path(resolve_multiname_name(&abc, multiname));
         path += "::";
     } else {

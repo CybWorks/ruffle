@@ -3,10 +3,11 @@ use crate::avm2::array::ArrayStorage;
 use crate::avm2::bytearray::{ByteArrayStorage, CompressionAlgorithm, Endian, ObjectEncoding};
 use crate::avm2::class::{Class, ClassAttributes};
 use crate::avm2::method::{Method, NativeMethodImpl};
-use crate::avm2::names::{Namespace, QName};
 use crate::avm2::object::{bytearray_allocator, ArrayObject, ByteArrayObject, Object, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
+use crate::avm2::Namespace;
+use crate::avm2::QName;
 use crate::character::Character;
 use crate::string::AvmString;
 use encoding_rs::Encoding;
@@ -279,9 +280,11 @@ pub fn read_utf<'gc>(
 ) -> Result<Value<'gc>, Error> {
     if let Some(this) = this {
         if let Some(bytearray) = this.as_bytearray() {
-            return Ok(
-                AvmString::new_utf8(activation.context.gc_context, bytearray.read_utf()?).into(),
-            );
+            return Ok(AvmString::new_utf8_bytes(
+                activation.context.gc_context,
+                bytearray.read_utf()?,
+            )
+            .into());
         }
     }
 
@@ -294,8 +297,9 @@ pub fn to_string<'gc>(
 ) -> Result<Value<'gc>, Error> {
     if let Some(this) = this {
         if let Some(bytearray) = this.as_bytearray() {
-            let (new_string, _, _) = UTF_8.decode(bytearray.bytes());
-            return Ok(AvmString::new_utf8(activation.context.gc_context, new_string).into());
+            return Ok(
+                AvmString::new_utf8_bytes(activation.context.gc_context, bytearray.bytes()).into(),
+            );
         }
     }
 

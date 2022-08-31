@@ -2,7 +2,6 @@ use crate::avm2::activation::Activation;
 use crate::avm2::class::Class;
 use crate::avm2::domain::Domain;
 use crate::avm2::method::{Method, NativeMethodImpl};
-use crate::avm2::names::{Namespace, QName};
 use crate::avm2::object::{
     ClassObject, FunctionObject, NamespaceObject, Object, ScriptObject, TObject,
 };
@@ -11,6 +10,8 @@ use crate::avm2::script::Script;
 use crate::avm2::value::Value;
 use crate::avm2::Avm2;
 use crate::avm2::Error;
+use crate::avm2::Namespace;
+use crate::avm2::QName;
 use crate::string::AvmString;
 use crate::tag_utils::{self, SwfMovie, SwfSlice, SwfStream};
 use gc_arena::{Collect, GcCell, MutationContext};
@@ -88,10 +89,19 @@ pub struct SystemClasses<'gc> {
     pub qname: ClassObject<'gc>,
     pub sharedobject: ClassObject<'gc>,
     pub mouseevent: ClassObject<'gc>,
+    pub progressevent: ClassObject<'gc>,
     pub textevent: ClassObject<'gc>,
     pub errorevent: ClassObject<'gc>,
     pub ioerrorevent: ClassObject<'gc>,
     pub securityerrorevent: ClassObject<'gc>,
+    pub transform: ClassObject<'gc>,
+    pub colortransform: ClassObject<'gc>,
+    pub matrix: ClassObject<'gc>,
+    pub illegaloperationerror: ClassObject<'gc>,
+    pub eventdispatcher: ClassObject<'gc>,
+    pub rectangle: ClassObject<'gc>,
+    pub keyboardevent: ClassObject<'gc>,
+    pub point: ClassObject<'gc>,
 }
 
 impl<'gc> SystemClasses<'gc> {
@@ -150,10 +160,19 @@ impl<'gc> SystemClasses<'gc> {
             qname: object,
             sharedobject: object,
             mouseevent: object,
+            progressevent: object,
             textevent: object,
             errorevent: object,
             ioerrorevent: object,
             securityerrorevent: object,
+            transform: object,
+            colortransform: object,
+            matrix: object,
+            illegaloperationerror: object,
+            eventdispatcher: object,
+            rectangle: object,
+            keyboardevent: object,
+            point: object,
         }
     }
 }
@@ -407,19 +426,7 @@ pub fn load_player_globals<'gc>(
     function(activation, "", "parseInt", toplevel::parse_int, script)?;
     function(activation, "", "parseFloat", toplevel::parse_float, script)?;
     function(activation, "", "escape", toplevel::escape, script)?;
-    constant(mc, "", "undefined", Value::Undefined, script, object_class)?;
-    constant(mc, "", "null", Value::Null, script, object_class)?;
-    constant(mc, "", "NaN", f64::NAN.into(), script, object_class)?;
-    constant(
-        mc,
-        "",
-        "Infinity",
-        f64::INFINITY.into(),
-        script,
-        object_class,
-    )?;
 
-    class(activation, math::create_class(mc), script)?;
     class(activation, json::create_class(mc), script)?;
     avm2_system_class!(regexp, activation, regexp::create_class(mc), script);
     avm2_system_class!(vector, activation, vector::create_class(mc), script);
@@ -447,16 +454,12 @@ pub fn load_player_globals<'gc>(
         flash::events::ieventdispatcher::create_interface(mc),
         script,
     )?;
-    class(
+    avm2_system_class!(
+        eventdispatcher,
         activation,
         flash::events::eventdispatcher::create_class(mc),
-        script,
-    )?;
-    class(
-        activation,
-        flash::events::eventphase::create_class(mc),
-        script,
-    )?;
+        script
+    );
 
     // package `flash.utils`
     avm2_system_class!(
@@ -474,8 +477,6 @@ pub fn load_player_globals<'gc>(
         script,
     )?;
 
-    class(activation, flash::utils::timer::create_class(mc), script)?;
-
     namespace(
         activation,
         "flash.utils",
@@ -484,30 +485,6 @@ pub fn load_player_globals<'gc>(
         script,
     )?;
     class(activation, flash::utils::proxy::create_class(mc), script)?;
-
-    function(
-        activation,
-        "flash.utils",
-        "getTimer",
-        flash::utils::get_timer,
-        script,
-    )?;
-
-    function(
-        activation,
-        "flash.utils",
-        "getQualifiedClassName",
-        flash::utils::get_qualified_class_name,
-        script,
-    )?;
-
-    function(
-        activation,
-        "flash.utils",
-        "getQualifiedSuperclassName",
-        flash::utils::get_qualified_super_class_name,
-        script,
-    )?;
 
     // package `flash.display`
     class(
@@ -567,7 +544,6 @@ pub fn load_player_globals<'gc>(
         flash::display::graphics::create_class(mc),
         script
     );
-    class(activation, flash::display::loader::create_class(mc), script)?;
     avm2_system_class!(
         loaderinfo,
         activation,
@@ -592,23 +568,6 @@ pub fn load_player_globals<'gc>(
         flash::display::bitmapdata::create_class(mc),
         script
     );
-
-    // package `flash.filters`
-    class(
-        activation,
-        flash::filters::bitmapfilter::create_class(mc),
-        script,
-    )?;
-    class(
-        activation,
-        flash::filters::blurfilter::create_class(mc),
-        script,
-    )?;
-    class(
-        activation,
-        flash::filters::glowfilter::create_class(mc),
-        script,
-    )?;
 
     // package `flash.geom`
 
@@ -672,13 +631,6 @@ pub fn load_player_globals<'gc>(
     class(activation, flash::text::font::create_class(mc), script)?;
 
     // package `flash.crypto`
-    function(
-        activation,
-        "flash.crypto",
-        "generateRandomBytes",
-        flash::crypto::generate_random_bytes,
-        script,
-    )?;
 
     // package `flash.external`
     class(
@@ -692,59 +644,6 @@ pub fn load_player_globals<'gc>(
     // relative late, so that it can access classes defined before
     // this call.
     load_playerglobal(activation, domain)?;
-
-    // These are event definitions, which need to be able to
-    // load "flash.events.Event", which is defined in our playerglobal.
-    // Therefore, they need to come after "load_playerglobal"
-    // FIXME: Convert all of these event classes to ActionScript,
-    // which will allow us to remove all of these calls.
-
-    avm2_system_class!(
-        mouseevent,
-        activation,
-        flash::events::mouseevent::create_class(mc),
-        script
-    );
-    avm2_system_class!(
-        textevent,
-        activation,
-        flash::events::textevent::create_class(mc),
-        script
-    );
-    avm2_system_class!(
-        errorevent,
-        activation,
-        flash::events::errorevent::create_class(mc),
-        script
-    );
-    avm2_system_class!(
-        securityerrorevent,
-        activation,
-        flash::events::securityerrorevent::create_class(mc),
-        script
-    );
-    avm2_system_class!(
-        ioerrorevent,
-        activation,
-        flash::events::ioerrorevent::create_class(mc),
-        script
-    );
-    class(
-        activation,
-        flash::events::keyboardevent::create_class(mc),
-        script,
-    )?;
-    class(
-        activation,
-        flash::events::progressevent::create_class(mc),
-        script,
-    )?;
-    avm2_system_class!(
-        fullscreenevent,
-        activation,
-        flash::events::fullscreenevent::create_class(mc),
-        script
-    );
 
     Ok(())
 }
@@ -772,9 +671,13 @@ fn load_playerglobal<'gc>(
 
     let mut reader = slice.read_from(0);
 
-    let tag_callback = |reader: &mut SwfStream<'_>, tag_code, tag_len| {
+    let tag_callback = |reader: &mut SwfStream<'_>, tag_code, _tag_len| {
         if tag_code == TagCode::DoAbc {
-            Avm2::load_abc_from_do_abc(&mut activation.context, &slice, domain, reader, tag_len)?;
+            let do_abc = reader
+                .read_do_abc()
+                .expect("playerglobal.swf should be valid");
+            Avm2::do_abc(&mut activation.context, do_abc, domain)
+                .expect("playerglobal.swf should be valid");
         } else if tag_code != TagCode::End {
             panic!(
                 "playerglobal should only contain `DoAbc` tag - found tag {:?}",
@@ -804,7 +707,25 @@ fn load_playerglobal<'gc>(
         script,
         [
             ("flash.display", "Scene", scene),
+            (
+                "flash.errors",
+                "IllegalOperationError",
+                illegaloperationerror
+            ),
             ("flash.events", "Event", event),
+            ("flash.events", "TextEvent", textevent),
+            ("flash.events", "ErrorEvent", errorevent),
+            ("flash.events", "KeyboardEvent", keyboardevent),
+            ("flash.events", "ProgressEvent", progressevent),
+            ("flash.events", "SecurityErrorEvent", securityerrorevent),
+            ("flash.events", "IOErrorEvent", ioerrorevent),
+            ("flash.events", "MouseEvent", mouseevent),
+            ("flash.events", "FullScreenEvent", fullscreenevent),
+            ("flash.geom", "Matrix", matrix),
+            ("flash.geom", "Point", point),
+            ("flash.geom", "Rectangle", rectangle),
+            ("flash.geom", "Transform", transform),
+            ("flash.geom", "ColorTransform", colortransform),
         ]
     );
 

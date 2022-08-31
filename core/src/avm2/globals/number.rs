@@ -3,9 +3,11 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::class::Class;
 use crate::avm2::method::{Method, NativeMethodImpl};
-use crate::avm2::names::{Multiname, Namespace, QName};
 use crate::avm2::object::{primitive_allocator, FunctionObject, Object, TObject};
 use crate::avm2::value::Value;
+use crate::avm2::Multiname;
+use crate::avm2::Namespace;
+use crate::avm2::QName;
 use crate::avm2::{AvmString, Error};
 use gc_arena::{GcCell, MutationContext};
 
@@ -116,11 +118,11 @@ fn class_init<'gc>(
             .into(),
             activation,
         )?;
-        number_proto.set_local_property_is_enumerable(gc_context, "toExponential".into(), false)?;
-        number_proto.set_local_property_is_enumerable(gc_context, "toFixed".into(), false)?;
-        number_proto.set_local_property_is_enumerable(gc_context, "toPrecision".into(), false)?;
-        number_proto.set_local_property_is_enumerable(gc_context, "toString".into(), false)?;
-        number_proto.set_local_property_is_enumerable(gc_context, "valueOf".into(), false)?;
+        number_proto.set_local_property_is_enumerable(gc_context, "toExponential".into(), false);
+        number_proto.set_local_property_is_enumerable(gc_context, "toFixed".into(), false);
+        number_proto.set_local_property_is_enumerable(gc_context, "toPrecision".into(), false);
+        number_proto.set_local_property_is_enumerable(gc_context, "toString".into(), false);
+        number_proto.set_local_property_is_enumerable(gc_context, "valueOf".into(), false);
     }
 
     Ok(Value::Undefined)

@@ -11,9 +11,9 @@ members = [
     "scanner",
     "exporter",
 
+    "render",
     "render/canvas",
     "render/wgpu",
-    "render/common_tess",
     "render/webgl",
 
     "tests",

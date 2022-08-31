@@ -11,7 +11,7 @@ use crate::display_object::{DisplayObjectBase, DisplayObjectPtr, TDisplayObject}
 use crate::events::{ButtonKeyCode, ClipEvent, ClipEventResult};
 use crate::prelude::*;
 use crate::tag_utils::{SwfMovie, SwfSlice};
-use crate::vminterface::{AvmType, Instantiator};
+use crate::vminterface::Instantiator;
 use gc_arena::{Collect, GcCell, MutationContext};
 use std::cell::{Ref, RefMut};
 use std::collections::BTreeMap;
@@ -42,14 +42,11 @@ impl<'gc> Avm1Button<'gc> {
     pub fn from_swf_tag(
         button: &swf::Button,
         source_movie: &SwfSlice,
-        _library: &crate::library::Library<'gc>,
         gc_context: gc_arena::MutationContext<'gc, '_>,
     ) -> Self {
         let mut actions = vec![];
         for action in &button.actions {
-            let action_data = source_movie
-                .to_unbounded_subslice(action.action_data)
-                .unwrap();
+            let action_data = source_movie.to_unbounded_subslice(action.action_data);
             let bits = action.conditions.bits();
             let mut bit = 1u16;
             while bits & !(bit - 1) != 0 {
@@ -261,7 +258,7 @@ impl<'gc> TDisplayObject<'gc> for Avm1Button<'gc> {
     ) {
         self.set_default_instance_name(context);
 
-        if context.avm_type() == AvmType::Avm1 {
+        if !context.is_action_script_3() {
             context
                 .avm1
                 .add_to_exec_list(context.gc_context, (*self).into());
@@ -334,7 +331,7 @@ impl<'gc> TDisplayObject<'gc> for Avm1Button<'gc> {
         }
     }
 
-    fn render_self(&self, context: &mut RenderContext<'_, 'gc>) {
+    fn render_self(&self, context: &mut RenderContext<'_, 'gc, '_>) {
         self.render_children(context);
     }
 

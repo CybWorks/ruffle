@@ -3,11 +3,12 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::class::{Class, ClassAttributes};
 use crate::avm2::method::{Method, NativeMethodImpl};
-use crate::avm2::names::{Namespace, QName};
 use crate::avm2::object::{Object, TObject};
 use crate::avm2::traits::Trait;
 use crate::avm2::value::Value;
 use crate::avm2::Error;
+use crate::avm2::Namespace;
+use crate::avm2::QName;
 use crate::display_object::{StageDisplayState, TDisplayObject};
 use crate::string::{AvmString, WString};
 use gc_arena::{GcCell, MutationContext};
@@ -310,15 +311,21 @@ pub fn set_align<'gc>(
 
 /// Implement `browserZoomFactor`'s getter
 pub fn browser_zoom_factor<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc, '_>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error> {
-    if let Some(dobj) = this
+    if this
         .and_then(|this| this.as_display_object())
         .and_then(|this| this.as_stage())
+        .is_some()
     {
-        return Ok(dobj.viewport_scale_factor().into());
+        return Ok(activation
+            .context
+            .renderer
+            .viewport_dimensions()
+            .scale_factor
+            .into());
     }
 
     Ok(Value::Undefined)
@@ -366,15 +373,21 @@ pub fn set_color<'gc>(
 
 /// Implement `contentsScaleFactor`'s getter
 pub fn contents_scale_factor<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc, '_>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error> {
-    if let Some(dobj) = this
+    if this
         .and_then(|this| this.as_display_object())
         .and_then(|this| this.as_stage())
+        .is_some()
     {
-        return Ok(dobj.viewport_scale_factor().into());
+        return Ok(activation
+            .context
+            .renderer
+            .viewport_dimensions()
+            .scale_factor
+            .into());
     }
 
     Ok(Value::Undefined)
@@ -540,6 +553,43 @@ pub fn set_scale_mode<'gc>(
                 .into(),
         );
     }
+    Ok(Value::Undefined)
+}
+
+/// Implement `stageFocusRect`'s getter
+///
+/// This setting is currently ignored in Ruffle.
+pub fn stage_focus_rect<'gc>(
+    _activation: &mut Activation<'_, 'gc, '_>,
+    this: Option<Object<'gc>>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error> {
+    if let Some(dobj) = this
+        .and_then(|this| this.as_display_object())
+        .and_then(|this| this.as_stage())
+    {
+        return Ok(dobj.stage_focus_rect().into());
+    }
+
+    Ok(Value::Undefined)
+}
+
+/// Implement `stageFocusRect`'s setter
+///
+/// This setting is currently ignored in Ruffle.
+pub fn set_stage_focus_rect<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    this: Option<Object<'gc>>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error> {
+    if let Some(dobj) = this
+        .and_then(|this| this.as_display_object())
+        .and_then(|this| this.as_stage())
+    {
+        let rf = args.get(0).unwrap_or(&Value::Undefined).coerce_to_boolean();
+        dobj.set_stage_focus_rect(activation.context.gc_context, rf);
+    }
+
     Ok(Value::Undefined)
 }
 
@@ -747,6 +797,11 @@ pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>
         ),
         ("stageWidth", Some(stage_width), Some(set_stage_width)),
         ("stageHeight", Some(stage_height), Some(set_stage_height)),
+        (
+            "stageFocusRect",
+            Some(stage_focus_rect),
+            Some(set_stage_focus_rect),
+        ),
         ("allowsFullScreen", Some(allows_full_screen), None),
         (
             "allowsFullScreenInteractive",

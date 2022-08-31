@@ -3,10 +3,11 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::class::Class;
 use crate::avm2::method::{Method, NativeMethodImpl};
-use crate::avm2::names::{Namespace, QName};
 use crate::avm2::object::{Object, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
+use crate::avm2::Namespace;
+use crate::avm2::QName;
 use crate::context::UpdateContext;
 use crate::display_object::{DisplayObject, Lists, TDisplayObject, TDisplayObjectContainer};
 use gc_arena::{GcCell, MutationContext};
@@ -113,7 +114,7 @@ fn remove_child_from_displaylist<'gc>(
 }
 
 /// Add the `child` to `parent`'s display list.
-fn add_child_to_displaylist<'gc>(
+pub(super) fn add_child_to_displaylist<'gc>(
     context: &mut UpdateContext<'_, 'gc, '_>,
     parent: DisplayObject<'gc>,
     child: DisplayObject<'gc>,
@@ -168,14 +169,12 @@ pub fn get_child_by_name<'gc>(
             .cloned()
             .unwrap_or(Value::Undefined)
             .coerce_to_string(activation)?;
-        let child = dobj.child_by_name(&name, false).ok_or_else(|| {
-            format!(
-                "RangeError: Display object container has no child with name {}",
-                name
-            )
-        })?;
-
-        return Ok(child.object2());
+        if let Some(child) = dobj.child_by_name(&name, false) {
+            return Ok(child.object2());
+        } else {
+            log::warn!("Display object container has no child with name {}", name);
+            return Ok(Value::Null);
+        }
     }
 
     Ok(Value::Undefined)
@@ -579,6 +578,24 @@ pub fn are_inaccessible_objects_under_point<'gc>(
     Err("DisplayObjectContainer.areInaccessibleObjectsUnderPoint not yet implemented".into())
 }
 
+pub fn mouse_children<'gc>(
+    _activation: &mut Activation<'_, 'gc, '_>,
+    _this: Option<Object<'gc>>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error> {
+    log::warn!("DisplayObjectContainer.mouseChildren getter: not yet implemented");
+    Ok(Value::Undefined)
+}
+
+pub fn set_mouse_children<'gc>(
+    _activation: &mut Activation<'_, 'gc, '_>,
+    _this: Option<Object<'gc>>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error> {
+    log::warn!("DisplayObjectContainer.mouseChildren setter: not yet implemented");
+    Ok(Value::Undefined)
+}
+
 /// Construct `DisplayObjectContainer`'s class.
 pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>> {
     let class = Class::new(
@@ -608,7 +625,14 @@ pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>
         &str,
         Option<NativeMethodImpl>,
         Option<NativeMethodImpl>,
-    )] = &[("numChildren", Some(num_children), None)];
+    )] = &[
+        ("numChildren", Some(num_children), None),
+        (
+            "mouseChildren",
+            Some(mouse_children),
+            Some(set_mouse_children),
+        ),
+    ];
     write.define_public_builtin_instance_properties(mc, PUBLIC_INSTANCE_PROPERTIES);
 
     const PUBLIC_INSTANCE_METHODS: &[(&str, NativeMethodImpl)] = &[

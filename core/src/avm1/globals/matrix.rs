@@ -6,9 +6,9 @@ use crate::avm1::function::{Executable, FunctionObject};
 use crate::avm1::globals::point::{point_to_object, value_to_point};
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Object, ScriptObject, TObject, Value};
-use crate::matrix::Matrix;
 use crate::string::AvmString;
 use gc_arena::MutationContext;
+use ruffle_render::matrix::Matrix;
 use swf::Twips;
 
 const PROTO_DECLS: &[Declaration] = declare_properties! {
@@ -477,7 +477,7 @@ pub fn create_proto<'gc>(
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let object = ScriptObject::object(gc_context, Some(proto));
+    let object = ScriptObject::new(gc_context, Some(proto));
     define_properties_on(PROTO_DECLS, gc_context, object, fn_proto);
     object.into()
 }

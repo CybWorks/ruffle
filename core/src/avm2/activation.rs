@@ -4,7 +4,6 @@ use crate::avm2::array::ArrayStorage;
 use crate::avm2::class::Class;
 use crate::avm2::domain::Domain;
 use crate::avm2::method::{BytecodeMethod, Method, ParamConfig};
-use crate::avm2::names::{Multiname, Namespace, QName};
 use crate::avm2::object::{
     ArrayObject, ByteArrayObject, ClassObject, FunctionObject, NamespaceObject, ScriptObject,
 };
@@ -12,6 +11,9 @@ use crate::avm2::object::{Object, TObject};
 use crate::avm2::scope::{Scope, ScopeChain, ScopeStack};
 use crate::avm2::script::Script;
 use crate::avm2::value::Value;
+use crate::avm2::Multiname;
+use crate::avm2::Namespace;
+use crate::avm2::QName;
 use crate::avm2::{value, Avm2, Error};
 use crate::context::UpdateContext;
 use crate::string::{AvmString, WStr, WString};
@@ -22,7 +24,7 @@ use std::borrow::Cow;
 use std::cmp::{min, Ordering};
 use swf::avm2::read::Reader;
 use swf::avm2::types::{
-    Class as AbcClass, Index, Method as AbcMethod, MethodFlags as AbcMethodFlags,
+    Class as AbcClass, Exception, Index, Method as AbcMethod, MethodFlags as AbcMethodFlags,
     Multiname as AbcMultiname, Namespace as AbcNamespace, Op,
 };
 
@@ -794,6 +796,39 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         }
     }
 
+    /// If a local exception handler exists for the error, use it to handle
+    /// the error. Otherwise pass the error down the stack.
+    fn handle_err<'b>(
+        &mut self,
+        method: Gc<'gc, BytecodeMethod<'gc>>,
+        reader: &mut Reader<'b>,
+        full_data: &'b [u8],
+        instruction_start: usize,
+        error: Error,
+    ) -> Result<FrameControl<'gc>, Error> {
+        if let Some(body) = method.body() {
+            for e in body.exceptions.iter() {
+                if instruction_start >= e.from_offset as usize
+                    && instruction_start < e.to_offset as usize
+                    && e.type_name.0 == 0
+                // Currently we support only typeless catch clauses
+                {
+                    // Emulate pushing the exception object
+                    let ws = WString::from_utf8_owned(error.to_string());
+                    let exception = AvmString::new(self.context.gc_context, ws);
+                    self.context.avm2.push(exception);
+
+                    self.scope_stack.clear();
+                    reader.seek_absolute(full_data, e.target_offset as usize);
+                    return Ok(FrameControl::Continue);
+                }
+            }
+        }
+
+        log::error!("AVM2 error: {}", error);
+        Err(error)
+    }
+
     /// Run a single action from a given action reader.
     fn do_next_opcode<'b>(
         &mut self,
@@ -861,6 +896,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
                 Op::SetSuper { index } => self.op_set_super(method, index),
                 Op::In => self.op_in(),
                 Op::PushScope => self.op_push_scope(),
+                Op::NewCatch { index } => self.op_newcatch(method, index),
                 Op::PushWith => self.op_push_with(),
                 Op::PopScope => self.op_pop_scope(),
                 Op::GetOuterScope { index } => self.op_get_outer_scope(index),
@@ -996,12 +1032,12 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
                 Op::Sxi1 => self.op_sxi1(),
                 Op::Sxi8 => self.op_sxi8(),
                 Op::Sxi16 => self.op_sxi16(),
+                Op::Throw => self.op_throw(),
                 _ => self.unknown_op(op),
             };
 
-            if let Err(e) = result {
-                log::error!("AVM2 error: {}", e);
-                return Err(e);
+            if let Err(error) = result {
+                return self.handle_err(method, reader, &full_data, instruction_start, error);
             }
             result
         } else if let Err(e) = op {
@@ -1546,6 +1582,26 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let has_prop = obj.has_property_via_in(self, &multiname)?;
 
         self.context.avm2.push(has_prop);
+
+        Ok(FrameControl::Continue)
+    }
+
+    fn op_newcatch(
+        &mut self,
+        method: Gc<'gc, BytecodeMethod<'gc>>,
+        index: Index<Exception>,
+    ) -> Result<FrameControl<'gc>, Error> {
+        if let Some(body) = method.body() {
+            let ex = &body.exceptions[index.0 as usize];
+            let vname = ex.variable_name;
+            let qname = QName::from_abc_multiname(
+                method.translation_unit(),
+                vname,
+                self.context.gc_context,
+            )?;
+            let so = ScriptObject::catch_scope(self.context.gc_context, &qname);
+            self.context.avm2.push(so);
+        }
 
         Ok(FrameControl::Continue)
     }
@@ -2616,12 +2672,12 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         method: Gc<'gc, BytecodeMethod<'gc>>,
         type_name_index: Index<AbcMultiname>,
     ) -> Result<FrameControl<'gc>, Error> {
-        let value = self.context.avm2.pop().coerce_to_object(self)?;
+        let value = self.context.avm2.pop();
 
         let multiname = self.pool_multiname_static(method, type_name_index)?;
         let class = self.resolve_class(&multiname)?;
 
-        if value.is_of_type(class, self)? {
+        if value.is_of_type(self, class)? {
             self.context.avm2.push(value);
         } else {
             self.context.avm2.push(Value::Null);
@@ -2638,9 +2694,9 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             .as_object()
             .and_then(|c| c.as_class_object())
             .ok_or("Cannot coerce a value to a type that is null, undefined, or not a class")?;
-        let value = self.context.avm2.pop().coerce_to_object(self)?;
+        let value = self.context.avm2.pop();
 
-        if value.is_of_type(class, self)? {
+        if value.is_of_type(self, class)? {
             self.context.avm2.push(value);
         } else {
             self.context.avm2.push(Value::Null);
@@ -3085,5 +3141,18 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     fn op_timestamp(&mut self) -> Result<FrameControl<'gc>, Error> {
         // while a debugger is not attached, this is a no-op
         Ok(FrameControl::Continue)
+    }
+
+    fn op_throw(&mut self) -> Result<FrameControl<'gc>, Error> {
+        let error_val = self.context.avm2.pop();
+        // FIXME - preserve the original thrown value.
+        // We include 'Ruffle' in the message to make it obvious that
+        // this is a temporary hack, and that the original object
+        // may not have been a String
+        let error_string = format!(
+            "Ruffle thrown error: {}",
+            error_val.coerce_to_debug_string(self)?
+        );
+        Err(error_string.into())
     }
 }

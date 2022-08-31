@@ -1,8 +1,9 @@
-use crate::backend::render::{BitmapInfo, BitmapSource, ShapeHandle};
-use crate::bounding_box::BoundingBox;
 use crate::context::RenderContext;
-use crate::shape_utils::{DistilledShape, DrawCommand, DrawPath};
 use gc_arena::Collect;
+use ruffle_render::backend::ShapeHandle;
+use ruffle_render::bitmap::{BitmapInfo, BitmapSource};
+use ruffle_render::bounding_box::BoundingBox;
+use ruffle_render::shape_utils::{DistilledShape, DrawCommand, DrawPath};
 use std::cell::Cell;
 use swf::{FillStyle, LineStyle, Twips};
 
@@ -48,8 +49,8 @@ impl Drawing {
     pub fn from_swf_shape(shape: &swf::Shape) -> Self {
         let mut this = Self {
             render_handle: Cell::new(None),
-            shape_bounds: shape.shape_bounds.clone().into(),
-            edge_bounds: shape.edge_bounds.clone().into(),
+            shape_bounds: shape.shape_bounds.into(),
+            edge_bounds: shape.edge_bounds.into(),
             dirty: Cell::new(true),
             paths: Vec::new(),
             bitmaps: Vec::new(),
@@ -298,8 +299,12 @@ impl Drawing {
         self.shape_bounds.clone()
     }
 
-    pub fn hit_test(&self, point: (Twips, Twips), local_matrix: &crate::matrix::Matrix) -> bool {
-        use crate::shape_utils;
+    pub fn hit_test(
+        &self,
+        point: (Twips, Twips),
+        local_matrix: &ruffle_render::matrix::Matrix,
+    ) -> bool {
+        use ruffle_render::shape_utils;
         for path in &self.paths {
             match path {
                 DrawingPath::Fill(fill) => {

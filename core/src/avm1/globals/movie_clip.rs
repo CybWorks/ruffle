@@ -8,18 +8,20 @@ use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{self, Object, ScriptObject, TObject, Value};
 use crate::avm_error;
 use crate::avm_warn;
-use crate::backend::{navigator::NavigationMethod, render};
+use crate::backend::navigator::NavigationMethod;
 use crate::display_object::{
     Bitmap, DisplayObject, EditText, MovieClip, TDisplayObject, TDisplayObjectContainer,
 };
 use crate::ecma_conversions::f64_to_wrapping_i32;
 use crate::prelude::*;
-use crate::shape_utils::DrawCommand;
+use crate::string::AvmString;
 use crate::vminterface::Instantiator;
 use gc_arena::MutationContext;
+use ruffle_render::shape_utils::DrawCommand;
+use std::str::FromStr;
 use swf::{
-    FillStyle, Fixed8, Gradient, GradientInterpolation, GradientRecord, GradientSpread,
-    LineCapStyle, LineJoinStyle, LineStyle, Twips,
+    BlendMode, FillStyle, Fixed8, Gradient, GradientInterpolation, GradientRecord, GradientSpread,
+    LineCapStyle, LineJoinStyle, LineStyle, Rectangle, Twips,
 };
 
 macro_rules! mc_method {
@@ -107,6 +109,8 @@ const PROTO_DECLS: &[Declaration] = declare_properties! {
     "focusEnabled" => property(mc_getter!(focus_enabled), mc_setter!(set_focus_enabled); DONT_DELETE | DONT_ENUM);
     "_lockroot" => property(mc_getter!(lock_root), mc_setter!(set_lock_root); DONT_DELETE | DONT_ENUM);
     "useHandCursor" => property(mc_getter!(use_hand_cursor), mc_setter!(set_use_hand_cursor); DONT_DELETE | DONT_ENUM);
+    "blendMode" => property(mc_getter!(blend_mode), mc_setter!(set_blend_mode); DONT_DELETE | DONT_ENUM);
+    "scrollRect" => property(mc_getter!(scroll_rect), mc_setter!(set_scroll_rect); DONT_DELETE | DONT_ENUM; version(8));
 };
 
 /// Implements `MovieClip`
@@ -116,6 +120,67 @@ pub fn constructor<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     Ok(this.into())
+}
+
+fn new_rectangle<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    rectangle: Rectangle,
+) -> Result<Value<'gc>, Error<'gc>> {
+    let x = rectangle.x_min.to_pixels();
+    let y = rectangle.y_min.to_pixels();
+    let width = (rectangle.x_max - rectangle.x_min).to_pixels();
+    let height = (rectangle.y_max - rectangle.y_min).to_pixels();
+    let args = &[x.into(), y.into(), width.into(), height.into()];
+    let proto = activation.context.avm1.prototypes.rectangle_constructor;
+    proto.construct(activation, args)
+}
+
+fn object_to_rectangle<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    object: Object<'gc>,
+) -> Result<Option<Rectangle>, Error<'gc>> {
+    const NAMES: &[&str] = &["x", "y", "width", "height"];
+    let mut values = [0; 4];
+    for (&name, value) in NAMES.iter().zip(&mut values) {
+        *value = match object.get_local_stored(name, activation) {
+            Some(value) => value.coerce_to_i32(activation)?,
+            None => return Ok(None),
+        }
+    }
+    let [x, y, width, height] = values;
+    Ok(Some(Rectangle {
+        x_min: Twips::from_pixels_i32(x),
+        x_max: Twips::from_pixels_i32(x + width),
+        y_min: Twips::from_pixels_i32(y),
+        y_max: Twips::from_pixels_i32(y + height),
+    }))
+}
+
+fn scroll_rect<'gc>(
+    this: MovieClip<'gc>,
+    activation: &mut Activation<'_, 'gc, '_>,
+) -> Result<Value<'gc>, Error<'gc>> {
+    if this.has_scroll_rect() {
+        new_rectangle(activation, this.next_scroll_rect())
+    } else {
+        Ok(Value::Undefined)
+    }
+}
+
+fn set_scroll_rect<'gc>(
+    this: MovieClip<'gc>,
+    activation: &mut Activation<'_, 'gc, '_>,
+    value: Value<'gc>,
+) -> Result<(), Error<'gc>> {
+    if let Value::Object(object) = value {
+        this.set_has_scroll_rect(activation.context.gc_context, true);
+        if let Some(rectangle) = object_to_rectangle(activation, object)? {
+            this.set_next_scroll_rect(activation.context.gc_context, rectangle);
+        }
+    } else {
+        this.set_has_scroll_rect(activation.context.gc_context, false);
+    };
+    Ok(())
 }
 
 #[allow(clippy::comparison_chain)]
@@ -167,7 +232,7 @@ pub fn create_proto<'gc>(
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let object = ScriptObject::object(gc_context, Some(proto));
+    let object = ScriptObject::new(gc_context, Some(proto));
     define_properties_on(PROTO_DECLS, gc_context, object, fn_proto);
     object.into()
 }
@@ -358,7 +423,7 @@ fn begin_bitmap_fill<'gc>(
         } else {
             return Ok(Value::Undefined);
         };
-        let bitmap = render::BitmapInfo {
+        let bitmap = ruffle_render::bitmap::BitmapInfo {
             handle,
             width: bitmap_data.width() as u16,
             height: bitmap_data.height() as u16,
@@ -375,15 +440,7 @@ fn begin_bitmap_fill<'gc>(
             activation,
         )?;
         // Flash matrix is in pixels. Scale from pixels to twips.
-        const PIXELS_TO_TWIPS: Matrix = Matrix {
-            a: 20.0,
-            b: 0.0,
-            c: 0.0,
-            d: 20.0,
-            tx: Twips::ZERO,
-            ty: Twips::ZERO,
-        };
-        matrix *= PIXELS_TO_TWIPS;
+        matrix *= Matrix::scale(Twips::TWIPS_PER_PIXEL as f32, Twips::TWIPS_PER_PIXEL as f32);
 
         // `repeating` defaults to true, `smoothed` to false.
         // `smoothed` parameter may not be listed in some documentation.
@@ -926,13 +983,10 @@ fn get_next_highest_depth<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if activation.swf_version() >= 7 {
-        let depth = std::cmp::max(
-            movie_clip
-                .highest_depth(Depth::MAX)
-                .unwrap_or(0)
-                .wrapping_sub(AVM_DEPTH_BIAS - 1),
-            0,
-        );
+        let depth = movie_clip
+            .highest_depth()
+            .wrapping_sub(AVM_DEPTH_BIAS - 1)
+            .max(0);
         Ok(depth.into())
     } else {
         Ok(Value::Undefined)
@@ -1092,6 +1146,12 @@ fn stop_drag<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     // It doesn't matter which clip we call this on; it simply stops any active drag.
+
+    // we might not have had an opportunity to call `update_drag`
+    // if AS did `startDrag(mc);stopDrag();` in one go
+    // so let's do it here
+    crate::player::Player::update_drag(&mut activation.context);
+
     *activation.context.drag_object = None;
     Ok(Value::Undefined)
 }
@@ -1212,7 +1272,7 @@ fn get_bounds<'gc>(
             bounds.transform(&bounds_transform)
         };
 
-        let out = ScriptObject::object(
+        let out = ScriptObject::new(
             activation.context.gc_context,
             Some(activation.context.avm1.prototypes.object),
         );
@@ -1254,9 +1314,9 @@ pub fn get_url<'gc>(
         }
 
         let window = if let Some(window) = args.get(1) {
-            Some(window.coerce_to_string(activation)?.to_string())
+            window.coerce_to_string(activation)?.to_string()
         } else {
-            None
+            "".into()
         };
 
         let method = match args.get(2) {
@@ -1360,7 +1420,7 @@ fn unload_movie<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     target.unload(&mut activation.context);
-    target.replace_with_movie(activation.context.gc_context, None);
+    target.replace_with_movie(&mut activation.context, None, None);
 
     Ok(Value::Undefined)
 }
@@ -1461,5 +1521,29 @@ fn set_use_hand_cursor<'gc>(
 ) -> Result<(), Error<'gc>> {
     let use_hand_cursor = value.as_bool(activation.swf_version());
     this.set_use_hand_cursor(&mut activation.context, use_hand_cursor);
+    Ok(())
+}
+
+fn blend_mode<'gc>(
+    this: MovieClip<'gc>,
+    activation: &mut Activation<'_, 'gc, '_>,
+) -> Result<Value<'gc>, Error<'gc>> {
+    let mode = AvmString::new_utf8(activation.context.gc_context, this.blend_mode().to_string());
+    Ok(mode.into())
+}
+
+fn set_blend_mode<'gc>(
+    this: MovieClip<'gc>,
+    activation: &mut Activation<'_, 'gc, '_>,
+    value: Value<'gc>,
+) -> Result<(), Error<'gc>> {
+    // No-op if value is not a string.
+    if let Value::String(mode) = value {
+        if let Ok(mode) = BlendMode::from_str(&mode.to_string()) {
+            this.set_blend_mode(activation.context.gc_context, mode);
+        } else {
+            log::error!("Unknown blend mode {}", mode);
+        };
+    }
     Ok(())
 }

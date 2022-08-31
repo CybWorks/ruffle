@@ -20,18 +20,15 @@ use crate::events::{ButtonKeyCode, ClipEvent, ClipEventResult, KeyCode};
 use crate::font::{round_down_to_pixel, Glyph, TextRenderSettings};
 use crate::html::{BoxBounds, FormatSpans, LayoutBox, LayoutContent, TextFormat};
 use crate::prelude::*;
-use crate::shape_utils::DrawCommand;
 use crate::string::{utils as string_utils, AvmString, WStr, WString};
 use crate::tag_utils::SwfMovie;
-use crate::transform::Transform;
-use crate::vminterface::{AvmObject, AvmType, Instantiator};
+use crate::vminterface::{AvmObject, Instantiator};
 use chrono::Utc;
 use gc_arena::{Collect, Gc, GcCell, MutationContext};
+use ruffle_render::shape_utils::DrawCommand;
+use ruffle_render::transform::Transform;
 use std::{cell::Ref, cell::RefMut, sync::Arc};
 use swf::Twips;
-
-/// Boxed error type.
-pub type Error = Box<dyn std::error::Error>;
 
 /// The kind of autosizing behavior an `EditText` should have, if any
 #[derive(Copy, Clone, Debug, Collect, PartialEq, Eq)]
@@ -238,7 +235,7 @@ impl<'gc> EditText<'gc> {
             AutoSizeMode::None
         };
 
-        let bounds: BoundingBox = swf_tag.bounds.clone().into();
+        let bounds: BoundingBox = swf_tag.bounds.into();
 
         let (layout, intrinsic_bounds) = LayoutBox::lower_from_text_spans(
             &text_spans,
@@ -409,19 +406,13 @@ impl<'gc> EditText<'gc> {
         self.0.read().text_spans.text().into()
     }
 
-    pub fn set_text(
-        self,
-        text: &WStr,
-        context: &mut UpdateContext<'_, 'gc, '_>,
-    ) -> Result<(), Error> {
+    pub fn set_text(self, text: &WStr, context: &mut UpdateContext<'_, 'gc, '_>) {
         let mut edit_text = self.0.write(context.gc_context);
         let default_format = edit_text.text_spans.default_format().clone();
         edit_text.text_spans = FormatSpans::from_text(text.into(), default_format);
         drop(edit_text);
 
         self.relayout(context);
-
-        Ok(())
     }
 
     pub fn html_text(self) -> WString {
@@ -433,11 +424,7 @@ impl<'gc> EditText<'gc> {
         }
     }
 
-    pub fn set_html_text(
-        self,
-        text: &WStr,
-        context: &mut UpdateContext<'_, 'gc, '_>,
-    ) -> Result<(), Error> {
+    pub fn set_html_text(self, text: &WStr, context: &mut UpdateContext<'_, 'gc, '_>) {
         if self.is_html() {
             let mut write = self.0.write(context.gc_context);
             let default_format = write.text_spans.default_format().clone();
@@ -445,10 +432,8 @@ impl<'gc> EditText<'gc> {
             drop(write);
 
             self.relayout(context);
-
-            Ok(())
         } else {
-            self.set_text(text, context)
+            self.set_text(text, context);
         }
     }
 
@@ -682,7 +667,7 @@ impl<'gc> EditText<'gc> {
             .initial_text
             .clone()
             .unwrap_or_default();
-        let _ = self.set_text(&text, &mut activation.context);
+        self.set_text(&text, &mut activation.context);
 
         self.0.write(activation.context.gc_context).variable = variable;
         self.try_bind_text_field_variable(activation, true);
@@ -789,21 +774,25 @@ impl<'gc> EditText<'gc> {
         edit_text.scroll = 1;
 
         if autosize != AutoSizeMode::None {
-            // The edit text's bounds needs to have the padding baked in.
-            let width = intrinsic_bounds.width() + padding;
-            let height = intrinsic_bounds.height() + padding;
-            let new_x = match autosize {
-                AutoSizeMode::Left => edit_text.bounds.x_min,
-                AutoSizeMode::Center => {
-                    (edit_text.bounds.x_min + edit_text.bounds.x_max - width) / 2
-                }
-                AutoSizeMode::Right => edit_text.bounds.x_max - width,
-                AutoSizeMode::None => unreachable!(),
-            };
             if !is_word_wrap {
+                // The edit text's bounds needs to have the padding baked in.
+                let width = intrinsic_bounds.width() + padding;
+                let new_x = match autosize {
+                    AutoSizeMode::Left => edit_text.bounds.x_min,
+                    AutoSizeMode::Center => {
+                        (edit_text.bounds.x_min + edit_text.bounds.x_max - width) / 2
+                    }
+                    AutoSizeMode::Right => edit_text.bounds.x_max - width,
+                    AutoSizeMode::None => unreachable!(),
+                };
                 edit_text.bounds.set_x(new_x);
                 edit_text.bounds.set_width(width);
+            } else {
+                let width = edit_text.static_data.text.bounds.x_max
+                    - edit_text.static_data.text.bounds.x_min;
+                edit_text.bounds.set_width(width);
             }
+            let height = intrinsic_bounds.height() + padding;
             edit_text.bounds.set_height(height);
             drop(edit_text);
             self.redraw_border(context.gc_context);
@@ -892,9 +881,12 @@ impl<'gc> EditText<'gc> {
     }
 
     /// Render a layout box, plus its children.
-    fn render_layout_box(self, context: &mut RenderContext<'_, 'gc>, lbox: &LayoutBox<'gc>) {
-        let box_transform: Transform = lbox.bounds().origin().into();
-        context.transform_stack.push(&box_transform);
+    fn render_layout_box(self, context: &mut RenderContext<'_, 'gc, '_>, lbox: &LayoutBox<'gc>) {
+        let origin = lbox.bounds().origin();
+        context.transform_stack.push(&Transform {
+            matrix: Matrix::translate(origin.x(), origin.y()),
+            ..Default::default()
+        });
 
         let edit_text = self.0.read();
         let selection = edit_text.selection;
@@ -1043,7 +1035,7 @@ impl<'gc> EditText<'gc> {
                             // If the property exists on the object, we overwrite the text with the property's value.
                             if object.has_property(activation, property) {
                                 let value = object.get(property, activation).unwrap();
-                                let _ = self.set_html_text(
+                                self.set_html_text(
                                     &value.coerce_to_string(activation).unwrap_or_default(),
                                     &mut activation.context,
                                 );
@@ -1190,8 +1182,8 @@ impl<'gc> EditText<'gc> {
         );
 
         for layout_box in text.layout.iter() {
-            let transform: Transform = layout_box.bounds().origin().into();
-            let mut matrix = transform.matrix;
+            let origin = layout_box.bounds().origin();
+            let mut matrix = Matrix::translate(origin.x(), origin.y());
             matrix.invert();
             let local_position = matrix * position;
 
@@ -1472,7 +1464,7 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
 
     /// Construct objects placed on this frame.
     fn construct_frame(&self, context: &mut UpdateContext<'_, 'gc, '_>) {
-        if context.avm_type() == AvmType::Avm2 && matches!(self.object2(), Avm2Value::Undefined) {
+        if context.is_action_script_3() && matches!(self.object2(), Avm2Value::Undefined) {
             self.construct_as_avm2_object(context, (*self).into());
         }
     }
@@ -1498,17 +1490,13 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
     ) {
         self.set_default_instance_name(context);
 
-        if context.avm_type() == AvmType::Avm1 {
+        if !context.is_action_script_3() {
             context
                 .avm1
                 .add_to_exec_list(context.gc_context, (*self).into());
         }
 
-        let movie = self.movie().unwrap();
-        let library = context.library.library_for_movie_mut(movie);
-        let vm_type = library.avm_type();
-
-        if vm_type == AvmType::Avm1 {
+        if !self.movie().unwrap().is_action_script_3() {
             self.construct_as_avm1_object(context, run_frame);
         }
     }
@@ -1517,7 +1505,7 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
         self.0
             .read()
             .object
-            .and_then(|o| o.as_avm1_object().ok())
+            .and_then(|o| o.as_avm1_object())
             .map(Avm1Value::from)
             .unwrap_or(Avm1Value::Undefined)
     }
@@ -1526,7 +1514,7 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
         self.0
             .read()
             .object
-            .and_then(|o| o.as_avm2_object().ok())
+            .and_then(|o| o.as_avm2_object())
             .map(Avm2Value::from)
             .unwrap_or(Avm2Value::Undefined)
     }
@@ -1613,7 +1601,7 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
         self.redraw_border(gc_context);
     }
 
-    fn render_self(&self, context: &mut RenderContext<'_, 'gc>) {
+    fn render_self(&self, context: &mut RenderContext<'_, 'gc, '_>) {
         if !self.world_bounds().intersects(&context.stage.view_bounds()) {
             // Off-screen; culled
             return;

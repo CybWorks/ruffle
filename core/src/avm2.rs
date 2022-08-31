@@ -1,18 +1,17 @@
 //! ActionScript Virtual Machine 2 (AS3) support
 
 use crate::avm2::class::AllocatorFn;
+use crate::avm2::function::Executable;
 use crate::avm2::globals::SystemClasses;
 use crate::avm2::method::{Method, NativeMethodImpl};
-use crate::avm2::object::EventObject;
 use crate::avm2::script::{Script, TranslationUnit};
 use crate::context::UpdateContext;
 use crate::string::AvmString;
-use crate::tag_utils::{SwfSlice, SwfStream};
 use fnv::FnvHashMap;
-use gc_arena::{Collect, MutationContext};
+use gc_arena::{Collect, GcCell, MutationContext};
 use std::rc::Rc;
 use swf::avm2::read::Reader;
-use swf::extensions::ReadSwfExt;
+use swf::{DoAbc, DoAbcFlag};
 
 #[macro_export]
 macro_rules! avm_debug {
@@ -26,16 +25,19 @@ macro_rules! avm_debug {
 pub mod activation;
 mod array;
 pub mod bytearray;
+mod call_stack;
 mod class;
 mod domain;
 mod events;
 mod function;
 mod globals;
 mod method;
-pub mod names;
+mod multiname;
+mod namespace;
 pub mod object;
 mod property;
 mod property_map;
+mod qname;
 mod regexp;
 mod scope;
 mod script;
@@ -47,12 +49,15 @@ mod vtable;
 
 pub use crate::avm2::activation::Activation;
 pub use crate::avm2::array::ArrayStorage;
+pub use crate::avm2::call_stack::{CallNode, CallStack};
 pub use crate::avm2::domain::Domain;
-pub use crate::avm2::events::{Event, EventData};
-pub use crate::avm2::names::{Namespace, QName};
+pub use crate::avm2::multiname::Multiname;
+pub use crate::avm2::namespace::Namespace;
 pub use crate::avm2::object::{
-    ArrayObject, ClassObject, Object, ScriptObject, SoundChannelObject, StageObject, TObject,
+    ArrayObject, ClassObject, EventObject, Object, ScriptObject, SoundChannelObject, StageObject,
+    TObject,
 };
+pub use crate::avm2::qname::QName;
 pub use crate::avm2::value::Value;
 
 const BROADCAST_WHITELIST: [&str; 3] = ["enterFrame", "exitFrame", "frameConstructed"];
@@ -69,6 +74,9 @@ pub type Error = Box<dyn std::error::Error>;
 pub struct Avm2<'gc> {
     /// Values currently present on the operand stack.
     stack: Vec<Value<'gc>>,
+
+    /// The current call stack of the player.
+    call_stack: GcCell<'gc, CallStack<'gc>>,
 
     /// Global scope object.
     globals: Domain<'gc>,
@@ -103,6 +111,7 @@ impl<'gc> Avm2<'gc> {
 
         Self {
             stack: Vec::new(),
+            call_stack: GcCell::allocate(mc, CallStack::new()),
             globals,
             system_classes: None,
             native_method_table: Default::default(),
@@ -140,11 +149,28 @@ impl<'gc> Avm2<'gc> {
                 //This exists purely to check if the builtin is OK with being called with
                 //no parameters.
                 init_activation.resolve_parameters(&method.name, &[], &method.signature)?;
-
-                (method.method)(&mut init_activation, Some(scope), &[])?;
+                init_activation
+                    .context
+                    .avm2
+                    .push_global_init(init_activation.context.gc_context);
+                let r = (method.method)(&mut init_activation, Some(scope), &[]);
+                init_activation
+                    .context
+                    .avm2
+                    .pop_call(init_activation.context.gc_context);
+                r?;
             }
             Method::Bytecode(method) => {
-                init_activation.run_actions(method)?;
+                init_activation
+                    .context
+                    .avm2
+                    .push_global_init(init_activation.context.gc_context);
+                let r = init_activation.run_actions(method);
+                init_activation
+                    .context
+                    .avm2
+                    .pop_call(init_activation.context.gc_context);
+                r?;
             }
         };
 
@@ -156,16 +182,12 @@ impl<'gc> Avm2<'gc> {
     /// The `bool` parameter reads true if the event was cancelled.
     pub fn dispatch_event(
         context: &mut UpdateContext<'_, 'gc, '_>,
-        event: Event<'gc>,
+        event: Object<'gc>,
         target: Object<'gc>,
     ) -> Result<bool, Error> {
         use crate::avm2::events::dispatch_event;
-
         let mut activation = Activation::from_nothing(context.reborrow());
-
-        let event_object = EventObject::from_event(&mut activation, event)?;
-
-        dispatch_event(&mut activation, target, event_object)
+        dispatch_event(&mut activation, target, event)
     }
 
     /// Add an object to the broadcast list.
@@ -209,10 +231,12 @@ impl<'gc> Avm2<'gc> {
     /// new broadcast type, you must add it to the `BROADCAST_WHITELIST` first.
     pub fn broadcast_event(
         context: &mut UpdateContext<'_, 'gc, '_>,
-        event: Event<'gc>,
+        event: Object<'gc>,
         on_type: ClassObject<'gc>,
     ) -> Result<(), Error> {
-        let event_name = event.event_type();
+        let base_event = event.as_event().unwrap(); // TODO: unwrap?
+        let event_name = base_event.event_type();
+        drop(base_event);
         if !BROADCAST_WHITELIST
             .iter()
             .any(|x| AvmString::from(*x) == event_name)
@@ -240,7 +264,7 @@ impl<'gc> Avm2<'gc> {
                 let mut activation = Activation::from_nothing(context.reborrow());
 
                 if object.is_of_type(on_type, &mut activation)? {
-                    Avm2::dispatch_event(&mut activation.context, event.clone(), object)?;
+                    Avm2::dispatch_event(&mut activation.context, event, object)?;
                 }
             }
         }
@@ -260,48 +284,13 @@ impl<'gc> Avm2<'gc> {
         Ok(())
     }
 
-    pub fn load_abc_from_do_abc(
+    /// Load an ABC file embedded in a `DoAbc` tag.
+    pub fn do_abc(
         context: &mut UpdateContext<'_, 'gc, '_>,
-        swf: &SwfSlice,
-        domain: Domain<'gc>,
-        reader: &mut SwfStream<'_>,
-        tag_len: usize,
-    ) -> Result<(), Error> {
-        let start = reader.as_slice();
-        // Queue the actions.
-        // TODO: The tag reader parses the entire ABC file, instead of just
-        // giving us a `SwfSlice` for later parsing, so we have to replcate the
-        // *entire* parsing code here. This sucks.
-        let flags = reader.read_u32()?;
-        let name = reader.read_str()?.to_string_lossy(reader.encoding());
-        let is_lazy_initialize = flags & 1 != 0;
-        let num_read = reader.pos(start);
-
-        // The rest of the tag is an ABC file so we can take our SwfSlice now.
-        let slice = swf
-            .resize_to_reader(reader, tag_len - num_read)
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "Invalid source or tag length when running init action",
-                )
-            })?;
-
-        Avm2::load_abc(slice, &name, is_lazy_initialize, context, domain)?;
-        Ok(())
-    }
-
-    /// Load an ABC file embedded in a `SwfSlice`.
-    ///
-    /// The `SwfSlice` must resolve to the contents of an ABC file.
-    pub fn load_abc(
-        abc: SwfSlice,
-        _abc_name: &str,
-        lazy_init: bool,
-        context: &mut UpdateContext<'_, 'gc, '_>,
+        do_abc: DoAbc,
         domain: Domain<'gc>,
     ) -> Result<(), Error> {
-        let mut read = Reader::new(abc.as_ref());
+        let mut read = Reader::new(do_abc.data);
 
         let abc_file = Rc::new(read.read()?);
         let tunit = TranslationUnit::from_abc(abc_file.clone(), domain, context.gc_context);
@@ -309,7 +298,7 @@ impl<'gc> Avm2<'gc> {
         for i in (0..abc_file.scripts.len()).rev() {
             let mut script = tunit.load_script(i as u32, context)?;
 
-            if !lazy_init {
+            if !do_abc.flags.contains(DoAbcFlag::LAZY_INITIALIZE) {
                 script.globals(context)?;
             }
         }
@@ -319,6 +308,25 @@ impl<'gc> Avm2<'gc> {
 
     pub fn global_domain(&self) -> Domain<'gc> {
         self.globals
+    }
+
+    /// Pushes an executable on the call stack
+    pub fn push_call(&self, mc: MutationContext<'gc, '_>, calling: Executable<'gc>) {
+        self.call_stack.write(mc).push(calling)
+    }
+
+    /// Pushes script initializer (global init) on the call stack
+    pub fn push_global_init(&self, mc: MutationContext<'gc, '_>) {
+        self.call_stack.write(mc).push_global_init()
+    }
+
+    /// Pops an executable off the call stack
+    pub fn pop_call(&self, mc: MutationContext<'gc, '_>) -> Option<CallNode<'gc>> {
+        self.call_stack.write(mc).pop()
+    }
+
+    pub fn call_stack(&self) -> GcCell<'gc, CallStack<'gc>> {
+        self.call_stack
     }
 
     /// Push a value onto the operand stack.

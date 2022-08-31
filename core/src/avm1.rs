@@ -3,13 +3,12 @@ use crate::avm1::globals::create_globals;
 use crate::avm1::object::stage_object;
 use crate::avm1::property_map::PropertyMap;
 use crate::context::UpdateContext;
-use crate::prelude::*;
-use gc_arena::{Collect, GcCell, MutationContext};
-
-use swf::avm1::read::Reader;
-
 use crate::display_object::DisplayObject;
+use crate::frame_lifecycle::FramePhase;
+use crate::prelude::*;
 use crate::tag_utils::SwfSlice;
+use gc_arena::{Collect, GcCell, MutationContext};
+use swf::avm1::read::Reader;
 
 #[cfg(test)]
 #[macro_use]
@@ -30,13 +29,12 @@ pub mod object;
 pub mod property;
 pub mod property_map;
 mod scope;
-mod timer;
 mod value;
 
 #[cfg(test)]
 mod tests;
 
-use crate::avm1::activation::{Activation, ActivationIdentifier};
+pub use crate::avm1::activation::{Activation, ActivationIdentifier};
 pub use crate::avm1::error::Error;
 use crate::avm1::globals::as_broadcaster;
 use crate::avm1::globals::as_broadcaster::BroadcasterFunctions;
@@ -49,7 +47,6 @@ pub use object::stage_object::StageObject;
 pub use object::{Object, ObjectPtr, TObject};
 use scope::Scope;
 use smallvec::alloc::borrow::Cow;
-pub use timer::Timers;
 pub use value::Value;
 
 macro_rules! avm_debug {
@@ -425,11 +422,38 @@ impl<'gc> Avm1<'gc> {
         self.broadcaster_functions
     }
 
-    /// Returns an iterator over all movie clips in execution order.
-    pub fn clip_exec_iter(&self) -> DisplayObjectIter<'gc> {
-        DisplayObjectIter {
-            clip: self.clip_exec_list,
+    // Run a single frame.
+    pub fn run_frame(context: &mut UpdateContext<'_, 'gc, '_>) {
+        // In AVM1, we only ever execute the update phase, and all the work that
+        // would ordinarily be phased is instead run all at once in whatever order
+        // the SWF requests it.
+        *context.frame_phase = FramePhase::Update;
+
+        // AVM1 execution order is determined by the global execution list, based on instantiation order.
+        let mut prev: Option<DisplayObject<'gc>> = None;
+        let mut next = context.avm1.clip_exec_list;
+        while let Some(clip) = next {
+            next = clip.next_avm1_clip();
+            if clip.removed() {
+                // Clean up removed clips from this frame or a previous frame.
+                if let Some(prev) = prev {
+                    prev.set_next_avm1_clip(context.gc_context, next);
+                } else {
+                    context.avm1.clip_exec_list = next;
+                }
+                clip.set_next_avm1_clip(context.gc_context, None);
+            } else {
+                clip.run_frame(context);
+                prev = Some(clip);
+            }
         }
+
+        // Fire "onLoadInit" events.
+        context
+            .load_manager
+            .movie_clip_on_load(context.action_queue);
+
+        *context.frame_phase = FramePhase::Idle;
     }
 
     /// Adds a movie clip to the execution list.
@@ -442,42 +466,10 @@ impl<'gc> Avm1<'gc> {
         clip: DisplayObject<'gc>,
     ) {
         // Adding while iterating is safe, as this does not modify any active nodes.
-        if clip.next_avm1_clip().is_none() && clip.prev_avm1_clip().is_none() {
-            if let Some(head) = self.clip_exec_list {
-                head.set_prev_avm1_clip(gc_context, Some(clip));
-                clip.set_next_avm1_clip(gc_context, self.clip_exec_list);
-            }
+        if clip.next_avm1_clip().is_none() {
+            clip.set_next_avm1_clip(gc_context, self.clip_exec_list);
             self.clip_exec_list = Some(clip);
         }
-    }
-
-    /// Removes a display object from the execution list.
-    pub fn remove_from_exec_list(
-        &mut self,
-        gc_context: MutationContext<'gc, '_>,
-        clip: DisplayObject<'gc>,
-    ) -> bool {
-        let prev = clip.prev_avm1_clip();
-        let next = clip.next_avm1_clip();
-        let present_on_execution_list = prev.is_some() || next.is_some();
-
-        if let Some(head) = self.clip_exec_list {
-            if DisplayObject::ptr_eq(head, clip) {
-                self.clip_exec_list = next;
-            }
-        }
-
-        if let Some(prev) = prev {
-            prev.set_next_avm1_clip(gc_context, next);
-        }
-        if let Some(next) = next {
-            next.set_prev_avm1_clip(gc_context, prev);
-        }
-
-        clip.set_prev_avm1_clip(gc_context, None);
-        clip.set_next_avm1_clip(gc_context, None);
-
-        present_on_execution_list
     }
 
     pub fn get_registered_constructor(
@@ -642,18 +634,4 @@ pub fn start_drag<'gc>(
         constraint,
     };
     *activation.context.drag_object = Some(drag_object);
-}
-
-pub struct DisplayObjectIter<'gc> {
-    clip: Option<DisplayObject<'gc>>,
-}
-
-impl<'gc> Iterator for DisplayObjectIter<'gc> {
-    type Item = DisplayObject<'gc>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let clip = self.clip;
-        self.clip = clip.and_then(|clip| clip.next_avm1_clip());
-        clip
-    }
 }

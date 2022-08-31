@@ -1,10 +1,10 @@
-use crate::backend::render::{RenderBackend, ShapeHandle};
 use crate::context::{RenderContext, UpdateContext};
 use crate::display_object::{DisplayObjectBase, DisplayObjectPtr, TDisplayObject};
 use crate::library::Library;
 use crate::prelude::*;
 use crate::tag_utils::SwfMovie;
 use gc_arena::{Collect, Gc, GcCell, MutationContext};
+use ruffle_render::backend::{RenderBackend, ShapeHandle};
 use std::cell::{Ref, RefCell, RefMut};
 use std::sync::Arc;
 use swf::{Fixed16, Fixed8, Twips};
@@ -116,7 +116,11 @@ impl<'gc> TDisplayObject<'gc> for MorphShape<'gc> {
             if let Some(frame) = self.0.read().static_data.frames.borrow().get(&self.ratio()) {
                 let local_matrix = self.global_to_local_matrix();
                 let point = local_matrix * point;
-                return crate::shape_utils::shape_hit_test(&frame.shape, point, &local_matrix);
+                return ruffle_render::shape_utils::shape_hit_test(
+                    &frame.shape,
+                    point,
+                    &local_matrix,
+                );
             } else {
                 log::warn!("Missing ratio for morph shape");
             }
@@ -293,12 +297,12 @@ impl MorphShapeStatic {
             line_styles,
         };
 
-        let bounds = crate::shape_utils::calculate_shape_bounds(&shape[..]);
+        let bounds = ruffle_render::shape_utils::calculate_shape_bounds(&shape[..]);
         let shape = swf::Shape {
             version: 4,
             id: 0,
-            shape_bounds: bounds.clone(),
-            edge_bounds: bounds.clone(),
+            shape_bounds: bounds,
+            edge_bounds: bounds,
             has_fill_winding_rule: false,
             has_non_scaling_strokes: false,
             has_scaling_strokes: true,

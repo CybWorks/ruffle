@@ -2,15 +2,20 @@
 //!
 //! These structures are documented in the Adobe SWF File Format Specification
 //! version 19 (henceforth SWF19):
-//! https://www.adobe.com/content/dam/acom/en/devnet/pdf/swf-file-format-spec.pdf
+//! <https://www.adobe.com/content/dam/acom/en/devnet/pdf/swf-file-format-spec.pdf>
 use crate::string::SwfStr;
 use bitflags::bitflags;
+use enum_map::Enum;
+use std::fmt::{self, Display, Formatter};
+use std::str::FromStr;
 
+mod color;
 mod fixed;
 mod matrix;
 mod twips;
 
-pub use fixed::*;
+pub use color::Color;
+pub use fixed::{Fixed16, Fixed8};
 pub use matrix::Matrix;
 pub use twips::Twips;
 
@@ -187,7 +192,7 @@ pub enum Compression {
 /// A rectangular region defined by minimum
 /// and maximum x- and y-coordinate positions
 /// measured in [`Twips`].
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct Rectangle {
     /// The minimum x-position of the rectangle.
     pub x_min: Twips,
@@ -200,110 +205,6 @@ pub struct Rectangle {
 
     /// The maximum y-position of the rectangle.
     pub y_max: Twips,
-}
-
-/// An RGBA (red, green, blue, alpha) color.
-///
-/// All components are stored as [`u8`] and have a color range of 0-255.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Color {
-    /// The red component value.
-    pub r: u8,
-
-    /// The green component value.
-    pub g: u8,
-
-    /// The blue component value.
-    pub b: u8,
-
-    /// The alpha component value.
-    pub a: u8,
-}
-
-impl Color {
-    pub const BLACK: Self = Self::from_rgb(0, 255);
-    pub const WHITE: Self = Self::from_rgb(0xFFFFFF, 255);
-
-    /// Creates a `Color` from a 32-bit `rgb` value and an `alpha` value.
-    ///
-    /// The byte-ordering of the 32-bit `rgb` value is XXRRGGBB.
-    /// The most significant byte, represented by XX, is ignored;
-    /// the `alpha` value is provided separately.
-    /// This is followed by the the red (RR), green (GG), and blue (BB) components values,
-    /// respectively.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use swf::Color;
-    ///
-    /// let red = Color::from_rgb(0xFF0000, 255);
-    /// let green = Color::from_rgb(0x00FF00, 255);
-    /// let blue = Color::from_rgb(0x0000FF, 255);
-    /// ```
-    pub const fn from_rgb(rgb: u32, alpha: u8) -> Self {
-        let [b, g, r, _] = rgb.to_le_bytes();
-        Self { r, g, b, a: alpha }
-    }
-
-    /// Creates a `Color` from a 32-bit `rgba` value.
-    ///
-    /// The byte-ordering of the 32-bit `rgba` value is AARRGGBB.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use swf::Color;
-    ///
-    /// let red = Color::from_rgba(0xFFFF0000);
-    /// let green = Color::from_rgba(0xFF00FF00);
-    /// let blue = Color::from_rgba(0xFF0000FF);
-    /// ```
-    pub const fn from_rgba(rgba: u32) -> Self {
-        let [b, g, r, a] = rgba.to_le_bytes();
-        Self { r, g, b, a }
-    }
-
-    /// Converts the color to a 32-bit RGB value.
-    ///
-    /// The alpha value does not get stored.
-    ///
-    /// # Examples
-    ///
-    /// Basic usage:
-    /// ```rust
-    /// use swf::Color;
-    ///
-    /// let color = Color::from_rgb(0xFF00FF, 255);
-    /// assert_eq!(color.to_rgb(), 0xFF00FF);
-    /// ```
-    ///
-    /// Alpha values do not get stored:
-    /// ```rust
-    /// use swf::Color;
-    ///
-    /// let color1 = Color::from_rgb(0xFF00FF, 255);
-    /// let color2 = Color::from_rgb(0xFF00FF, 0);
-    /// assert_eq!(color1.to_rgb(), color2.to_rgb());
-    /// ```
-    pub const fn to_rgb(&self) -> u32 {
-        u32::from_le_bytes([self.b, self.g, self.r, 0])
-    }
-
-    /// Converts the color to a 32-bit RGBA value.
-    ///
-    /// # Examples
-    ///
-    /// Basic usage:
-    /// ```rust
-    /// use swf::Color;
-    ///
-    /// let color = Color::from_rgb(0xFF00FF, 255);
-    /// assert_eq!(color.to_rgba(), 0xFFFF00FF);
-    /// ```
-    pub const fn to_rgba(&self) -> u32 {
-        u32::from_le_bytes([self.b, self.g, self.r, self.a])
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -561,7 +462,7 @@ pub struct GradientBevelFilter {
     pub num_passes: u8,
 }
 
-#[derive(Default, Clone, Copy, Debug, Eq, FromPrimitive, PartialEq)]
+#[derive(Default, Clone, Copy, Debug, Eq, FromPrimitive, PartialEq, Enum)]
 pub enum BlendMode {
     #[default]
     Normal = 0,
@@ -586,6 +487,53 @@ impl BlendMode {
             1 => 0,
             n => n,
         })
+    }
+}
+
+impl Display for BlendMode {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let s = match *self {
+            BlendMode::Normal => "normal",
+            BlendMode::Layer => "layer",
+            BlendMode::Multiply => "multiply",
+            BlendMode::Screen => "screen",
+            BlendMode::Lighten => "lighten",
+            BlendMode::Darken => "darken",
+            BlendMode::Difference => "difference",
+            BlendMode::Add => "add",
+            BlendMode::Subtract => "subtract",
+            BlendMode::Invert => "invert",
+            BlendMode::Alpha => "alpha",
+            BlendMode::Erase => "erase",
+            BlendMode::Overlay => "overlay",
+            BlendMode::HardLight => "hardlight",
+        };
+        f.write_str(s)
+    }
+}
+
+impl FromStr for BlendMode {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mode = match s {
+            "normal" => BlendMode::Normal,
+            "layer" => BlendMode::Layer,
+            "multiply" => BlendMode::Multiply,
+            "screen" => BlendMode::Screen,
+            "lighten" => BlendMode::Lighten,
+            "darken" => BlendMode::Darken,
+            "difference" => BlendMode::Difference,
+            "add" => BlendMode::Add,
+            "subtract" => BlendMode::Subtract,
+            "invert" => BlendMode::Invert,
+            "alpha" => BlendMode::Alpha,
+            "erase" => BlendMode::Erase,
+            "overlay" => BlendMode::Overlay,
+            "hardlight" => BlendMode::HardLight,
+            _ => return Err(()),
+        };
+        Ok(mode)
     }
 }
 
@@ -1543,9 +1491,15 @@ pub struct DefineBitsJpeg3<'a> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DoAbc<'a> {
+    pub flags: DoAbcFlag,
     pub name: &'a SwfStr,
-    pub is_lazy_initialize: bool,
     pub data: &'a [u8],
+}
+
+bitflags! {
+    pub struct DoAbcFlag: u32 {
+        const LAZY_INITIALIZE = 1 << 0;
+    }
 }
 
 pub type DoAction<'a> = &'a [u8];
@@ -1554,7 +1508,7 @@ pub type JpegTables<'a> = &'a [u8];
 
 /// `ProductInfo` contains information about the software used to generate the SWF.
 /// Not documented in the SWF19 reference. Emitted by mxmlc.
-/// See http://wahlers.com.br/claus/blog/undocumented-swf-tags-written-by-mxmlc/
+/// See <http://wahlers.com.br/claus/blog/undocumented-swf-tags-written-by-mxmlc/>
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProductInfo {
     pub product_id: u32,

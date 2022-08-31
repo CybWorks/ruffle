@@ -25,8 +25,6 @@ pub struct ConstantPool {
     pub multinames: Vec<Multiname>,
 }
 
-// clippy false positive: https://github.com/rust-lang/rust-clippy/issues/8867
-#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Index<T>(pub u32, pub PhantomData<T>);
 
@@ -139,7 +137,9 @@ pub struct Exception {
     pub from_offset: u32,
     pub to_offset: u32,
     pub target_offset: u32,
-    pub variable_name: Index<String>,
+    // Both of the following fields are actually `Multiname` indexes
+    // despite AVM 2 description saying they are `String` ones.
+    pub variable_name: Index<Multiname>,
     pub type_name: Index<Multiname>,
 }
 

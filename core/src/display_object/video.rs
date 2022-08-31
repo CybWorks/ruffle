@@ -4,15 +4,15 @@ use crate::avm1::{Object as Avm1Object, StageObject as Avm1StageObject};
 use crate::avm2::{
     Activation as Avm2Activation, Object as Avm2Object, StageObject as Avm2StageObject,
 };
-use crate::backend::render::BitmapInfo;
-use crate::backend::video::{EncodedFrame, VideoStreamHandle};
-use crate::bounding_box::BoundingBox;
+use crate::backend::video::{EncodedFrame, Error, VideoStreamHandle};
 use crate::context::{RenderContext, UpdateContext};
 use crate::display_object::{DisplayObjectBase, DisplayObjectPtr, TDisplayObject};
 use crate::prelude::*;
 use crate::tag_utils::{SwfMovie, SwfSlice};
-use crate::vminterface::{AvmObject, AvmType, Instantiator};
+use crate::vminterface::{AvmObject, Instantiator};
 use gc_arena::{Collect, GcCell, MutationContext};
+use ruffle_render::bitmap::BitmapInfo;
+use ruffle_render::bounding_box::BoundingBox;
 use std::borrow::{Borrow, BorrowMut};
 use std::cell::{Ref, RefMut};
 use std::collections::{BTreeMap, BTreeSet};
@@ -143,11 +143,7 @@ impl<'gc> Video<'gc> {
                     log::warn!("Duplicate frame {}", tag.frame_num);
                 }
 
-                if let Some(subslice) = subslice {
-                    frames.insert(tag.frame_num.into(), (subslice.start, subslice.end));
-                } else {
-                    log::warn!("Invalid bitstream subslice on frame {}", tag.frame_num);
-                }
+                frames.insert(tag.frame_num.into(), (subslice.start, subslice.end));
             }
         }
     }
@@ -261,10 +257,7 @@ impl<'gc> Video<'gc> {
                     if let Some((_old_id, old_frame)) = read.decoded_frame {
                         Ok(old_frame)
                     } else {
-                        Err(Box::from(format!(
-                            "Attempted to seek to omitted frame {} without prior decoded frame",
-                            frame_id
-                        )))
+                        Err(Error::SeekingBeforeDecoding(frame_id))
                     }
                 }
             },
@@ -309,7 +302,7 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
         _instantiated_by: Instantiator,
         run_frame: bool,
     ) {
-        if context.avm_type() == AvmType::Avm1 {
+        if !context.is_action_script_3() {
             context
                 .avm1
                 .add_to_exec_list(context.gc_context, (*self).into());
@@ -376,18 +369,14 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
         write.stream = VideoStream::Instantiated(stream);
         write.keyframes = keyframes;
 
-        if write.object.is_none() {
-            let library = context.library.library_for_movie_mut(movie);
-            let vm_type = library.avm_type();
-            if vm_type == AvmType::Avm1 {
-                let object: Avm1Object<'_> = Avm1StageObject::for_display_object(
-                    context.gc_context,
-                    (*self).into(),
-                    Some(context.avm1.prototypes().video),
-                )
-                .into();
-                write.object = Some(object.into());
-            }
+        if write.object.is_none() && !movie.is_action_script_3() {
+            let object: Avm1Object<'_> = Avm1StageObject::for_display_object(
+                context.gc_context,
+                (*self).into(),
+                Some(context.avm1.prototypes().video),
+            )
+            .into();
+            write.object = Some(object.into());
         }
 
         drop(write);
@@ -400,8 +389,7 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
     }
 
     fn construct_frame(&self, context: &mut UpdateContext<'_, 'gc, '_>) {
-        let vm_type = context.avm_type();
-        if vm_type == AvmType::Avm2 && matches!(self.object2(), Avm2Value::Undefined) {
+        if context.is_action_script_3() && matches!(self.object2(), Avm2Value::Undefined) {
             let video_constr = context.avm2.classes().video;
             let mut activation = Avm2Activation::from_nothing(context.reborrow());
             match Avm2StageObject::for_display_object_childless(

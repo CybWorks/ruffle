@@ -290,36 +290,43 @@ pub fn create_timer<'gc>(
     is_timeout: bool,
 ) -> Result<Value<'gc>, Error<'gc>> {
     // `setInterval` was added in Flash Player 6 but is not version-gated.
-    use crate::avm1::timer::TimerCallback;
-    let (callback, i) = match args.get(0) {
-        Some(Value::Object(o)) if o.as_executable().is_some() => (TimerCallback::Function(*o), 1),
+    use crate::timer::TimerCallback;
+
+    let (callback, interval) = match args.get(0) {
+        Some(Value::Object(o)) if o.as_executable().is_some() => (
+            TimerCallback::Avm1Function {
+                func: *o,
+                params: args.get(2..).unwrap_or_default().to_vec(),
+            },
+            args.get(1),
+        ),
         Some(Value::Object(o)) => (
-            TimerCallback::Method {
+            TimerCallback::Avm1Method {
                 this: *o,
                 method_name: args
                     .get(1)
                     .unwrap_or(&Value::Undefined)
                     .coerce_to_string(activation)?,
+                params: args.get(3..).map(|s| s.to_vec()).unwrap_or_default(),
             },
-            2,
+            args.get(2),
         ),
         _ => return Ok(Value::Undefined),
     };
 
-    let interval = match args.get(i).unwrap_or(&Value::Undefined) {
+    let interval = match interval.unwrap_or(&Value::Undefined) {
         Value::Undefined => return Ok(Value::Undefined),
         value => value.coerce_to_i32(activation)?,
     };
-    let params = if let Some(params) = args.get(i + 1..) {
-        params.to_vec()
-    } else {
-        vec![]
-    };
 
+    // If `is_timeout` is true, then set a repeat count of 1.
+    // Otherwise, set a repeat count of 0 (repeat indefinitely)
+    //
+    // We start the timer immediately
     let id = activation
         .context
         .timers
-        .add_timer(callback, interval, params, is_timeout);
+        .add_timer(callback, interval, is_timeout);
 
     Ok(id.into())
 }
@@ -527,7 +534,7 @@ pub fn create_globals<'gc>(
     Object<'gc>,
     as_broadcaster::BroadcasterFunctions<'gc>,
 ) {
-    let object_proto = ScriptObject::object_cell(gc_context, None);
+    let object_proto = ScriptObject::new(gc_context, None).into();
     let function_proto = function::create_proto(gc_context, object_proto);
 
     object::fill_proto(gc_context, object_proto, function_proto);
@@ -686,11 +693,11 @@ pub fn create_globals<'gc>(
     let boolean = boolean::create_boolean_object(gc_context, boolean_proto, Some(function_proto));
     let date = date::create_date_object(gc_context, date_proto, function_proto);
 
-    let flash = ScriptObject::object(gc_context, Some(object_proto));
+    let flash = ScriptObject::new(gc_context, Some(object_proto));
 
-    let geom = ScriptObject::object(gc_context, Some(object_proto));
-    let filters = ScriptObject::object(gc_context, Some(object_proto));
-    let display = ScriptObject::object(gc_context, Some(object_proto));
+    let geom = ScriptObject::new(gc_context, Some(object_proto));
+    let filters = ScriptObject::new(gc_context, Some(object_proto));
+    let display = ScriptObject::new(gc_context, Some(object_proto));
 
     let matrix = matrix::create_matrix_object(gc_context, matrix_proto, Some(function_proto));
     let point = point::create_point_object(gc_context, point_proto, function_proto);
@@ -914,7 +921,7 @@ pub fn create_globals<'gc>(
         Attribute::empty(),
     );
 
-    let external = ScriptObject::object(gc_context, Some(object_proto));
+    let external = ScriptObject::new(gc_context, Some(object_proto));
     let external_interface = external_interface::create_external_interface_object(
         gc_context,
         external_interface_proto,
@@ -929,7 +936,7 @@ pub fn create_globals<'gc>(
         Attribute::empty(),
     );
 
-    let globals = ScriptObject::bare_object(gc_context);
+    let globals = ScriptObject::new(gc_context, None);
     globals.define_value(
         gc_context,
         "AsBroadcaster",

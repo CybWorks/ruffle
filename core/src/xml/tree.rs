@@ -65,7 +65,7 @@ impl<'gc> XmlNode<'gc> {
                 next_sibling: None,
                 node_type,
                 node_value,
-                attributes: ScriptObject::bare_object(mc),
+                attributes: ScriptObject::new(mc, None),
                 children: Vec::new(),
             },
         ))
@@ -80,16 +80,16 @@ impl<'gc> XmlNode<'gc> {
         bs: BytesStart<'_>,
         id_map: ScriptObject<'gc>,
     ) -> Result<Self, quick_xml::Error> {
-        let name = AvmString::new_utf8_bytes(activation.context.gc_context, bs.name())?;
+        let name = AvmString::new_utf8_bytes(activation.context.gc_context, bs.name());
         let mut node = Self::new(activation.context.gc_context, ELEMENT_NODE, Some(name));
 
         // Reverse attributes so they appear in the `PropertyMap` in their definition order.
         let attributes: Result<Vec<_>, _> = bs.attributes().collect();
         let attributes = attributes?;
         for attribute in attributes.iter().rev() {
-            let key = AvmString::new_utf8_bytes(activation.context.gc_context, attribute.key)?;
+            let key = AvmString::new_utf8_bytes(activation.context.gc_context, attribute.key);
             let value_bytes = attribute.unescaped_value()?;
-            let value = AvmString::new_utf8_bytes(activation.context.gc_context, value_bytes)?;
+            let value = AvmString::new_utf8_bytes(activation.context.gc_context, &value_bytes);
 
             // Insert an attribute.
             node.attributes().define_value(
@@ -379,7 +379,7 @@ impl<'gc> XmlNode<'gc> {
     ///
     /// If the `deep` flag is set true, then the entire node tree will be cloned.
     pub fn duplicate(self, gc_context: MutationContext<'gc, '_>, deep: bool) -> Self {
-        let attributes = ScriptObject::bare_object(gc_context);
+        let attributes = ScriptObject::new(gc_context, None);
         for (key, value) in self.attributes().own_properties() {
             attributes.define_value(gc_context, key, value, Attribute::empty());
         }

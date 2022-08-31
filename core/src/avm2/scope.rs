@@ -2,10 +2,10 @@
 
 use crate::avm2::activation::Activation;
 use crate::avm2::domain::Domain;
-use crate::avm2::names::Multiname;
 use crate::avm2::object::{Object, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
+use crate::avm2::Multiname;
 use gc_arena::{Collect, Gc, MutationContext};
 use std::ops::Deref;
 
@@ -174,6 +174,10 @@ pub struct ScopeStack<'gc> {
 impl<'gc> ScopeStack<'gc> {
     pub fn new() -> Self {
         Self { scopes: Vec::new() }
+    }
+
+    pub fn clear(&mut self) {
+        self.scopes.clear();
     }
 
     pub fn push(&mut self, scope: Scope<'gc>) {

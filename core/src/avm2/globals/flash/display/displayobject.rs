@@ -3,16 +3,23 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::class::Class;
 use crate::avm2::method::{Method, NativeMethodImpl};
-use crate::avm2::names::{Namespace, QName};
-use crate::avm2::object::{stage_allocator, LoaderInfoObject, Object, TObject};
+use crate::avm2::object::{stage_allocator, Object, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::ArrayObject;
 use crate::avm2::Error;
-use crate::display_object::{DisplayObject, HitTestOptions, TDisplayObject};
+use crate::avm2::Multiname;
+use crate::avm2::Namespace;
+use crate::avm2::QName;
+use crate::display_object::{HitTestOptions, TDisplayObject};
+use crate::ecma_conversions::round_to_even;
+use crate::frame_lifecycle::catchup_display_object_to_frame;
+use crate::string::AvmString;
 use crate::types::{Degrees, Percent};
 use crate::vminterface::Instantiator;
 use gc_arena::{GcCell, MutationContext};
+use std::str::FromStr;
 use swf::Twips;
+use swf::{BlendMode, Rectangle};
 
 /// Implements `flash.display.DisplayObject`'s instance constructor.
 pub fn instance_init<'gc>(
@@ -53,7 +60,7 @@ pub fn native_instance_init<'gc>(
                 child.set_object2(activation.context.gc_context, this);
 
                 child.post_instantiation(&mut activation.context, None, Instantiator::Avm2, false);
-                child.construct_frame(&mut activation.context);
+                catchup_display_object_to_frame(&mut activation.context, child);
             }
         }
     }
@@ -579,19 +586,246 @@ pub fn loader_info<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error> {
     if let Some(dobj) = this.and_then(|this| this.as_display_object()) {
-        if let Some(root) = dobj.avm2_root(&mut activation.context) {
-            let movie = dobj.movie();
-
-            if let Some(movie) = movie {
-                let obj = LoaderInfoObject::from_movie(activation, movie, root)?;
-
-                return Ok(obj.into());
-            }
+        // Contrary to the DisplayObject.loaderInfo documentation,
+        // Flash Player defines 'loaderInfo' for non-root DisplayObjects.
+        // It always returns the LoaderInfo from the root object.
+        if let Some(loader_info) = dobj
+            .avm2_root(&mut activation.context)
+            .and_then(|root_dobj| root_dobj.loader_info())
+        {
+            return Ok(loader_info.into());
         }
+        return Ok(Value::Null);
+    }
+    Ok(Value::Undefined)
+}
 
-        if DisplayObject::ptr_eq(dobj, activation.context.stage.into()) {
-            return Ok(LoaderInfoObject::from_stage(activation)?.into());
+pub fn transform<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    this: Option<Object<'gc>>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error> {
+    if let Some(this) = this {
+        return Ok(activation
+            .avm2()
+            .classes()
+            .transform
+            .construct(activation, &[this.into()])?
+            .into());
+    }
+    Ok(Value::Undefined)
+}
+
+pub fn set_transform<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    this: Option<Object<'gc>>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error> {
+    if let Some(this) = this {
+        let transform = args[0].coerce_to_object(activation)?;
+
+        // FIXME - consider 3D matrix and pixel bounds
+        let matrix = transform
+            .get_property(&QName::dynamic_name("matrix").into(), activation)?
+            .coerce_to_object(activation)?;
+        let color_transform = transform
+            .get_property(&QName::dynamic_name("matrix").into(), activation)?
+            .coerce_to_object(activation)?;
+
+        let matrix =
+            crate::avm2::globals::flash::geom::transform::object_to_matrix(matrix, activation)?;
+        let color_transform =
+            crate::avm2::globals::flash::geom::transform::object_to_color_transform(
+                color_transform,
+                activation,
+            )?;
+
+        let dobj = this.as_display_object().unwrap();
+        let mut write = dobj.base_mut(activation.context.gc_context);
+        write.set_color_transform(&color_transform);
+        write.set_matrix(&matrix);
+    }
+    Ok(Value::Undefined)
+}
+
+/// Implements `DisplayObject.blendMode`'s getter.
+pub fn blend_mode<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    this: Option<Object<'gc>>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error> {
+    if let Some(dobj) = this.and_then(|this| this.as_display_object()) {
+        let mode =
+            AvmString::new_utf8(activation.context.gc_context, dobj.blend_mode().to_string());
+        return Ok(mode.into());
+    }
+    Ok(Value::Undefined)
+}
+
+/// Implements `DisplayObject.blendMode`'s setter.
+pub fn set_blend_mode<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    this: Option<Object<'gc>>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error> {
+    if let Some(dobj) = this.and_then(|this| this.as_display_object()) {
+        let mode = args
+            .get(0)
+            .cloned()
+            .unwrap_or(Value::Undefined)
+            .coerce_to_string(activation)?;
+
+        if let Ok(mode) = BlendMode::from_str(&mode.to_string()) {
+            dobj.set_blend_mode(activation.context.gc_context, mode);
+        } else {
+            log::error!("Unknown blend mode {}", mode);
+            return Err("ArgumentError: Error #2008: Parameter blendMode must be one of the accepted values.".into());
         }
+    }
+    Ok(Value::Undefined)
+}
+
+fn new_rectangle<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    rectangle: Rectangle,
+) -> Result<Object<'gc>, Error> {
+    let x = rectangle.x_min.to_pixels();
+    let y = rectangle.y_min.to_pixels();
+    let width = (rectangle.x_max - rectangle.x_min).to_pixels();
+    let height = (rectangle.y_max - rectangle.y_min).to_pixels();
+    let args = &[x.into(), y.into(), width.into(), height.into()];
+    activation
+        .avm2()
+        .classes()
+        .rectangle
+        .construct(activation, args)
+}
+
+fn scroll_rect<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    this: Option<Object<'gc>>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error> {
+    if let Some(dobj) = this.and_then(|this| this.as_display_object()) {
+        if dobj.has_scroll_rect() {
+            return Ok(new_rectangle(activation, dobj.next_scroll_rect())?.into());
+        } else {
+            return Ok(Value::Null);
+        }
+    }
+    Ok(Value::Undefined)
+}
+
+fn object_to_rectangle<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    object: Object<'gc>,
+) -> Result<Rectangle, Error> {
+    const NAMES: &[&str] = &["x", "y", "width", "height"];
+    let mut values = [0.0; 4];
+    for (&name, value) in NAMES.iter().zip(&mut values) {
+        *value = object
+            .get_property(&Multiname::public(name), activation)?
+            .coerce_to_number(activation)?;
+    }
+    let [x, y, width, height] = values;
+    Ok(Rectangle {
+        x_min: Twips::from_pixels_i32(round_to_even(x)),
+        y_min: Twips::from_pixels_i32(round_to_even(y)),
+        x_max: Twips::from_pixels_i32(round_to_even(x + width)),
+        y_max: Twips::from_pixels_i32(round_to_even(y + height)),
+    })
+}
+
+fn set_scroll_rect<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    this: Option<Object<'gc>>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error> {
+    if let Some(dobj) = this.and_then(|this| this.as_display_object()) {
+        if let Some(rectangle) = args[0].as_object() {
+            // Flash only updates the "internal" scrollRect used by `localToLocal` when the next
+            // frame is rendered. However, accessing `DisplayObject.scrollRect` from ActionScript
+            // will immediately return the updated value.
+            //
+            // To implement this, our `DisplayObject.scrollRect` ActionScript getter/setter both
+            // operate on a `next_scroll_rect` field. Just before we render a DisplayObject, we copy
+            // its `next_scroll_rect` to the `scroll_rect` field used for both rendering and
+            // `localToGlobal`.
+            dobj.set_next_scroll_rect(
+                activation.context.gc_context,
+                object_to_rectangle(activation, rectangle)?,
+            );
+
+            // TODO: Technically we should accept only `flash.geom.Rectangle` objects, in which case
+            // `object_to_rectangle` will be infallible. Once this happens, the following line can
+            // be moved above the `set_next_scroll_rect` call.
+            dobj.set_has_scroll_rect(activation.context.gc_context, true);
+        } else {
+            dobj.set_has_scroll_rect(activation.context.gc_context, false);
+        }
+    }
+    Ok(Value::Undefined)
+}
+
+fn local_to_global<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    this: Option<Object<'gc>>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error> {
+    if let Some(dobj) = this.and_then(|this| this.as_display_object()) {
+        let point = args
+            .get(0)
+            .unwrap_or(&Value::Undefined)
+            .coerce_to_object(activation)?;
+        let x = point
+            .get_property(&Multiname::public("x"), activation)?
+            .coerce_to_number(activation)?;
+        let y = point
+            .get_property(&Multiname::public("y"), activation)?
+            .coerce_to_number(activation)?;
+
+        let (out_x, out_y) = dobj.local_to_global((Twips::from_pixels(x), Twips::from_pixels(y)));
+        return Ok(activation
+            .avm2()
+            .classes()
+            .point
+            .construct(
+                activation,
+                &[out_x.to_pixels().into(), out_y.to_pixels().into()],
+            )?
+            .into());
+    }
+
+    Ok(Value::Undefined)
+}
+
+fn global_to_local<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    this: Option<Object<'gc>>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error> {
+    if let Some(dobj) = this.and_then(|this| this.as_display_object()) {
+        let point = args
+            .get(0)
+            .unwrap_or(&Value::Undefined)
+            .coerce_to_object(activation)?;
+        let x = point
+            .get_property(&Multiname::public("x"), activation)?
+            .coerce_to_number(activation)?;
+        let y = point
+            .get_property(&Multiname::public("y"), activation)?
+            .coerce_to_number(activation)?;
+
+        let (out_x, out_y) = dobj.global_to_local((Twips::from_pixels(x), Twips::from_pixels(y)));
+        return Ok(activation
+            .avm2()
+            .classes()
+            .point
+            .construct(
+                activation,
+                &[out_x.to_pixels().into(), out_y.to_pixels().into()],
+            )?
+            .into());
     }
 
     Ok(Value::Undefined)
@@ -624,6 +858,7 @@ pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>
         Option<NativeMethodImpl>,
     )] = &[
         ("alpha", Some(alpha), Some(set_alpha)),
+        ("blendMode", Some(blend_mode), Some(set_blend_mode)),
         ("height", Some(height), Some(set_height)),
         ("scaleY", Some(scale_y), Some(set_scale_y)),
         ("width", Some(width), Some(set_width)),
@@ -640,12 +875,16 @@ pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>
         ("mouseY", Some(mouse_y), None),
         ("loaderInfo", Some(loader_info), None),
         ("filters", Some(filters), Some(set_filters)),
+        ("transform", Some(transform), Some(set_transform)),
+        ("scrollRect", Some(scroll_rect), Some(set_scroll_rect)),
     ];
     write.define_public_builtin_instance_properties(mc, PUBLIC_INSTANCE_PROPERTIES);
 
     const PUBLIC_INSTANCE_METHODS: &[(&str, NativeMethodImpl)] = &[
         ("hitTestPoint", hit_test_point),
         ("hitTestObject", hit_test_object),
+        ("localToGlobal", local_to_global),
+        ("globalToLocal", global_to_local),
     ];
     write.define_public_builtin_instance_methods(mc, PUBLIC_INSTANCE_METHODS);
 
