@@ -4,7 +4,6 @@ use crate::avm1::{Object as Avm1Object, StageObject as Avm1StageObject};
 use crate::avm2::{
     Activation as Avm2Activation, Object as Avm2Object, StageObject as Avm2StageObject,
 };
-use crate::backend::video::{EncodedFrame, Error, VideoStreamHandle};
 use crate::context::{RenderContext, UpdateContext};
 use crate::display_object::{DisplayObjectBase, DisplayObjectPtr, TDisplayObject};
 use crate::prelude::*;
@@ -13,6 +12,10 @@ use crate::vminterface::{AvmObject, Instantiator};
 use gc_arena::{Collect, GcCell, MutationContext};
 use ruffle_render::bitmap::BitmapInfo;
 use ruffle_render::bounding_box::BoundingBox;
+use ruffle_render::commands::CommandHandler;
+use ruffle_video::error::Error;
+use ruffle_video::frame::EncodedFrame;
+use ruffle_video::VideoStreamHandle;
 use std::borrow::{Borrow, BorrowMut};
 use std::cell::{Ref, RefMut};
 use std::collections::{BTreeMap, BTreeSet};
@@ -373,7 +376,7 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
             let object: Avm1Object<'_> = Avm1StageObject::for_display_object(
                 context.gc_context,
                 (*self).into(),
-                Some(context.avm1.prototypes().video),
+                context.avm1.prototypes().video,
             )
             .into();
             write.object = Some(object.into());
@@ -426,7 +429,7 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
     }
 
     fn render(&self, context: &mut RenderContext) {
-        if !self.world_bounds().intersects(&context.stage.view_bounds()) {
+        if !context.is_offscreen && !self.world_bounds().intersects(&context.stage.view_bounds()) {
             // Off-screen; culled
             return;
         }
@@ -463,7 +466,7 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
             };
 
             context
-                .renderer
+                .commands
                 .render_bitmap(bitmap.handle, &transform, smoothing);
         } else {
             log::warn!("Video has no decoded frame to render.");

@@ -16,10 +16,16 @@ members = [
     "render/wgpu",
     "render/webgl",
 
+    "video",
+    "video/software",
+
     "tests",
     "tests/input-format",
 ]
 resolver = "2"
+
+[workspace.package]
+edition = "2021"
 
 # Don't optimize build scripts and macros.
 [profile.release.build-override]
@@ -45,7 +51,6 @@ opt-level = 3
 
 [profile.dev.package.nihav_duck]
 opt-level = 3
-
 
 # TODO: Set rustflags here instead of in web/core/package.json, when that
 # feature becomes stable. See: https://github.com/rust-lang/cargo/issues/10271

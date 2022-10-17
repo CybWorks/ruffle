@@ -154,7 +154,7 @@ pub fn matrix_to_object<'gc>(
         matrix.tx.to_pixels().into(),
         matrix.ty.to_pixels().into(),
     ];
-    let constructor = activation.context.avm1.prototypes.matrix_constructor;
+    let constructor = activation.context.avm1.prototypes().matrix_constructor;
     let object = constructor.construct(activation, &args)?;
     Ok(object)
 }
@@ -226,7 +226,7 @@ fn clone<'gc>(
         this.get("tx", activation)?,
         this.get("ty", activation)?,
     ];
-    let constructor = activation.context.avm1.prototypes.matrix_constructor;
+    let constructor = activation.context.avm1.prototypes().matrix_constructor;
     let cloned = constructor.construct(activation, &args)?;
     Ok(cloned)
 }
@@ -461,7 +461,7 @@ fn to_string<'gc>(
 pub fn create_matrix_object<'gc>(
     gc_context: MutationContext<'gc, '_>,
     matrix_proto: Object<'gc>,
-    fn_proto: Option<Object<'gc>>,
+    fn_proto: Object<'gc>,
 ) -> Object<'gc> {
     FunctionObject::constructor(
         gc_context,

@@ -1,4 +1,4 @@
-use crate::avm1::property_map::PropertyMap as Avm1PropertyMap;
+use crate::avm1::PropertyMap as Avm1PropertyMap;
 use crate::avm2::{ClassObject as Avm2ClassObject, Domain as Avm2Domain};
 use crate::backend::audio::SoundHandle;
 use crate::character::Character;
@@ -165,12 +165,12 @@ impl<'gc> MovieLibrary<'gc> {
         &self,
         id: CharacterId,
         gc_context: MutationContext<'gc, '_>,
-    ) -> Result<DisplayObject<'gc>, Box<dyn std::error::Error>> {
+    ) -> Result<DisplayObject<'gc>, &'static str> {
         if let Some(character) = self.characters.get(&id) {
             self.instantiate_display_object(character, gc_context)
         } else {
             log::error!("Tried to instantiate non-registered character ID {}", id);
-            Err("Character id doesn't exist".into())
+            Err("Character id doesn't exist")
         }
     }
 
@@ -180,7 +180,7 @@ impl<'gc> MovieLibrary<'gc> {
         &self,
         export_name: AvmString<'gc>,
         gc_context: MutationContext<'gc, '_>,
-    ) -> Result<DisplayObject<'gc>, Box<dyn std::error::Error>> {
+    ) -> Result<DisplayObject<'gc>, &'static str> {
         if let Some(character) = self.export_characters.get(export_name, false) {
             self.instantiate_display_object(character, gc_context)
         } else {
@@ -188,7 +188,7 @@ impl<'gc> MovieLibrary<'gc> {
                 "Tried to instantiate non-registered character {}",
                 export_name
             );
-            Err("Character id doesn't exist".into())
+            Err("Character id doesn't exist")
         }
     }
 
@@ -198,7 +198,7 @@ impl<'gc> MovieLibrary<'gc> {
         &self,
         character: &Character<'gc>,
         gc_context: MutationContext<'gc, '_>,
-    ) -> Result<DisplayObject<'gc>, Box<dyn std::error::Error>> {
+    ) -> Result<DisplayObject<'gc>, &'static str> {
         match character {
             Character::Bitmap(bitmap) => Ok(bitmap.instantiate(gc_context)),
             Character::EditText(edit_text) => Ok(edit_text.instantiate(gc_context)),
@@ -209,7 +209,7 @@ impl<'gc> MovieLibrary<'gc> {
             Character::Avm2Button(button) => Ok(button.instantiate(gc_context)),
             Character::Text(text) => Ok(text.instantiate(gc_context)),
             Character::Video(video) => Ok(video.instantiate(gc_context)),
-            _ => Err("Not a DisplayObject".into()),
+            _ => Err("Not a DisplayObject"),
         }
     }
 
@@ -279,7 +279,7 @@ impl<'gc> MovieLibrary<'gc> {
         }
     }
 
-    pub fn set_jpeg_tables(&mut self, data: Vec<u8>) {
+    pub fn set_jpeg_tables(&mut self, data: &[u8]) {
         if self.jpeg_tables.is_some() {
             // SWF spec says there should only be one JPEGTables tag.
             // TODO: What is the behavior when there are multiples?
@@ -291,7 +291,7 @@ impl<'gc> MovieLibrary<'gc> {
         self.jpeg_tables = if data.is_empty() {
             None
         } else {
-            Some(remove_invalid_jpeg_data(&data[..]).to_vec())
+            Some(remove_invalid_jpeg_data(data).to_vec())
         }
     }
 

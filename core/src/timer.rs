@@ -4,7 +4,7 @@
 //! The timers are stored in a priority queue, where we check if the nearest timer
 //! is ready to tick each frame.
 
-use crate::avm1::function::ExecutionReason;
+use crate::avm1::ExecutionReason;
 use crate::avm1::{
     Activation, ActivationIdentifier, Object as Avm1Object, TObject as _, Value as Avm1Value,
 };
@@ -87,12 +87,17 @@ impl<'gc> Timers<'gc> {
 
             let cancel_timer = match callback {
                 TimerCallback::Avm1Function { func, params } => {
-                    let _ = func.call(
+                    let result = func.call(
                         "[Timer Callback]".into(),
                         &mut activation,
                         Avm1Value::Undefined,
                         &params,
                     );
+
+                    if let Err(e) = result {
+                        log::error!("Unhandled AVM1 error in timer callback: {}", e);
+                    }
+
                     false
                 }
                 TimerCallback::Avm1Method {
@@ -100,21 +105,29 @@ impl<'gc> Timers<'gc> {
                     method_name,
                     params,
                 } => {
-                    let _ = this.call_method(
+                    let result = this.call_method(
                         method_name,
                         &params,
                         &mut activation,
                         ExecutionReason::Special,
                     );
+
+                    if let Err(e) = result {
+                        log::error!("Unhandled AVM1 error in timer callback: {}", e);
+                    }
+
                     false
                 }
                 TimerCallback::Avm2Callback { closure, params } => {
                     let mut avm2_activation =
                         Avm2Activation::from_nothing(activation.context.reborrow());
-                    closure
-                        .call(None, &params, &mut avm2_activation)
-                        .unwrap()
-                        .coerce_to_boolean()
+                    match closure.call(None, &params, &mut avm2_activation) {
+                        Ok(v) => v.coerce_to_boolean(),
+                        Err(e) => {
+                            log::error!("Unhandled AVM2 error in timer callback: {}", e);
+                            false
+                        }
+                    }
                 }
             };
 

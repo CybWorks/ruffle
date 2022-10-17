@@ -1,7 +1,4 @@
-use gc_arena::Collect;
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Collect)]
-#[collect(no_drop)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct BitmapHandle(pub usize);
 
 /// Info returned by the `register_bitmap` methods.
@@ -34,7 +31,6 @@ impl Bitmap {
     pub fn new(width: u32, height: u32, format: BitmapFormat, mut data: Vec<u8>) -> Self {
         // If the size is incorrect, either we screwed up or the decoder screwed up.
         let expected_len = width as usize * height as usize * format.bytes_per_pixel();
-        debug_assert_eq!(data.len(), expected_len);
         if data.len() != expected_len {
             log::warn!(
                 "Incorrect bitmap data size, expected {} bytes, got {}",

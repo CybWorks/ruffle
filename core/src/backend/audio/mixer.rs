@@ -363,7 +363,7 @@ impl AudioMixer {
         sound_instances.retain(|_, sound| sound.active);
     }
 
-    /// Registers a sound with the audio mixer.
+    /// Registers an embedded SWF sound with the audio mixer.
     pub fn register_sound(&mut self, swf_sound: &swf::Sound) -> Result<SoundHandle, RegisterError> {
         // Slice off latency seek for MP3 data.
         let (skip_sample_frames, data) = if swf_sound.format.compression == AudioCompression::Mp3 {
@@ -383,6 +383,31 @@ impl AudioMixer {
             skip_sample_frames,
         };
         Ok(self.sounds.insert(sound))
+    }
+
+    /// Registers an external MP3 with the audio mixer.
+    #[cfg(any(feature = "symphonia", feature = "minimp3"))]
+    pub fn register_mp3(&mut self, data: &[u8]) -> Result<SoundHandle, DecodeError> {
+        let data = Arc::from(data);
+        // Validate that this is actually MP3 data, and calculate duration and sample rate.
+        let metadata = decoders::mp3_metadata(&data)?;
+        let sound = Sound {
+            format: swf::SoundFormat {
+                compression: AudioCompression::Mp3,
+                sample_rate: metadata.sample_rate,
+                is_stereo: true,
+                is_16_bit: true,
+            },
+            data,
+            num_sample_frames: metadata.num_sample_frames,
+            skip_sample_frames: 0,
+        };
+        Ok(self.sounds.insert(sound))
+    }
+
+    #[cfg(not(any(feature = "symphonia", feature = "minimp3")))]
+    pub fn register_mp3(&mut self, data: &[u8]) -> Result<SoundHandle, DecodeError> {
+        Err(decoders::Error::UnhandledCompression(AudioCompression::Mp3))
     }
 
     /// Starts a timeline audio stream.
@@ -869,6 +894,11 @@ macro_rules! impl_audio_mixer_backend {
         #[inline]
         fn register_sound(&mut self, swf_sound: &swf::Sound) -> Result<SoundHandle, RegisterError> {
             self.$mixer.register_sound(swf_sound)
+        }
+
+        #[inline]
+        fn register_mp3(&mut self, data: &[u8]) -> Result<SoundHandle, DecodeError> {
+            self.$mixer.register_mp3(data)
         }
 
         #[inline]

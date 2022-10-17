@@ -91,7 +91,7 @@ fn get_transform<'gc>(
         let color_transform = base.color_transform();
         let out = ScriptObject::new(
             activation.context.gc_context,
-            Some(activation.context.avm1.prototypes.object),
+            Some(activation.context.avm1.prototypes().object),
         );
         out.set(
             "ra",
@@ -134,7 +134,7 @@ fn set_rgb<'gc>(
         let rgb = args
             .get(0)
             .unwrap_or(&Value::Undefined)
-            .coerce_to_i32(activation)? as i32;
+            .coerce_to_i32(activation)?;
         let [b, g, r, _] = rgb.to_le_bytes();
 
         let mut base = target.base_mut(activation.context.gc_context);

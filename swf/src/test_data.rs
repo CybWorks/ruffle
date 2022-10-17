@@ -359,44 +359,40 @@ pub fn tag_tests() -> Vec<TagTestData> {
         ),
         (
             4,
-            Tag::DefineEditText(Box::new(EditText {
-                id: 2,
-                bounds: Rectangle {
-                    x_min: Twips::from_pixels(-2.0),
-                    x_max: Twips::from_pixels(77.9),
-                    y_min: Twips::from_pixels(-2.0),
-                    y_max: Twips::from_pixels(23.9),
-                },
-                font_id: Some(1),
-                font_class_name: None,
-                height: Some(Twips::from_pixels(18.0)),
-                color: Some(Color {
-                    r: 0,
-                    g: 255,
-                    b: 0,
-                    a: 255,
-                }),
-                max_length: None,
-                layout: Some(TextLayout {
-                    align: TextAlign::Justify,
-                    left_margin: Twips::from_pixels(3.0),
-                    right_margin: Twips::from_pixels(4.0),
-                    indent: Twips::from_pixels(1.0),
-                    leading: Twips::from_pixels(2.0),
-                }),
-                variable_name: SwfStr::from_str_with_encoding("foo", WINDOWS_1252).unwrap(),
-                initial_text: Some(SwfStr::from_str_with_encoding("-_-", WINDOWS_1252).unwrap()),
-                is_word_wrap: false,
-                is_multiline: true,
-                is_password: false,
-                is_read_only: true,
-                is_auto_size: false,
-                is_selectable: true,
-                has_border: true,
-                was_static: false,
-                is_html: false,
-                is_device_font: true,
-            })),
+            Tag::DefineEditText(Box::new(
+                EditText::new()
+                    .with_id(2)
+                    .with_font_id(1, Twips::from_pixels(18.0))
+                    .with_bounds(Rectangle {
+                        x_min: Twips::from_pixels(-2.0),
+                        x_max: Twips::from_pixels(77.9),
+                        y_min: Twips::from_pixels(-2.0),
+                        y_max: Twips::from_pixels(23.9),
+                    })
+                    .with_color(Some(Color {
+                        r: 0,
+                        g: 255,
+                        b: 0,
+                        a: 255,
+                    }))
+                    .with_layout(Some(TextLayout {
+                        align: TextAlign::Justify,
+                        left_margin: Twips::from_pixels(3.0),
+                        right_margin: Twips::from_pixels(4.0),
+                        indent: Twips::from_pixels(1.0),
+                        leading: Twips::from_pixels(2.0),
+                    }))
+                    .with_variable_name(
+                        SwfStr::from_str_with_encoding("foo", WINDOWS_1252).unwrap(),
+                    )
+                    .with_initial_text(Some(
+                        SwfStr::from_str_with_encoding("-_-", WINDOWS_1252).unwrap(),
+                    ))
+                    .with_is_read_only(true)
+                    .with_has_border(true)
+                    .with_is_multiline(true)
+                    .with_use_outlines(false),
+            )),
             read_tag_bytes_from_file("tests/swfs/DefineEditText-MX.swf", TagCode::DefineEditText),
         ),
         (
@@ -690,8 +686,7 @@ pub fn tag_tests() -> Vec<TagTestData> {
             Tag::DefineMorphShape(Box::new(DefineMorphShape {
                 version: 1,
                 id: 1,
-                has_non_scaling_strokes: true,
-                has_scaling_strokes: false,
+                flags: DefineMorphShapeFlag::HAS_NON_SCALING_STROKES,
                 start: MorphShape {
                     shape_bounds: Rectangle {
                         x_min: Twips::from_pixels(15.0),
@@ -898,8 +893,7 @@ pub fn tag_tests() -> Vec<TagTestData> {
             Tag::DefineMorphShape(Box::new(DefineMorphShape {
                 version: 2,
                 id: 1,
-                has_non_scaling_strokes: false,
-                has_scaling_strokes: true,
+                flags: DefineMorphShapeFlag::HAS_SCALING_STROKES,
                 start: MorphShape {
                     shape_bounds: Rectangle {
                         x_min: Twips::from_pixels(15.0),
@@ -1130,8 +1124,7 @@ pub fn tag_tests() -> Vec<TagTestData> {
             Tag::DefineMorphShape(Box::new(DefineMorphShape {
                 version: 2,
                 id: 1,
-                has_non_scaling_strokes: false,
-                has_scaling_strokes: true,
+                flags: DefineMorphShapeFlag::HAS_SCALING_STROKES,
                 start: MorphShape {
                     shape_bounds: Rectangle {
                         x_min: Twips::from_pixels(0.0),
@@ -1353,9 +1346,7 @@ pub fn tag_tests() -> Vec<TagTestData> {
                     y_min: Twips::from_pixels(0.0),
                     y_max: Twips::from_pixels(20.0),
                 },
-                has_fill_winding_rule: false,
-                has_non_scaling_strokes: true,
-                has_scaling_strokes: false,
+                flags: ShapeFlag::HAS_NON_SCALING_STROKES,
                 styles: ShapeStyles {
                     fill_styles: vec![FillStyle::Color(Color {
                         r: 255,
@@ -1410,9 +1401,7 @@ pub fn tag_tests() -> Vec<TagTestData> {
                     y_min: Twips::from_pixels(0.0),
                     y_max: Twips::from_pixels(50.0),
                 },
-                has_fill_winding_rule: false,
-                has_non_scaling_strokes: true,
-                has_scaling_strokes: false,
+                flags: ShapeFlag::HAS_NON_SCALING_STROKES,
                 styles: ShapeStyles {
                     fill_styles: vec![FillStyle::RadialGradient(Gradient {
                         matrix: Matrix {
@@ -1525,9 +1514,7 @@ pub fn tag_tests() -> Vec<TagTestData> {
                     y_min: Twips::from_pixels(0.0),
                     y_max: Twips::from_pixels(100.0),
                 },
-                has_fill_winding_rule: false,
-                has_non_scaling_strokes: true,
-                has_scaling_strokes: false,
+                flags: ShapeFlag::HAS_NON_SCALING_STROKES,
                 styles: ShapeStyles {
                     fill_styles: vec![
                         FillStyle::Color(Color {
@@ -2111,7 +2098,7 @@ pub fn tag_tests() -> Vec<TagTestData> {
                 clip_depth: None,
                 class_name: None,
                 filters: Some(vec![
-                    Filter::GradientBevelFilter(Box::new(GradientBevelFilter {
+                    Filter::GradientBevelFilter(Box::new(GradientFilter {
                         colors: vec![
                             GradientRecord {
                                 ratio: 0,
@@ -2151,7 +2138,7 @@ pub fn tag_tests() -> Vec<TagTestData> {
                         is_on_top: false,
                         num_passes: 3,
                     })),
-                    Filter::GradientGlowFilter(Box::new(GradientGlowFilter {
+                    Filter::GradientGlowFilter(Box::new(GradientFilter {
                         colors: vec![
                             GradientRecord {
                                 ratio: 0,
@@ -2478,9 +2465,7 @@ pub fn tag_tests() -> Vec<TagTestData> {
                     y_min: Twips::from_pixels(0.0),
                     y_max: Twips::from_pixels(0.0),
                 },
-                has_fill_winding_rule: false,
-                has_non_scaling_strokes: false,
-                has_scaling_strokes: true,
+                flags: ShapeFlag::HAS_SCALING_STROKES,
                 styles: ShapeStyles {
                     fill_styles: vec![],
                     line_styles: vec![LineStyle::new()

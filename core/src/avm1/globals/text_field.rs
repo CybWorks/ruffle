@@ -1,13 +1,14 @@
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
-use crate::avm1::object::text_format_object::TextFormatObject;
+use crate::avm1::object::NativeObject;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{globals, Object, ScriptObject, TObject, Value};
 use crate::display_object::{AutoSizeMode, EditText, TDisplayObject, TextSelection};
 use crate::font::round_down_to_pixel;
 use crate::html::TextFormat;
 use crate::string::{AvmString, WStr};
-use gc_arena::MutationContext;
+use gc_arena::{GcCell, MutationContext};
+use swf::Color;
 
 macro_rules! tf_method {
     ($fn:expr) => {
@@ -82,6 +83,10 @@ const PROTO_DECLS: &[Declaration] = declare_properties! {
     "type" => property(tf_getter!(get_type), tf_setter!(set_type));
     "variable" => property(tf_getter!(variable), tf_setter!(set_variable));
     "wordWrap" => property(tf_getter!(word_wrap), tf_setter!(set_word_wrap));
+    "antiAliasType" => property(tf_getter!(anti_alias_type), tf_setter!(set_anti_alias_type));
+    "gridFitType" => property(tf_getter!(grid_fit_type), tf_setter!(set_grid_fit_type));
+    "sharpness" => property(tf_getter!(sharpness), tf_setter!(set_sharpness));
+    "thickness" => property(tf_getter!(thickness), tf_setter!(set_thickness));
 };
 
 /// Implements `TextField`
@@ -121,13 +126,26 @@ pub fn set_password<'gc>(
     Ok(())
 }
 
+fn new_text_format<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    text_format: TextFormat,
+) -> ScriptObject<'gc> {
+    let proto = activation.context.avm1.prototypes().text_format;
+    let object = ScriptObject::new(activation.context.gc_context, Some(proto));
+    object.set_native(
+        activation.context.gc_context,
+        NativeObject::TextFormat(GcCell::allocate(activation.context.gc_context, text_format)),
+    );
+    object
+}
+
 fn get_new_text_format<'gc>(
     text_field: EditText<'gc>,
     activation: &mut Activation<'_, 'gc, '_>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let tf = text_field.new_text_format();
-    Ok(TextFormatObject::new(activation, tf).into())
+    let text_format = text_field.new_text_format();
+    Ok(new_text_format(activation, text_format).into())
 }
 
 fn set_new_text_format<'gc>(
@@ -135,11 +153,9 @@ fn set_new_text_format<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let tf = args.get(0).unwrap_or(&Value::Undefined);
-
-    if let Value::Object(tf) = tf {
-        if let Some(tf) = tf.as_text_format_object() {
-            text_field.set_new_text_format(tf.text_format().clone(), &mut activation.context);
+    if let [Value::Object(text_format), ..] = args {
+        if let NativeObject::TextFormat(text_format) = text_format.native() {
+            text_field.set_new_text_format(text_format.read().clone(), &mut activation.context);
         }
     }
 
@@ -151,20 +167,26 @@ fn get_text_format<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let (from, to) = match (args.get(0), args.get(1)) {
-        (Some(f), Some(t)) => (
-            f.coerce_to_f64(activation)? as usize,
-            t.coerce_to_f64(activation)? as usize,
-        ),
-        (Some(f), None) => {
-            let v = f.coerce_to_f64(activation)? as usize;
-            (v, v.saturating_add(1))
+    let (begin_index, end_index) = match args {
+        [begin_index, end_index, ..] => {
+            let begin_index = begin_index.coerce_to_u32(activation)? as usize;
+            let end_index = end_index.coerce_to_u32(activation)? as usize;
+            (begin_index, end_index)
         }
-        _ => (0, text_field.text_length()),
+        [begin_index] => {
+            let begin_index = begin_index.coerce_to_u32(activation)? as usize;
+            let end_index = begin_index + 1;
+            (begin_index, end_index)
+        }
+        [] => {
+            let begin_index = 0;
+            let end_index = text_field.text_length();
+            (begin_index, end_index)
+        }
     };
 
-    let tf = text_field.text_format(from, to);
-    Ok(TextFormatObject::new(activation, tf).into())
+    let text_format = text_field.text_format(begin_index, end_index);
+    Ok(new_text_format(activation, text_format).into())
 }
 
 fn set_text_format<'gc>(
@@ -172,23 +194,33 @@ fn set_text_format<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let tf = args.last().unwrap_or(&Value::Undefined);
+    let (begin_index, end_index, text_format) = match args {
+        [begin_index, end_index, text_format, ..] => {
+            let begin_index = begin_index.coerce_to_u32(activation)? as usize;
+            let end_index = end_index.coerce_to_u32(activation)? as usize;
+            (begin_index, end_index, text_format)
+        }
+        [begin_index, text_format, ..] => {
+            let begin_index = begin_index.coerce_to_u32(activation)? as usize;
+            let end_index = begin_index + 1;
+            (begin_index, end_index, text_format)
+        }
+        [text_format] => {
+            let begin_index = 0;
+            let end_index = text_field.text_length();
+            (begin_index, end_index, text_format)
+        }
+        _ => return Ok(Value::Undefined),
+    };
 
-    if let Value::Object(tf) = tf {
-        if let Some(tf) = tf.as_text_format_object() {
-            let (from, to) = match (args.get(0), args.get(1)) {
-                (Some(f), Some(t)) if args.len() > 2 => (
-                    f.coerce_to_f64(activation)? as usize,
-                    t.coerce_to_f64(activation)? as usize,
-                ),
-                (Some(f), _) if args.len() > 1 => {
-                    let v = f.coerce_to_f64(activation)? as usize;
-                    (v, v.saturating_add(1))
-                }
-                _ => (0, text_field.text_length()),
-            };
-
-            text_field.set_text_format(from, to, tf.text_format().clone(), &mut activation.context);
+    if let Value::Object(text_format) = text_format {
+        if let NativeObject::TextFormat(text_format) = text_format.native() {
+            text_field.set_text_format(
+                begin_index,
+                end_index,
+                text_format.read().clone(),
+                &mut activation.context,
+            );
         }
     }
 
@@ -316,12 +348,17 @@ pub fn set_text_color<'gc>(
     value: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     let rgb = value.coerce_to_u32(activation)?;
-    let tf = TextFormat {
+    let text_format = TextFormat {
         color: Some(swf::Color::from_rgb(rgb, 0)),
-        ..TextFormat::default()
+        ..Default::default()
     };
-    this.set_text_format(0, this.text_length(), tf.clone(), &mut activation.context);
-    this.set_new_text_format(tf, &mut activation.context);
+    this.set_text_format(
+        0,
+        this.text_length(),
+        text_format.clone(),
+        &mut activation.context,
+    );
+    this.set_new_text_format(text_format, &mut activation.context);
     Ok(())
 }
 
@@ -364,7 +401,7 @@ pub fn background_color<'gc>(
     this: EditText<'gc>,
     _activation: &mut Activation<'_, 'gc, '_>,
 ) -> Result<Value<'gc>, Error<'gc>> {
-    Ok(this.background_color().into())
+    Ok(this.background_color().to_rgb().into())
 }
 
 pub fn set_background_color<'gc>(
@@ -373,7 +410,8 @@ pub fn set_background_color<'gc>(
     value: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     let rgb = value.coerce_to_u32(activation)?;
-    this.set_background_color(activation.context.gc_context, rgb & 0xFFFFFF);
+    let color = Color::from_rgb(rgb, 255);
+    this.set_background_color(activation.context.gc_context, color);
     Ok(())
 }
 
@@ -398,7 +436,7 @@ pub fn border_color<'gc>(
     this: EditText<'gc>,
     _activation: &mut Activation<'_, 'gc, '_>,
 ) -> Result<Value<'gc>, Error<'gc>> {
-    Ok(this.border_color().into())
+    Ok(this.border_color().to_rgb().into())
 }
 
 pub fn set_border_color<'gc>(
@@ -407,7 +445,8 @@ pub fn set_border_color<'gc>(
     value: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     let rgb = value.coerce_to_u32(activation)?;
-    this.set_border_color(activation.context.gc_context, rgb & 0xFFFFFF);
+    let color = Color::from_rgb(rgb, 255);
+    this.set_border_color(activation.context.gc_context, color);
     Ok(())
 }
 
@@ -564,7 +603,7 @@ pub fn get_type<'gc>(
         true => "input",
         false => "dynamic",
     };
-    Ok(AvmString::from(tf_type).into())
+    Ok(tf_type.into())
 }
 
 pub fn set_type<'gc>(
@@ -640,4 +679,123 @@ pub fn bottom_scroll<'gc>(
     _activation: &mut Activation<'_, 'gc, '_>,
 ) -> Result<Value<'gc>, Error<'gc>> {
     Ok(this.bottom_scroll().into())
+}
+
+pub fn anti_alias_type<'gc>(
+    this: EditText<'gc>,
+    _activation: &mut Activation<'_, 'gc, '_>,
+) -> Result<Value<'gc>, Error<'gc>> {
+    if this.render_settings().is_advanced() {
+        Ok("advanced".into())
+    } else {
+        Ok("normal".into())
+    }
+}
+
+pub fn set_anti_alias_type<'gc>(
+    this: EditText<'gc>,
+    activation: &mut Activation<'_, 'gc, '_>,
+    value: Value<'gc>,
+) -> Result<(), Error<'gc>> {
+    let old_settings = this.render_settings();
+    let new_type = value.coerce_to_string(activation)?;
+
+    if &new_type == b"advanced" {
+        this.set_render_settings(
+            activation.context.gc_context,
+            old_settings.with_advanced_rendering(),
+        );
+    } else if &new_type == b"normal" {
+        this.set_render_settings(
+            activation.context.gc_context,
+            old_settings.with_normal_rendering(),
+        );
+    }
+
+    Ok(())
+}
+
+pub fn grid_fit_type<'gc>(
+    this: EditText<'gc>,
+    _activation: &mut Activation<'_, 'gc, '_>,
+) -> Result<Value<'gc>, Error<'gc>> {
+    match this.render_settings().grid_fit() {
+        swf::TextGridFit::None => Ok("none".into()),
+        swf::TextGridFit::Pixel => Ok("pixel".into()),
+        swf::TextGridFit::SubPixel => Ok("subpixel".into()),
+    }
+}
+
+pub fn set_grid_fit_type<'gc>(
+    this: EditText<'gc>,
+    activation: &mut Activation<'_, 'gc, '_>,
+    value: Value<'gc>,
+) -> Result<(), Error<'gc>> {
+    let old_settings = this.render_settings();
+    let new_type = value.coerce_to_string(activation)?;
+
+    if &new_type == b"pixel" {
+        this.set_render_settings(
+            activation.context.gc_context,
+            old_settings.with_grid_fit(swf::TextGridFit::Pixel),
+        );
+    } else if &new_type == b"subpixel" {
+        this.set_render_settings(
+            activation.context.gc_context,
+            old_settings.with_grid_fit(swf::TextGridFit::SubPixel),
+        );
+    } else if &new_type == b"none" {
+        this.set_render_settings(
+            activation.context.gc_context,
+            old_settings.with_grid_fit(swf::TextGridFit::None),
+        );
+    } // NOTE: In AS2 invalid values do nothing.
+
+    Ok(())
+}
+
+pub fn thickness<'gc>(
+    this: EditText<'gc>,
+    _activation: &mut Activation<'_, 'gc, '_>,
+) -> Result<Value<'gc>, Error<'gc>> {
+    Ok(this.render_settings().thickness().into())
+}
+
+pub fn set_thickness<'gc>(
+    this: EditText<'gc>,
+    activation: &mut Activation<'_, 'gc, '_>,
+    value: Value<'gc>,
+) -> Result<(), Error<'gc>> {
+    let old_settings = this.render_settings();
+    let new_thickness = value.coerce_to_f64(activation)?;
+
+    this.set_render_settings(
+        activation.context.gc_context,
+        old_settings.with_thickness(new_thickness as f32),
+    );
+
+    Ok(())
+}
+
+pub fn sharpness<'gc>(
+    this: EditText<'gc>,
+    _activation: &mut Activation<'_, 'gc, '_>,
+) -> Result<Value<'gc>, Error<'gc>> {
+    Ok(this.render_settings().sharpness().into())
+}
+
+pub fn set_sharpness<'gc>(
+    this: EditText<'gc>,
+    activation: &mut Activation<'_, 'gc, '_>,
+    value: Value<'gc>,
+) -> Result<(), Error<'gc>> {
+    let old_settings = this.render_settings();
+    let new_sharpness = value.coerce_to_f64(activation)?;
+
+    this.set_render_settings(
+        activation.context.gc_context,
+        old_settings.with_sharpness(new_sharpness as f32),
+    );
+
+    Ok(())
 }

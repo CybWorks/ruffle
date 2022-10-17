@@ -190,7 +190,7 @@ pub fn map_point<'gc>(
     if let Some(object) = this.as_displacement_map_filter_object() {
         let (x, y) = object.map_point();
 
-        let proto = activation.context.avm1.prototypes.point_constructor;
+        let proto = activation.context.avm1.prototypes().point_constructor;
         let point = proto.construct(activation, &[x.into(), y.into()])?;
         return Ok(point);
     }
@@ -305,7 +305,7 @@ pub fn create_proto<'gc>(
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let filter = DisplacementMapFilterObject::empty_object(gc_context, Some(proto));
+    let filter = DisplacementMapFilterObject::empty_object(gc_context, proto);
     let object = filter.as_script_object().unwrap();
     define_properties_on(PROTO_DECLS, gc_context, object, fn_proto);
     filter.into()

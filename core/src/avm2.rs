@@ -9,7 +9,6 @@ use crate::context::UpdateContext;
 use crate::string::AvmString;
 use fnv::FnvHashMap;
 use gc_arena::{Collect, GcCell, MutationContext};
-use std::rc::Rc;
 use swf::avm2::read::Reader;
 use swf::{DoAbc, DoAbcFlag};
 
@@ -23,14 +22,16 @@ macro_rules! avm_debug {
 }
 
 pub mod activation;
+mod amf;
 mod array;
 pub mod bytearray;
 mod call_stack;
 mod class;
 mod domain;
+pub mod error;
 mod events;
 mod function;
-mod globals;
+pub mod globals;
 mod method;
 mod multiname;
 mod namespace;
@@ -51,6 +52,7 @@ pub use crate::avm2::activation::Activation;
 pub use crate::avm2::array::ArrayStorage;
 pub use crate::avm2::call_stack::{CallNode, CallStack};
 pub use crate::avm2::domain::Domain;
+pub use crate::avm2::error::Error;
 pub use crate::avm2::multiname::Multiname;
 pub use crate::avm2::namespace::Namespace;
 pub use crate::avm2::object::{
@@ -61,12 +63,6 @@ pub use crate::avm2::qname::QName;
 pub use crate::avm2::value::Value;
 
 const BROADCAST_WHITELIST: [&str; 3] = ["enterFrame", "exitFrame", "frameConstructed"];
-
-/// Boxed error alias.
-///
-/// As AVM2 is a far stricter VM than AVM1, this may eventually be replaced
-/// with a proper Avm2Error enum.
-pub type Error = Box<dyn std::error::Error>;
 
 /// The state of an AVM2 interpreter.
 #[derive(Collect)]
@@ -85,10 +81,10 @@ pub struct Avm2<'gc> {
     system_classes: Option<SystemClasses<'gc>>,
 
     #[collect(require_static)]
-    native_method_table: &'static [Option<NativeMethodImpl>],
+    native_method_table: &'static [Option<(&'static str, NativeMethodImpl)>],
 
     #[collect(require_static)]
-    native_instance_allocator_table: &'static [Option<AllocatorFn>],
+    native_instance_allocator_table: &'static [Option<(&'static str, AllocatorFn)>],
 
     /// A list of objects which are capable of recieving broadcasts.
     ///
@@ -123,7 +119,7 @@ impl<'gc> Avm2<'gc> {
         }
     }
 
-    pub fn load_player_globals(context: &mut UpdateContext<'_, 'gc, '_>) -> Result<(), Error> {
+    pub fn load_player_globals(context: &mut UpdateContext<'_, 'gc, '_>) -> Result<(), Error<'gc>> {
         let globals = context.avm2.globals;
         let mut activation = Activation::from_nothing(context.reborrow());
         globals::load_player_globals(&mut activation, globals)
@@ -140,7 +136,7 @@ impl<'gc> Avm2<'gc> {
     pub fn run_script_initializer(
         script: Script<'gc>,
         context: &mut UpdateContext<'_, 'gc, '_>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error<'gc>> {
         let mut init_activation = Activation::from_script(context.reborrow(), script)?;
 
         let (method, scope, _domain) = script.init();
@@ -184,7 +180,7 @@ impl<'gc> Avm2<'gc> {
         context: &mut UpdateContext<'_, 'gc, '_>,
         event: Object<'gc>,
         target: Object<'gc>,
-    ) -> Result<bool, Error> {
+    ) -> Result<bool, Error<'gc>> {
         use crate::avm2::events::dispatch_event;
         let mut activation = Activation::from_nothing(context.reborrow());
         dispatch_event(&mut activation, target, event)
@@ -233,7 +229,7 @@ impl<'gc> Avm2<'gc> {
         context: &mut UpdateContext<'_, 'gc, '_>,
         event: Object<'gc>,
         on_type: ClassObject<'gc>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error<'gc>> {
         let base_event = event.as_event().unwrap(); // TODO: unwrap?
         let event_name = base_event.event_type();
         drop(base_event);
@@ -263,7 +259,7 @@ impl<'gc> Avm2<'gc> {
             if let Some(object) = object {
                 let mut activation = Activation::from_nothing(context.reborrow());
 
-                if object.is_of_type(on_type, &mut activation)? {
+                if object.is_of_type(on_type, &mut activation) {
                     Avm2::dispatch_event(&mut activation.context, event, object)?;
                 }
             }
@@ -277,7 +273,7 @@ impl<'gc> Avm2<'gc> {
         reciever: Option<Object<'gc>>,
         args: &[Value<'gc>],
         context: &mut UpdateContext<'_, 'gc, '_>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error<'gc>> {
         let mut evt_activation = Activation::from_nothing(context.reborrow());
         callable.call(reciever, args, &mut evt_activation)?;
 
@@ -289,20 +285,29 @@ impl<'gc> Avm2<'gc> {
         context: &mut UpdateContext<'_, 'gc, '_>,
         do_abc: DoAbc,
         domain: Domain<'gc>,
-    ) -> Result<(), Error> {
-        let mut read = Reader::new(do_abc.data);
+    ) -> Result<(), Error<'gc>> {
+        let mut reader = Reader::new(do_abc.data);
+        let abc = match reader.read() {
+            Ok(abc) => abc,
+            Err(_) => {
+                let mut activation = Activation::from_nothing(context.reborrow());
+                return Err(Error::AvmError(crate::avm2::error::verify_error(
+                    &mut activation,
+                    "Error #1107: The ABC data is corrupt, attempt to read out of bounds.",
+                    1107,
+                )?));
+            }
+        };
 
-        let abc_file = Rc::new(read.read()?);
-        let tunit = TranslationUnit::from_abc(abc_file.clone(), domain, context.gc_context);
-
-        for i in (0..abc_file.scripts.len()).rev() {
+        let num_scripts = abc.scripts.len();
+        let tunit = TranslationUnit::from_abc(abc, domain, context.gc_context);
+        for i in (0..num_scripts).rev() {
             let mut script = tunit.load_script(i as u32, context)?;
 
             if !do_abc.flags.contains(DoAbcFlag::LAZY_INITIALIZE) {
                 script.globals(context)?;
             }
         }
-
         Ok(())
     }
 
@@ -351,6 +356,23 @@ impl<'gc> Avm2<'gc> {
         });
 
         avm_debug!(self, "Stack pop {}: {:?}", self.stack.len(), value);
+
+        value
+    }
+
+    /// Peek the n-th value from the end of the operand stack.
+    #[allow(clippy::let_and_return)]
+    fn peek(&mut self, index: usize) -> Value<'gc> {
+        let value = self
+            .stack
+            .get(self.stack.len() - index - 1)
+            .copied()
+            .unwrap_or_else(|| {
+                log::warn!("Avm1::pop: Stack underflow");
+                Value::Undefined
+            });
+
+        avm_debug!(self, "Stack peek {}: {:?}", self.stack.len(), value);
 
         value
     }

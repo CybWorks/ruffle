@@ -1,14 +1,13 @@
-use crate::avm1::activation::{Activation, ActivationIdentifier};
-use crate::avm1::debug::VariableDumper;
-use crate::avm1::globals::system::SystemProperties;
-use crate::avm1::object::Object;
-use crate::avm1::property::Attribute;
-use crate::avm1::{Avm1, ScriptObject, TObject, Value};
-use crate::avm2::object::LoaderInfoObject;
-use crate::avm2::object::TObject as _;
+use crate::avm1::Attribute;
+use crate::avm1::Avm1;
+use crate::avm1::Object;
+use crate::avm1::SystemProperties;
+use crate::avm1::VariableDumper;
+use crate::avm1::{Activation, ActivationIdentifier};
+use crate::avm1::{ScriptObject, TObject, Value};
 use crate::avm2::{
-    Activation as Avm2Activation, Avm2, CallStack, Domain as Avm2Domain,
-    EventObject as Avm2EventObject,
+    object::LoaderInfoObject, object::TObject as _, Activation as Avm2Activation, Avm2, CallStack,
+    Domain as Avm2Domain, EventObject as Avm2EventObject, Object as Avm2Object,
 };
 use crate::backend::{
     audio::{AudioBackend, AudioManager},
@@ -16,7 +15,6 @@ use crate::backend::{
     navigator::{NavigatorBackend, Request},
     storage::StorageBackend,
     ui::{InputManager, MouseCursor, UiBackend},
-    video::VideoBackend,
 };
 use crate::config::Letterbox;
 use crate::context::{ActionQueue, ActionType, RenderContext, UpdateContext};
@@ -32,6 +30,7 @@ use crate::focus_tracker::FocusTracker;
 use crate::font::Font;
 use crate::frame_lifecycle::{run_all_phases_avm2, FramePhase};
 use crate::library::Library;
+use crate::limits::ExecutionLimit;
 use crate::loader::LoadManager;
 use crate::locale::get_current_date_time;
 use crate::prelude::*;
@@ -44,7 +43,9 @@ use instant::Instant;
 use log::info;
 use rand::{rngs::SmallRng, SeedableRng};
 use ruffle_render::backend::{null::NullRenderer, RenderBackend, ViewportDimensions};
+use ruffle_render::commands::CommandList;
 use ruffle_render::transform::TransformStack;
+use ruffle_video::backend::VideoBackend;
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::ops::DerefMut;
@@ -122,7 +123,9 @@ struct GcRootData<'gc> {
     /// data in the GC arena.
     load_manager: LoadManager<'gc>,
 
-    shared_objects: HashMap<String, Object<'gc>>,
+    avm1_shared_objects: HashMap<String, Object<'gc>>,
+
+    avm2_shared_objects: HashMap<String, Avm2Object<'gc>>,
 
     /// Text fields with unbound variable bindings.
     unbound_text_fields: Vec<EditText<'gc>>,
@@ -157,6 +160,7 @@ impl<'gc> GcRootData<'gc> {
         &mut Option<DragObject<'gc>>,
         &mut LoadManager<'gc>,
         &mut HashMap<String, Object<'gc>>,
+        &mut HashMap<String, Avm2Object<'gc>>,
         &mut Vec<EditText<'gc>>,
         &mut Timers<'gc>,
         &mut Option<ContextMenuState<'gc>>,
@@ -171,7 +175,8 @@ impl<'gc> GcRootData<'gc> {
             &mut self.avm2,
             &mut self.drag_object,
             &mut self.load_manager,
-            &mut self.shared_objects,
+            &mut self.avm1_shared_objects,
+            &mut self.avm2_shared_objects,
             &mut self.unbound_text_fields,
             &mut self.timers,
             &mut self.current_context_menu,
@@ -340,8 +345,9 @@ impl Player {
             // and has no associated `Loader` instance.
             // However, some properties are always accessible, and take their values
             // from the root SWF.
-            let stage_loader_info = LoaderInfoObject::not_yet_loaded(&mut activation, swf, None)
-                .expect("Failed to construct Stage LoaderInfo");
+            let stage_loader_info =
+                LoaderInfoObject::not_yet_loaded(&mut activation, swf, None, Some(root), true)
+                    .expect("Failed to construct Stage LoaderInfo");
             activation
                 .context
                 .stage
@@ -396,7 +402,10 @@ impl Player {
             stage.build_matrices(&mut activation.context);
         });
 
-        self.preload();
+        if self.swf.is_action_script_3() && self.warn_on_unsupported_content {
+            self.ui.display_unsupported_message();
+        }
+
         self.audio.set_frame_rate(self.frame_rate);
     }
 
@@ -422,9 +431,7 @@ impl Player {
             let frame_time = 1000.0 / self.frame_rate;
             let average_run_frame_time = self.recent_run_frame_timings.iter().sum::<f64>()
                 / self.recent_run_frame_timings.len() as f64;
-            ((frame_time / average_run_frame_time) as u32)
-                .max(1)
-                .min(MAX_FRAMES_PER_TICK)
+            ((frame_time / average_run_frame_time) as u32).clamp(1, MAX_FRAMES_PER_TICK)
         }
     }
 
@@ -571,10 +578,7 @@ impl Player {
                 }
             }
 
-            let menu = crate::avm1::globals::context_menu::make_context_menu_state(
-                menu_object,
-                &mut activation,
-            );
+            let menu = crate::avm1::make_context_menu_state(menu_object, &mut activation);
             let ret = menu.info().clone();
             *activation.context.current_context_menu = Some(menu);
             ret
@@ -1321,21 +1325,75 @@ impl Player {
         needs_render
     }
 
-    /// Preload the first movie in the player.
+    /// Preload all pending movies in the player, including the root movie.
     ///
-    /// This should only be called once. Further movie loads should preload the
-    /// specific `MovieClip` referenced.
-    fn preload(&mut self) {
+    /// This should be called periodically with a reasonable execution limit.
+    /// By default, the Player will do so after every `run_frame` using a limit
+    /// derived from the current frame rate and execution time. Clients that
+    /// want synchronous or 'lockstep' preloading may call this function with
+    /// an unlimited execution limit.
+    ///
+    /// Returns true if all preloading work has completed. Clients that want to
+    /// simulate a particular load condition or stress chunked loading may use
+    /// this in lieu of an unlimited execution limit.
+    pub fn preload(&mut self, limit: &mut ExecutionLimit) -> bool {
         self.mutate_with_update_context(|context| {
-            let root = context.stage.root_clip();
-            root.as_movie_clip().unwrap().preload(context);
-        });
-        if self.swf.is_action_script_3() && self.warn_on_unsupported_content {
-            self.ui.display_unsupported_message();
-        }
+            let mut did_finish = true;
+
+            if let Some(root) = context.stage.root_clip().as_movie_clip() {
+                let was_root_movie_loaded = root.loaded_bytes() == root.total_bytes();
+                did_finish = root.preload(context, limit);
+
+                if !was_root_movie_loaded {
+                    if let Some(loader_info) = root.loader_info() {
+                        let mut activation = Avm2Activation::from_nothing(context.reborrow());
+
+                        let progress_evt = activation.avm2().classes().progressevent.construct(
+                            &mut activation,
+                            &[
+                                "progress".into(),
+                                false.into(),
+                                false.into(),
+                                root.compressed_loaded_bytes().into(),
+                                root.compressed_total_bytes().into(),
+                            ],
+                        );
+
+                        match progress_evt {
+                            Err(e) => log::error!(
+                                "Encountered AVM2 error when broadcasting `progress` event: {}",
+                                e
+                            ),
+                            Ok(progress_evt) => {
+                                if let Err(e) =
+                                    Avm2::dispatch_event(context, progress_evt, loader_info)
+                                {
+                                    log::error!(
+                                        "Encountered AVM2 error when broadcasting `progress` event: {}",
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if did_finish {
+                did_finish = LoadManager::preload_tick(context, limit);
+            }
+
+            did_finish
+        })
     }
 
     pub fn run_frame(&mut self) {
+        let frame_time = Duration::from_nanos((750_000_000.0 / self.frame_rate) as u64);
+
+        self.preload(&mut ExecutionLimit::with_max_ops_and_time(
+            10000, frame_time,
+        ));
+
         self.update(|context| {
             if context.is_action_script_3() {
                 run_all_phases_avm2(context);
@@ -1344,28 +1402,44 @@ impl Player {
             }
             context.update_sounds();
         });
+
         self.needs_render = true;
     }
 
     pub fn render(&mut self) {
         let (renderer, ui, transform_stack) =
             (&mut self.renderer, &mut self.ui, &mut self.transform_stack);
+        let mut commands = CommandList::new();
+        let mut background_color = Color::WHITE;
 
         self.gc_arena.borrow().mutate(|gc_context, gc_root| {
             let root_data = gc_root.data.read();
+            let stage = root_data.stage;
+
             let mut render_context = RenderContext {
                 renderer: renderer.deref_mut(),
+                commands: &mut commands,
                 gc_context,
                 ui: ui.deref_mut(),
                 library: &root_data.library,
                 transform_stack,
-                stage: root_data.stage,
+                is_offscreen: false,
+                stage,
                 clip_depth_stack: vec![],
                 allow_mask: true,
             };
 
-            root_data.stage.render(&mut render_context);
+            stage.render(&mut render_context);
+
+            background_color =
+                if stage.window_mode() != WindowMode::Transparent || stage.is_fullscreen() {
+                    stage.background_color().unwrap_or(Color::WHITE)
+                } else {
+                    Color::from_rgba(0)
+                };
         });
+
+        renderer.submit_frame(background_color, commands);
 
         self.needs_render = false;
     }
@@ -1550,7 +1624,8 @@ impl Player {
                 avm2,
                 drag_object,
                 load_manager,
-                shared_objects,
+                avm1_shared_objects,
+                avm2_shared_objects,
                 unbound_text_fields,
                 timers,
                 current_context_menu,
@@ -1582,7 +1657,8 @@ impl Player {
                 storage: self.storage.deref_mut(),
                 log: self.log.deref_mut(),
                 video: self.video.deref_mut(),
-                shared_objects,
+                avm1_shared_objects,
+                avm2_shared_objects,
                 unbound_text_fields,
                 timers,
                 current_context_menu,
@@ -1680,11 +1756,24 @@ impl Player {
 
     pub fn flush_shared_objects(&mut self) {
         self.update(|context| {
-            let mut activation =
+            let mut avm1_activation =
                 Activation::from_stub(context.reborrow(), ActivationIdentifier::root("[Flush]"));
-            let shared_objects = activation.context.shared_objects.clone();
-            for so in shared_objects.values() {
-                let _ = crate::avm1::globals::shared_object::flush(&mut activation, *so, &[]);
+            for so in avm1_activation.context.avm1_shared_objects.clone().values() {
+                if let Err(e) = crate::avm1::flush(&mut avm1_activation, *so, &[]) {
+                    log::error!("Error flushing AVM1 shared object `{:?}`: {:?}", so, e);
+                }
+            }
+
+            let mut avm2_activation =
+                Avm2Activation::from_nothing(avm1_activation.context.reborrow());
+            for so in avm2_activation.context.avm2_shared_objects.clone().values() {
+                if let Err(e) = crate::avm2::globals::flash::net::sharedobject::flush(
+                    &mut avm2_activation,
+                    Some(*so),
+                    &[],
+                ) {
+                    log::error!("Error flushing AVM2 shared object `{:?}`: {:?}", so, e);
+                }
             }
         });
     }
@@ -1855,13 +1944,6 @@ impl PlayerBuilder {
         self
     }
 
-    /// Configures the player to use software video decoding.
-    #[inline]
-    pub fn with_software_video(mut self) -> Self {
-        self.video = Some(Box::new(crate::backend::video::SoftwareVideoBackend::new()));
-        self
-    }
-
     /// Sets whether the movie will start playing immediately upon load.
     #[inline]
     pub fn with_autoplay(mut self, autoplay: bool) -> Self {
@@ -1913,6 +1995,7 @@ impl PlayerBuilder {
     /// Builds the player, wiring up the backends and configuring the specified settings.
     pub fn build(self) -> Arc<Mutex<Player>> {
         use crate::backend::*;
+        use ruffle_video::null;
         let audio = self
             .audio
             .unwrap_or_else(|| Box::new(audio::NullAudioBackend::new()));
@@ -1937,7 +2020,7 @@ impl PlayerBuilder {
             .unwrap_or_else(|| Box::new(ui::NullUiBackend::new()));
         let video = self
             .video
-            .unwrap_or_else(|| Box::new(video::NullVideoBackend::new()));
+            .unwrap_or_else(|| Box::new(null::NullVideoBackend::new()));
 
         // Instantiate the player.
         let fake_movie = Arc::new(SwfMovie::empty(NEWEST_PLAYER_VERSION));
@@ -2005,7 +2088,8 @@ impl PlayerBuilder {
                                 load_manager: LoadManager::new(),
                                 mouse_hovered_object: None,
                                 mouse_pressed_object: None,
-                                shared_objects: HashMap::new(),
+                                avm1_shared_objects: HashMap::new(),
+                                avm2_shared_objects: HashMap::new(),
                                 stage: Stage::empty(gc_context, self.fullscreen),
                                 timers: Timers::new(),
                                 unbound_text_fields: Vec::new(),

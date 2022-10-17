@@ -124,21 +124,21 @@ pub fn constructor<'gc>(
 
 fn new_rectangle<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
-    rectangle: Rectangle,
+    rectangle: Rectangle<Twips>,
 ) -> Result<Value<'gc>, Error<'gc>> {
     let x = rectangle.x_min.to_pixels();
     let y = rectangle.y_min.to_pixels();
     let width = (rectangle.x_max - rectangle.x_min).to_pixels();
     let height = (rectangle.y_max - rectangle.y_min).to_pixels();
     let args = &[x.into(), y.into(), width.into(), height.into()];
-    let proto = activation.context.avm1.prototypes.rectangle_constructor;
+    let proto = activation.context.avm1.prototypes().rectangle_constructor;
     proto.construct(activation, args)
 }
 
 fn object_to_rectangle<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     object: Object<'gc>,
-) -> Result<Option<Rectangle>, Error<'gc>> {
+) -> Result<Option<Rectangle<Twips>>, Error<'gc>> {
     const NAMES: &[&str] = &["x", "y", "width", "height"];
     let mut values = [0; 4];
     for (&name, value) in NAMES.iter().zip(&mut values) {
@@ -691,7 +691,7 @@ fn attach_movie<'gc>(
         .context
         .library
         .library_for_movie(movie_clip.movie().unwrap())
-        .ok_or_else(|| "Movie is missing!".into())
+        .ok_or("Movie is missing!")
         .and_then(|l| l.instantiate_by_export_name(export_name, activation.context.gc_context))
     {
         // Set name and attach to parent.
@@ -860,7 +860,7 @@ pub fn duplicate_movie_clip_with_bias<'gc>(
             .context
             .library
             .library_for_movie(movie)
-            .ok_or_else(|| "Movie is missing!".into())
+            .ok_or("Movie is missing!")
             .and_then(|l| l.instantiate_by_id(id, activation.context.gc_context))
     } else {
         // Dynamically created clip; create a new empty movie clip.
@@ -873,15 +873,18 @@ pub fn duplicate_movie_clip_with_bias<'gc>(
         parent.replace_at_depth(&mut activation.context, new_clip, depth);
 
         // Copy display properties from previous clip to new clip.
-        new_clip.set_matrix(activation.context.gc_context, movie_clip.base().matrix());
-        new_clip.set_color_transform(
-            activation.context.gc_context,
-            movie_clip.base().color_transform(),
-        );
-        new_clip.as_movie_clip().unwrap().set_clip_event_handlers(
-            activation.context.gc_context,
-            movie_clip.clip_actions().to_vec(),
-        );
+        let matrix = *movie_clip.base().matrix();
+        new_clip.set_matrix(activation.context.gc_context, matrix);
+
+        let color_transform = *movie_clip.base().color_transform();
+        new_clip.set_color_transform(activation.context.gc_context, color_transform);
+
+        let clip_actions = movie_clip.clip_actions().to_vec();
+        new_clip
+            .as_movie_clip()
+            .unwrap()
+            .set_clip_event_handlers(activation.context.gc_context, clip_actions);
+
         *new_clip.as_drawing(activation.context.gc_context).unwrap() = movie_clip
             .as_drawing(activation.context.gc_context)
             .unwrap()
@@ -913,15 +916,7 @@ fn get_bytes_loaded<'gc>(
     _activation: &mut Activation<'_, 'gc, '_>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let bytes_loaded = if movie_clip.is_root() {
-        movie_clip
-            .movie()
-            .map(|mv| mv.uncompressed_len())
-            .unwrap_or_default()
-    } else {
-        movie_clip.tag_stream_len() as u32
-    };
-    Ok(bytes_loaded.into())
+    Ok(movie_clip.loaded_bytes().into())
 }
 
 fn get_bytes_total<'gc>(
@@ -929,17 +924,7 @@ fn get_bytes_total<'gc>(
     _activation: &mut Activation<'_, 'gc, '_>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    // For a loaded SWF, returns the uncompressed size of the SWF.
-    // Otherwise, returns the size of the tag list in the clip's DefineSprite tag.
-    let bytes_total = if movie_clip.is_root() {
-        movie_clip
-            .movie()
-            .map(|mv| mv.uncompressed_len())
-            .unwrap_or_default()
-    } else {
-        movie_clip.tag_stream_len() as u32
-    };
-    Ok(bytes_total.into())
+    Ok(movie_clip.total_bytes().into())
 }
 
 fn get_instance_at_depth<'gc>(
@@ -1127,7 +1112,7 @@ fn start_drag<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    crate::avm1::start_drag(movie_clip.into(), activation, args);
+    crate::avm1::activation::start_drag(movie_clip.into(), activation, args);
     Ok(Value::Undefined)
 }
 
@@ -1274,7 +1259,7 @@ fn get_bounds<'gc>(
 
         let out = ScriptObject::new(
             activation.context.gc_context,
-            Some(activation.context.avm1.prototypes.object),
+            Some(activation.context.avm1.prototypes().object),
         );
         out.set("xMin", out_bounds.x_min.to_pixels().into(), activation)?;
         out.set("yMin", out_bounds.y_min.to_pixels().into(), activation)?;
@@ -1429,7 +1414,7 @@ fn transform<'gc>(
     this: MovieClip<'gc>,
     activation: &mut Activation<'_, 'gc, '_>,
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let constructor = activation.context.avm1.prototypes.transform_constructor;
+    let constructor = activation.context.avm1.prototypes().transform_constructor;
     let cloned = constructor.construct(activation, &[this.object()])?;
     Ok(cloned)
 }
@@ -1443,9 +1428,11 @@ fn set_transform<'gc>(
         if let Some(transform) = object.as_transform_object() {
             if let Some(clip) = transform.clip() {
                 let matrix = *clip.base().matrix();
-                this.set_matrix(activation.context.gc_context, &matrix);
+                this.set_matrix(activation.context.gc_context, matrix);
+
                 let color_transform = *clip.base().color_transform();
-                this.set_color_transform(activation.context.gc_context, &color_transform);
+                this.set_color_transform(activation.context.gc_context, color_transform);
+
                 this.set_transformed_by_script(activation.context.gc_context, true);
             }
         }

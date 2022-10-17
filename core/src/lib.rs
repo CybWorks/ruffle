@@ -1,3 +1,5 @@
+#![allow(clippy::bool_to_int_with_if)]
+
 #[macro_use]
 mod display_object;
 pub use display_object::StageDisplayState;
@@ -28,6 +30,7 @@ mod font;
 mod frame_lifecycle;
 mod html;
 mod library;
+pub mod limits;
 pub mod loader;
 mod locale;
 mod player;

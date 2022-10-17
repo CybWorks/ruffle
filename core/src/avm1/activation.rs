@@ -3,10 +3,9 @@ use crate::avm1::error::Error;
 use crate::avm1::function::{Avm1Function, ExecutionReason, FunctionObject};
 use crate::avm1::object::{Object, TObject};
 use crate::avm1::property::Attribute;
+use crate::avm1::runtime::skip_actions;
 use crate::avm1::scope::Scope;
-use crate::avm1::{
-    fscommand, globals, scope, skip_actions, start_drag, ArrayObject, ScriptObject, Value,
-};
+use crate::avm1::{fscommand, globals, scope, ArrayObject, ScriptObject, Value};
 use crate::backend::navigator::{NavigationMethod, Request};
 use crate::context::UpdateContext;
 use crate::display_object::{DisplayObject, MovieClip, TDisplayObject, TDisplayObjectContainer};
@@ -19,12 +18,15 @@ use gc_arena::{Gc, GcCell, MutationContext};
 use indexmap::IndexMap;
 use instant::Instant;
 use rand::Rng;
+use ruffle_render::bounding_box::BoundingBox;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::cell::{Ref, RefMut};
+use std::cmp::min;
 use std::fmt;
 use swf::avm1::read::Reader;
 use swf::avm1::types::*;
+use swf::Twips;
 use url::form_urlencoded;
 
 macro_rules! avm_debug {
@@ -350,7 +352,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         active_clip: DisplayObject<'gc>,
         code: SwfSlice,
     ) -> Result<ReturnType<'gc>, Error<'gc>> {
-        let globals = self.context.avm1.globals;
+        let globals = self.context.avm1.global_object_cell();
         let mut parent_activation = Activation::from_nothing(
             self.context.reborrow(),
             self.id.child("[Actions Parent]"),
@@ -368,7 +370,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
                 clip_obj,
             ),
         );
-        let constant_pool = parent_activation.context.avm1.constant_pool;
+        let constant_pool = parent_activation.context.avm1.constant_pool();
         let child_name = parent_activation.id.child(name);
         let mut child_activation = Activation::from_action(
             parent_activation.context.reborrow(),
@@ -400,13 +402,13 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         };
         let global_scope = GcCell::allocate(
             self.context.gc_context,
-            Scope::from_global_object(self.context.avm1.globals),
+            Scope::from_global_object(self.context.avm1.global_object_cell()),
         );
         let child_scope = GcCell::allocate(
             self.context.gc_context,
             Scope::new(global_scope, scope::ScopeClass::Target, clip_obj),
         );
-        let constant_pool = self.context.avm1.constant_pool;
+        let constant_pool = self.context.avm1.constant_pool();
         let mut activation = Activation::from_action(
             self.context.reborrow(),
             self.id.child(name),
@@ -754,7 +756,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let fn_name_value = self.context.avm1.pop();
         let fn_name = fn_name_value.coerce_to_string(self)?;
         let num_args = self.context.avm1.pop().coerce_to_u32(self)? as usize;
-        let num_args = num_args.min(self.context.avm1.stack.len());
+        let num_args = num_args.min(self.context.avm1.stack_len());
         let mut args = Vec::with_capacity(num_args);
         for _ in 0..num_args {
             args.push(self.context.avm1.pop());
@@ -779,7 +781,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let method_name = self.context.avm1.pop();
         let object_val = self.context.avm1.pop();
         let num_args = self.context.avm1.pop().coerce_to_u32(self)? as usize;
-        let num_args = num_args.min(self.context.avm1.stack.len());
+        let num_args = num_args.min(self.context.avm1.stack_len());
         let mut args = Vec::with_capacity(num_args);
         for _ in 0..num_args {
             args.push(self.context.avm1.pop());
@@ -832,7 +834,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         &mut self,
         action: ConstantPool,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        self.context.avm1.constant_pool = GcCell::allocate(
+        self.context.avm1.set_constant_pool(GcCell::allocate(
             self.context.gc_context,
             action
                 .strings
@@ -842,8 +844,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
                         .into()
                 })
                 .collect(),
-        );
-        self.set_constant_pool(self.context.avm1.constant_pool);
+        ));
+        self.set_constant_pool(self.context.avm1.constant_pool());
 
         Ok(FrameControl::Continue)
     }
@@ -875,13 +877,13 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let name = func.name();
         let prototype = ScriptObject::new(
             self.context.gc_context,
-            Some(self.context.avm1.prototypes.object),
+            Some(self.context.avm1.prototypes().object),
         )
         .into();
         let func_obj = FunctionObject::function(
             self.context.gc_context,
             Gc::allocate(self.context.gc_context, func),
-            Some(self.context.avm1.prototypes.function),
+            self.context.avm1.prototypes().function,
             prototype,
         );
         if let Some(name) = name {
@@ -1096,7 +1098,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         } else if let Some(target) = self.target_clip() {
             let prop_index = prop_index as usize;
             if let Some(clip) = self.resolve_target_display_object(target, path, true)? {
-                let display_properties = self.context.avm1.display_properties;
+                let display_properties = self.context.avm1.display_properties();
                 let props = display_properties.read();
                 if let Some(property) = props.get_by_index(prop_index) {
                     property.get(self, clip)
@@ -1418,7 +1420,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         } else {
             let object = ScriptObject::new(
                 self.context.gc_context,
-                Some(self.context.avm1.prototypes.object),
+                Some(self.context.avm1.prototypes().object),
             );
             for _ in 0..num_props as usize {
                 let value = self.context.avm1.pop();
@@ -1446,7 +1448,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             avm_warn!(self, "ImplementsOp: Object not coerced into number");
             0
         };
-        let count = count.min(self.context.avm1.stack.len());
+        let count = count.min(self.context.avm1.stack_len());
         let mut interfaces = Vec::with_capacity(count);
 
         // TODO: If one of the interfaces is not an object, do we leave the
@@ -1625,7 +1627,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let method_name = self.context.avm1.pop();
         let object_val = self.context.avm1.pop();
         let num_args = self.context.avm1.pop().coerce_to_u32(self)? as usize;
-        let num_args = num_args.min(self.context.avm1.stack.len());
+        let num_args = num_args.min(self.context.avm1.stack_len());
         let mut args = Vec::with_capacity(num_args);
         for _ in 0..num_args {
             args.push(self.context.avm1.pop());
@@ -1672,7 +1674,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let fn_name_val = self.context.avm1.pop();
         let fn_name = fn_name_val.coerce_to_string(self)?;
         let num_args = self.context.avm1.pop().coerce_to_u32(self)? as usize;
-        let num_args = num_args.min(self.context.avm1.stack.len());
+        let num_args = num_args.min(self.context.avm1.stack_len());
         let mut args = Vec::with_capacity(num_args);
         for _ in 0..num_args {
             args.push(self.context.avm1.pop());
@@ -1815,7 +1817,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let path = self.context.avm1.pop();
         if let Some(target) = self.target_clip() {
             if let Some(clip) = self.resolve_target_display_object(target, path, true)? {
-                let display_properties = self.context.avm1.display_properties;
+                let display_properties = self.context.avm1.display_properties();
                 let props = display_properties.read();
                 if let Some(property) = props.get_by_index(prop_index) {
                     property.set(self, clip, value)?;
@@ -2179,8 +2181,11 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         action: WaitForFrame,
         r: &mut Reader<'_>,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        // TODO(Herschel): Always true for now.
-        let loaded = true;
+        let loaded = self
+            .target_clip()
+            .and_then(|dobj| dobj.as_movie_clip())
+            .map(|mc| mc.frames_loaded() > min(action.frame, mc.total_frames() - 1))
+            .unwrap_or(true);
         if !loaded {
             // Note that the offset is given in # of actions, NOT in bytes.
             // Read the actions and toss them away.
@@ -2194,9 +2199,12 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         action: WaitForFrame2,
         r: &mut Reader<'_>,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        // TODO(Herschel): Always true for now.
-        let _frame_num = self.context.avm1.pop().coerce_to_f64(self)? as u16;
-        let loaded = true;
+        let frame_num = self.context.avm1.pop().coerce_to_f64(self)? as u16;
+        let loaded = self
+            .target_clip()
+            .and_then(|dobj| dobj.as_movie_clip())
+            .map(|mc| mc.frames_loaded() > min(frame_num, mc.total_frames() - 1))
+            .unwrap_or(true);
         if !loaded {
             // Note that the offset is given in # of actions, NOT in bytes.
             // Read the actions and toss them away.
@@ -2255,8 +2263,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         } else {
             self.context
                 .avm1
-                .registers
-                .get(id as usize)
+                .get_register(id as usize)
                 .cloned()
                 .unwrap_or(Value::Undefined)
         }
@@ -2268,7 +2275,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     pub fn set_current_register(&mut self, id: u8, value: Value<'gc>) {
         if self.has_local_register(id) {
             self.set_local_register(id, value);
-        } else if let Some(v) = self.context.avm1.registers.get_mut(id as usize) {
+        } else if let Some(v) = self.context.avm1.get_register_mut(id as usize) {
             *v = value;
         }
     }
@@ -2952,4 +2959,85 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         ));
         Ok(FrameControl::Continue)
     }
+}
+
+/// Starts dragging this display object, making it follow the cursor.
+/// Runs via the `startDrag` method or `StartDrag` AVM1 action.
+pub fn start_drag<'gc>(
+    display_object: DisplayObject<'gc>,
+    activation: &mut Activation<'_, 'gc, '_>,
+    args: &[Value<'gc>],
+) {
+    let lock_center = args
+        .get(0)
+        .map(|o| o.as_bool(activation.context.swf.version()))
+        .unwrap_or(false);
+
+    let offset = if lock_center {
+        // The object's origin point is locked to the mouse.
+        Default::default()
+    } else {
+        // The object moves relative to current mouse position.
+        // Calculate the offset from the mouse to the object in world space.
+        let (object_x, object_y) = display_object.local_to_global(Default::default());
+        let (mouse_x, mouse_y) = *activation.context.mouse_position;
+        (object_x - mouse_x, object_y - mouse_y)
+    };
+
+    let constraint = if args.len() > 1 {
+        // Invalid values turn into 0.
+        let mut x_min = args
+            .get(1)
+            .unwrap_or(&Value::Undefined)
+            .coerce_to_f64(activation)
+            .map(|n| if n.is_finite() { n } else { 0.0 })
+            .map(Twips::from_pixels)
+            .unwrap_or_default();
+        let mut y_min = args
+            .get(2)
+            .unwrap_or(&Value::Undefined)
+            .coerce_to_f64(activation)
+            .map(|n| if n.is_finite() { n } else { 0.0 })
+            .map(Twips::from_pixels)
+            .unwrap_or_default();
+        let mut x_max = args
+            .get(3)
+            .unwrap_or(&Value::Undefined)
+            .coerce_to_f64(activation)
+            .map(|n| if n.is_finite() { n } else { 0.0 })
+            .map(Twips::from_pixels)
+            .unwrap_or_default();
+        let mut y_max = args
+            .get(4)
+            .unwrap_or(&Value::Undefined)
+            .coerce_to_f64(activation)
+            .map(|n| if n.is_finite() { n } else { 0.0 })
+            .map(Twips::from_pixels)
+            .unwrap_or_default();
+
+        // Normalize the bounds.
+        if x_max.get() < x_min.get() {
+            std::mem::swap(&mut x_min, &mut x_max);
+        }
+        if y_max.get() < y_min.get() {
+            std::mem::swap(&mut y_min, &mut y_max);
+        }
+        BoundingBox {
+            valid: true,
+            x_min,
+            y_min,
+            x_max,
+            y_max,
+        }
+    } else {
+        // No constraints.
+        Default::default()
+    };
+
+    let drag_object = crate::player::DragObject {
+        display_object,
+        offset,
+        constraint,
+    };
+    *activation.context.drag_object = Some(drag_object);
 }

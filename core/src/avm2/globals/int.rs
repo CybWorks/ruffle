@@ -17,7 +17,7 @@ fn instance_init<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
         if let Some(mut prim) = this.as_primitive_mut(activation.context.gc_context) {
             if matches!(*prim, Value::Undefined | Value::Null) {
@@ -39,7 +39,7 @@ fn native_instance_init<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
         activation.super_init(this, args)?;
     }
@@ -52,7 +52,7 @@ fn class_init<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
         let scope = activation.create_scopechain();
         let gc_context = activation.context.gc_context;
@@ -135,14 +135,14 @@ fn to_exponential<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
         if let Some(this) = this.as_primitive() {
             if let Value::Integer(number) = *this {
                 let digits = args
                     .get(0)
                     .cloned()
-                    .unwrap_or(Value::Unsigned(0))
+                    .unwrap_or(Value::Integer(0))
                     .coerce_to_u32(activation)? as usize;
 
                 if digits > 20 {
@@ -169,14 +169,14 @@ fn to_fixed<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
         if let Some(this) = this.as_primitive() {
             if let Value::Integer(number) = *this {
                 let digits = args
                     .get(0)
                     .cloned()
-                    .unwrap_or(Value::Unsigned(0))
+                    .unwrap_or(Value::Integer(0))
                     .coerce_to_u32(activation)? as usize;
 
                 if digits > 20 {
@@ -200,14 +200,14 @@ fn to_precision<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
         if let Some(this) = this.as_primitive() {
             if let Value::Integer(number) = *this {
                 let wanted_digits = args
                     .get(0)
                     .cloned()
-                    .unwrap_or(Value::Unsigned(0))
+                    .unwrap_or(Value::Integer(0))
                     .coerce_to_u32(activation)? as usize;
 
                 if wanted_digits < 1 || wanted_digits > 21 {
@@ -227,14 +227,14 @@ fn to_string<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
         if let Some(this) = this.as_primitive() {
             if let Value::Integer(number) = *this {
                 let radix = args
                     .get(0)
                     .cloned()
-                    .unwrap_or(Value::Unsigned(10))
+                    .unwrap_or(Value::Integer(10))
                     .coerce_to_u32(activation)? as usize;
 
                 if radix < 2 || radix > 36 {
@@ -254,7 +254,7 @@ fn value_of<'gc>(
     _activation: &mut Activation<'_, 'gc, '_>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
         if let Some(this) = this.as_primitive() {
             return Ok(*this);
@@ -268,7 +268,7 @@ fn value_of<'gc>(
 pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>> {
     let class = Class::new(
         QName::new(Namespace::public(), "int"),
-        Some(QName::new(Namespace::public(), "Object").into()),
+        Some(Multiname::public("Object")),
         Method::from_builtin(instance_init, "<int instance initializer>", mc),
         Method::from_builtin(class_init, "<int class initializer>", mc),
         mc,

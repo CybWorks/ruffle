@@ -3,6 +3,7 @@ use gc_arena::Collect;
 use ruffle_render::backend::ShapeHandle;
 use ruffle_render::bitmap::{BitmapInfo, BitmapSource};
 use ruffle_render::bounding_box::BoundingBox;
+use ruffle_render::commands::CommandHandler;
 use ruffle_render::shape_utils::{DistilledShape, DrawCommand, DrawPath};
 use std::cell::Cell;
 use swf::{FillStyle, LineStyle, Twips};
@@ -49,8 +50,8 @@ impl Drawing {
     pub fn from_swf_shape(shape: &swf::Shape) -> Self {
         let mut this = Self {
             render_handle: Cell::new(None),
-            shape_bounds: shape.shape_bounds.into(),
-            edge_bounds: shape.edge_bounds.into(),
+            shape_bounds: (&shape.shape_bounds).into(),
+            edge_bounds: (&shape.edge_bounds).into(),
             dirty: Cell::new(true),
             paths: Vec::new(),
             bitmaps: Vec::new(),
@@ -290,7 +291,7 @@ impl Drawing {
 
         if let Some(handle) = self.render_handle.get() {
             context
-                .renderer
+                .commands
                 .render_shape(handle, context.transform_stack.transform());
         }
     }

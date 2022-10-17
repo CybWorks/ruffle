@@ -10,6 +10,7 @@ use crate::tag_utils::SwfMovie;
 use crate::vminterface::Instantiator;
 use gc_arena::{Collect, GcCell, MutationContext};
 use ruffle_render::backend::ShapeHandle;
+use ruffle_render::commands::CommandHandler;
 use std::cell::{Ref, RefMut};
 use std::sync::Arc;
 
@@ -36,7 +37,7 @@ impl<'gc> Graphic<'gc> {
         let library = context.library.library_for_movie(movie.clone()).unwrap();
         let static_data = GraphicStatic {
             id: swf_shape.id,
-            bounds: swf_shape.shape_bounds.into(),
+            bounds: (&swf_shape.shape_bounds).into(),
             render_handle: Some(
                 context
                     .renderer
@@ -71,9 +72,7 @@ impl<'gc> Graphic<'gc> {
                 id: 0,
                 shape_bounds: Default::default(),
                 edge_bounds: Default::default(),
-                has_fill_winding_rule: false,
-                has_non_scaling_strokes: false,
-                has_scaling_strokes: false,
+                flags: swf::ShapeFlag::empty(),
                 styles: swf::ShapeStyles {
                     fill_styles: Vec::new(),
                     line_styles: Vec::new(),
@@ -162,7 +161,7 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
     }
 
     fn render_self(&self, context: &mut RenderContext) {
-        if !self.world_bounds().intersects(&context.stage.view_bounds()) {
+        if !context.is_offscreen && !self.world_bounds().intersects(&context.stage.view_bounds()) {
             // Off-screen; culled
             return;
         }
@@ -171,7 +170,7 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
             drawing.render(context);
         } else if let Some(render_handle) = self.0.read().static_data.render_handle {
             context
-                .renderer
+                .commands
                 .render_shape(render_handle, context.transform_stack.transform())
         }
     }

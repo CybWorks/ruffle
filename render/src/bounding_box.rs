@@ -1,9 +1,7 @@
 use crate::matrix::Matrix;
-use gc_arena::Collect;
 use swf::Twips;
 
-#[derive(Clone, Collect, Debug, Default, Eq, PartialEq)]
-#[collect(require_static)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BoundingBox {
     pub x_min: Twips,
     pub y_min: Twips,
@@ -156,8 +154,8 @@ impl BoundingBox {
     }
 }
 
-impl From<swf::Rectangle> for BoundingBox {
-    fn from(rect: swf::Rectangle) -> Self {
+impl From<swf::Rectangle<Twips>> for BoundingBox {
+    fn from(rect: swf::Rectangle<Twips>) -> Self {
         Self {
             x_min: rect.x_min,
             y_min: rect.y_min,
@@ -168,8 +166,8 @@ impl From<swf::Rectangle> for BoundingBox {
     }
 }
 
-impl From<&swf::Rectangle> for BoundingBox {
-    fn from(rect: &swf::Rectangle) -> Self {
+impl From<&swf::Rectangle<Twips>> for BoundingBox {
+    fn from(rect: &swf::Rectangle<Twips>) -> Self {
         Self {
             x_min: rect.x_min,
             y_min: rect.y_min,

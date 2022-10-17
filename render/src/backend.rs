@@ -1,13 +1,13 @@
 pub mod null;
 
 use crate::bitmap::{Bitmap, BitmapHandle, BitmapInfo, BitmapSource};
+use crate::commands::CommandList;
 use crate::error::Error;
-use crate::matrix::Matrix;
 use crate::shape_utils::DistilledShape;
-use crate::transform::Transform;
 use crate::utils;
 use downcast_rs::{impl_downcast, Downcast};
 use swf;
+use swf::Color;
 
 pub trait RenderBackend: Downcast {
     fn viewport_dimensions(&self) -> ViewportDimensions;
@@ -35,6 +35,24 @@ pub trait RenderBackend: Downcast {
         let data = utils::glue_tables_to_jpeg(data, jpeg_tables);
         self.register_bitmap_jpeg_2(&data)
     }
+
+    /// Creates a new `RenderBackend` which renders directly
+    /// to the texture specified by `BitmapHandle` with the given
+    /// `width` and `height`. This backend is passed to the callback
+    /// `f`, which performs the desired draw operations.
+    ///
+    /// After the callback `f` exectures, the texture data is copied
+    /// from the GPU texture to an `RgbaImage`. There is no need to call
+    /// `update_texture` with the pixels from this image, as they
+    /// reflect data that is already stored on the GPU texture.
+    fn render_offscreen(
+        &mut self,
+        handle: BitmapHandle,
+        width: u32,
+        height: u32,
+        commands: CommandList,
+        clear_color: Color,
+    ) -> Result<Bitmap, Error>;
 
     fn register_bitmap_jpeg_2(&mut self, data: &[u8]) -> Result<BitmapInfo, Error> {
         let bitmap = utils::decode_define_bits_jpeg(data, None)?;
@@ -79,18 +97,7 @@ pub trait RenderBackend: Downcast {
         })
     }
 
-    fn begin_frame(&mut self, clear: swf::Color);
-    fn render_bitmap(&mut self, bitmap: BitmapHandle, transform: &Transform, smoothing: bool);
-    fn render_shape(&mut self, shape: ShapeHandle, transform: &Transform);
-    fn draw_rect(&mut self, color: swf::Color, matrix: &Matrix);
-    fn end_frame(&mut self);
-    fn push_mask(&mut self);
-    fn activate_mask(&mut self);
-    fn deactivate_mask(&mut self);
-    fn pop_mask(&mut self);
-
-    fn push_blend_mode(&mut self, blend: swf::BlendMode);
-    fn pop_blend_mode(&mut self);
+    fn submit_frame(&mut self, clear: swf::Color, commands: CommandList);
 
     fn get_bitmap_pixels(&mut self, bitmap: BitmapHandle) -> Option<Bitmap>;
     fn register_bitmap(&mut self, bitmap: Bitmap) -> Result<BitmapHandle, Error>;
@@ -103,7 +110,7 @@ pub trait RenderBackend: Downcast {
         width: u32,
         height: u32,
         rgba: Vec<u8>,
-    ) -> Result<BitmapHandle, Error>;
+    ) -> Result<(), Error>;
 }
 impl_downcast!(RenderBackend);
 

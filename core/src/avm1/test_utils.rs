@@ -16,7 +16,7 @@ where
     let mut player = player.lock().unwrap();
     player.mutate_with_update_context(|context| {
         let context = context.reborrow();
-        let globals = context.avm1.globals;
+        let globals = context.avm1.global_object_cell();
         let root = context.stage.root_clip();
         let mut activation =
             Activation::from_nothing(context, ActivationIdentifier::root("[Test]"), globals, root);
@@ -36,7 +36,7 @@ macro_rules! test_method {
             $(
                 for version in &$versions {
                     with_avm(*version, |activation, _root| -> Result<(), Error> {
-                        let name: $crate::avm1::AvmString<'_> = $name.into();
+                        let name: $crate::string::AvmString<'_> = $name.into();
                         let object = $object(activation);
 
                         $(

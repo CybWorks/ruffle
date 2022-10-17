@@ -4,6 +4,7 @@ use crate::font::TextRenderSettings;
 use crate::prelude::*;
 use crate::tag_utils::SwfMovie;
 use gc_arena::{Collect, GcCell, MutationContext};
+use ruffle_render::commands::CommandHandler;
 use ruffle_render::transform::Transform;
 use std::cell::{Ref, RefMut};
 use std::sync::Arc;
@@ -35,7 +36,7 @@ impl<'gc> Text<'gc> {
                     TextStatic {
                         swf,
                         id: tag.id,
-                        bounds: tag.bounds.into(),
+                        bounds: (&tag.bounds).into(),
                         text_transform: tag.matrix.into(),
                         text_blocks: tag.records.clone(),
                     },
@@ -136,7 +137,7 @@ impl<'gc> TDisplayObject<'gc> for Text<'gc> {
                         context.transform_stack.push(&transform);
                         let glyph_shape_handle = glyph.shape_handle(context.renderer);
                         context
-                            .renderer
+                            .commands
                             .render_shape(glyph_shape_handle, context.transform_stack.transform());
                         context.transform_stack.pop();
                         transform.matrix.tx += Twips::new(c.advance);

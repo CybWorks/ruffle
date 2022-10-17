@@ -4,10 +4,12 @@ use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::property::Attribute;
 use crate::avm1::property_map::PropertyMap;
-use crate::avm1::{Object, ObjectPtr, ScriptObject, TDisplayObject, TObject, Value};
+use crate::avm1::{Object, ObjectPtr, ScriptObject, TObject, Value};
 use crate::avm_warn;
 use crate::context::UpdateContext;
-use crate::display_object::{DisplayObject, EditText, MovieClip, TDisplayObjectContainer};
+use crate::display_object::{
+    DisplayObject, EditText, MovieClip, TDisplayObject, TDisplayObjectContainer,
+};
 use crate::string::{AvmString, WStr};
 use crate::types::Percent;
 use gc_arena::{Collect, GcCell, MutationContext};
@@ -38,12 +40,12 @@ impl<'gc> StageObject<'gc> {
     pub fn for_display_object(
         gc_context: MutationContext<'gc, '_>,
         display_object: DisplayObject<'gc>,
-        proto: Option<Object<'gc>>,
+        proto: Object<'gc>,
     ) -> Self {
         Self(GcCell::allocate(
             gc_context,
             StageObjectData {
-                base: ScriptObject::new(gc_context, proto),
+                base: ScriptObject::new(gc_context, Some(proto)),
                 display_object,
                 text_field_bindings: Vec::new(),
             },
@@ -184,7 +186,7 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
     ) -> Option<Value<'gc>> {
         let name = name.into();
         let obj = self.0.read();
-        let props = activation.context.avm1.display_properties;
+        let props = activation.context.avm1.display_properties();
 
         // Property search order for DisplayObjects:
         // 1) Actual properties on the underlying object
@@ -227,7 +229,7 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
         this: Object<'gc>,
     ) -> Result<(), Error<'gc>> {
         let obj = self.0.read();
-        let props = activation.context.avm1.display_properties;
+        let props = activation.context.avm1.display_properties();
 
         // Check if a text field is bound to this property and update the text if so.
         let case_sensitive = activation.is_case_sensitive();
@@ -401,7 +403,7 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
             && activation
                 .context
                 .avm1
-                .display_properties
+                .display_properties()
                 .read()
                 .get_by_name(name)
                 .is_some()
@@ -558,9 +560,10 @@ impl<'gc> DisplayProperty<'gc> {
         this: DisplayObject<'gc>,
         value: Value<'gc>,
     ) -> Result<(), Error<'gc>> {
-        self.set
-            .map(|f| f(activation, this, value))
-            .unwrap_or(Ok(()))
+        if let Some(set) = self.set {
+            (set)(activation, this, value)?;
+        }
+        Ok(())
     }
 }
 
@@ -670,9 +673,7 @@ fn set_y<'gc>(
 }
 
 fn x_scale<'gc>(activation: &mut Activation<'_, 'gc, '_>, this: DisplayObject<'gc>) -> Value<'gc> {
-    this.scale_x(activation.context.gc_context)
-        .into_fraction()
-        .into()
+    this.scale_x(activation.context.gc_context).percent().into()
 }
 
 fn set_x_scale<'gc>(
@@ -681,15 +682,13 @@ fn set_x_scale<'gc>(
     val: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     if let Some(val) = property_coerce_to_number(activation, val)? {
-        this.set_scale_x(activation.context.gc_context, Percent::from_fraction(val));
+        this.set_scale_x(activation.context.gc_context, Percent::from(val));
     }
     Ok(())
 }
 
 fn y_scale<'gc>(activation: &mut Activation<'_, 'gc, '_>, this: DisplayObject<'gc>) -> Value<'gc> {
-    this.scale_y(activation.context.gc_context)
-        .into_fraction()
-        .into()
+    this.scale_y(activation.context.gc_context).percent().into()
 }
 
 fn set_y_scale<'gc>(
@@ -698,7 +697,7 @@ fn set_y_scale<'gc>(
     val: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     if let Some(val) = property_coerce_to_number(activation, val)? {
-        this.set_scale_y(activation.context.gc_context, Percent::from_fraction(val));
+        this.set_scale_y(activation.context.gc_context, Percent::from(val));
     }
     Ok(())
 }
@@ -925,10 +924,7 @@ fn set_sound_buf_time<'gc>(
 ) -> Result<(), Error<'gc>> {
     avm_warn!(activation, "_soundbuftime is currently ignored by Ruffle");
     if let Some(val) = property_coerce_to_i32(activation, val)? {
-        activation
-            .context
-            .audio_manager
-            .set_stream_buffer_time(val as i32);
+        activation.context.audio_manager.set_stream_buffer_time(val);
     }
     Ok(())
 }

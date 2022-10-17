@@ -1,10 +1,11 @@
 //! Function prototype
 
+use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::function::{ExecutionName, ExecutionReason};
 use crate::avm1::property_decl::{define_properties_on, Declaration};
-use crate::avm1::{activation::Activation, AvmString};
 use crate::avm1::{Object, ScriptObject, TObject, Value};
+use crate::string::AvmString;
 use gc_arena::MutationContext;
 
 const PROTO_DECLS: &[Declaration] = declare_properties! {
@@ -42,7 +43,7 @@ pub fn call<'gc>(
     myargs: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let this = match myargs.get(0).unwrap_or(&Value::Undefined) {
-        Value::Undefined | Value::Null => activation.context.avm1.globals,
+        Value::Undefined | Value::Null => activation.context.avm1.global_object_cell(),
         this_val => this_val.coerce_to_object(activation),
     };
     let empty = [];
@@ -73,7 +74,7 @@ pub fn apply<'gc>(
     myargs: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let this = match myargs.get(0).unwrap_or(&Value::Undefined) {
-        Value::Undefined | Value::Null => activation.context.avm1.globals,
+        Value::Undefined | Value::Null => activation.context.avm1.global_object_cell(),
         this_val => this_val.coerce_to_object(activation),
     };
     let args_object = myargs.get(1).cloned().unwrap_or(Value::Undefined);

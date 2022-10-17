@@ -6,7 +6,7 @@ mod storage;
 mod ui;
 
 use generational_arena::{Arena, Index};
-use js_sys::{Array, Function, Object, Promise, Uint8Array};
+use js_sys::{Array, Function, JsString, Object, Promise, Uint8Array};
 use ruffle_core::config::Letterbox;
 use ruffle_core::context::UpdateContext;
 use ruffle_core::events::{KeyCode, MouseButton, MouseWheelDelta};
@@ -15,6 +15,7 @@ use ruffle_core::external::{
 };
 use ruffle_core::tag_utils::SwfMovie;
 use ruffle_core::{Color, Player, PlayerBuilder, PlayerEvent, StaticCallstack, ViewportDimensions};
+use ruffle_video_software::backend::SoftwareVideoBackend;
 use ruffle_web_common::JsResult;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -65,6 +66,7 @@ struct RuffleInstance {
     unload_callback: Option<Closure<dyn FnMut(Event)>>,
     has_focus: bool,
     trace_observer: Arc<RefCell<JsValue>>,
+    renderer_name: &'static str,
 }
 
 #[wasm_bindgen]
@@ -115,8 +117,7 @@ struct JavascriptInterface {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(default = "Default::default")]
-pub struct Config {
+struct Config {
     #[serde(rename = "allowScriptAccess")]
     allow_script_access: bool,
 
@@ -152,26 +153,6 @@ pub struct Config {
     max_execution_duration: Duration,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            allow_script_access: false,
-            show_menu: true,
-            salign: Some("".to_owned()),
-            quality: Some("high".to_owned()),
-            scale: Some("showAll".to_owned()),
-            wmode: Some("opaque".to_owned()),
-            background_color: Default::default(),
-            letterbox: Default::default(),
-            upgrade_to_https: true,
-            base_url: None,
-            warn_on_unsupported_content: true,
-            log_level: log::Level::Error,
-            max_execution_duration: Duration::from_secs(15),
-        }
-    }
-}
-
 /// Metadata about the playing SWF file to be passed back to JavaScript.
 #[derive(Serialize)]
 struct MovieMetadata {
@@ -202,9 +183,11 @@ pub struct Ruffle(Index);
 impl Ruffle {
     #[allow(clippy::new_ret_no_self)]
     #[wasm_bindgen(constructor)]
-    pub fn new(parent: HtmlElement, js_player: JavascriptPlayer, config: &JsValue) -> Promise {
-        let config: Config = config.into_serde().unwrap_or_default();
+    pub fn new(parent: HtmlElement, js_player: JavascriptPlayer, config: JsValue) -> Promise {
         wasm_bindgen_futures::future_to_promise(async move {
+            let config: Config = serde_wasm_bindgen::from_value(config)
+                .map_err(|e| format!("Error parsing config: {}", e))?;
+
             if RUFFLE_GLOBAL_PANIC.is_completed() {
                 // If an actual panic happened, then we can't trust the state it left us in.
                 // Prevent future players from loading so that they can inform the user about the error.
@@ -222,9 +205,9 @@ impl Ruffle {
     /// Stream an arbitrary movie file from (presumably) the Internet.
     ///
     /// This method should only be called once per player.
-    pub fn stream_from(&mut self, movie_url: String, parameters: &JsValue) -> Result<(), JsValue> {
+    pub fn stream_from(&mut self, movie_url: String, parameters: JsValue) -> Result<(), JsValue> {
         let _ = self.with_core_mut(|core| {
-            let parameters_to_load = parse_movie_parameters(parameters);
+            let parameters_to_load = parse_movie_parameters(&parameters);
 
             let ruffle = *self;
             let on_metadata = move |swf_header: &ruffle_core::swf::HeaderExt| {
@@ -239,10 +222,10 @@ impl Ruffle {
     /// Play an arbitrary movie on this instance.
     ///
     /// This method should only be called once per player.
-    pub fn load_data(&mut self, swf_data: Uint8Array, parameters: &JsValue) -> Result<(), JsValue> {
+    pub fn load_data(&mut self, swf_data: Uint8Array, parameters: JsValue) -> Result<(), JsValue> {
         let mut movie = SwfMovie::from_data(&swf_data.to_vec(), None, None)
             .map_err(|e| format!("Error loading movie: {}", e))?;
-        movie.append_parameters(parse_movie_parameters(parameters));
+        movie.append_parameters(parse_movie_parameters(&parameters));
 
         self.on_metadata(movie.header());
 
@@ -277,11 +260,17 @@ impl Ruffle {
         let _ = self.with_core_mut(|core| core.set_volume(value));
     }
 
+    pub fn renderer_name(&self) -> JsString {
+        self.with_instance(|instance| instance.renderer_name)
+            .unwrap_or("Unknown")
+            .into()
+    }
+
     // after the context menu is closed, remember to call `clear_custom_menu_items`!
     pub fn prepare_context_menu(&mut self) -> JsValue {
         self.with_core_mut(|core| {
             let info = core.prepare_context_menu();
-            JsValue::from_serde(&info).unwrap_or(JsValue::UNDEFINED)
+            serde_wasm_bindgen::to_value(&info).unwrap_or(JsValue::UNDEFINED)
         })
         .unwrap_or(JsValue::UNDEFINED)
     }
@@ -473,7 +462,7 @@ impl Ruffle {
         let window = web_sys::window().ok_or("Expected window")?;
         let document = window.document().ok_or("Expected document")?;
 
-        let (mut builder, canvas) =
+        let (mut builder, canvas, renderer_name) =
             create_renderer(PlayerBuilder::new(), &document, &config).await?;
 
         parent
@@ -504,7 +493,7 @@ impl Ruffle {
         let core = builder
             .with_log(log_adapter::WebLogBackend::new(trace_observer.clone()))
             .with_ui(ui::WebUiBackend::new(js_player.clone(), &canvas))
-            .with_software_video()
+            .with_video(SoftwareVideoBackend::new())
             .with_letterbox(config.letterbox)
             .with_max_execution_duration(config.max_execution_duration)
             .with_warn_on_unsupported_content(config.warn_on_unsupported_content)
@@ -553,6 +542,7 @@ impl Ruffle {
             timestamp: None,
             has_focus: false,
             trace_observer,
+            renderer_name,
         };
 
         // Prevent touch-scrolling on canvas.
@@ -1023,7 +1013,7 @@ impl Ruffle {
                 is_action_script_3: swf_header.is_action_script_3(),
             };
 
-            if let Ok(value) = JsValue::from_serde(&metadata) {
+            if let Ok(value) = serde_wasm_bindgen::to_value(&metadata) {
                 instance.js_player.set_metadata(value);
             }
         });
@@ -1225,8 +1215,8 @@ async fn create_renderer(
     builder: PlayerBuilder,
     document: &web_sys::Document,
     config: &Config,
-) -> Result<(PlayerBuilder, HtmlCanvasElement), Box<dyn Error>> {
-    #[cfg(not(any(feature = "canvas", feature = "webgl", feature = "wgpu")))]
+) -> Result<(PlayerBuilder, HtmlCanvasElement, &'static str), Box<dyn Error>> {
+    #[cfg(not(any(feature = "canvas", feature = "webgpu", feature = "wgpu-webgl")))]
     std::compile_error!("You must enable one of the render backend features (e.g., webgl).");
 
     let _is_transparent = config.wmode.as_deref() == Some("transparent");
@@ -1234,7 +1224,7 @@ async fn create_renderer(
     // Try to create a backend, falling through to the next backend on failure.
     // We must recreate the canvas each attempt, as only a single context may be created per canvas
     // with `getContext`.
-    #[cfg(all(feature = "wgpu", target_family = "wasm"))]
+    #[cfg(all(feature = "webgpu", target_family = "wasm"))]
     {
         // Check that we have access to WebGPU (navigator.gpu should exist).
         if web_sys::window()
@@ -1242,19 +1232,39 @@ async fn create_renderer(
             .and_then(|window| js_sys::Reflect::has(&window.navigator(), &JsValue::from_str("gpu")))
             .unwrap_or_default()
         {
-            log::info!("Creating wgpu renderer...");
+            log::info!("Creating wgpu webgpu renderer...");
             let canvas: HtmlCanvasElement = document
                 .create_element("canvas")
                 .into_js_result()?
                 .dyn_into()
                 .map_err(|_| "Expected HtmlCanvasElement")?;
 
-            match ruffle_render_wgpu::WgpuRenderBackend::for_canvas(&canvas).await {
+            match ruffle_render_wgpu::backend::WgpuRenderBackend::for_canvas(&canvas).await {
                 Ok(renderer) => {
-                    return Ok((builder.with_renderer(renderer), canvas));
+                    return Ok((builder.with_renderer(renderer), canvas, "WebGPU"));
                 }
-                Err(error) => log::error!("Error creating wgpu renderer: {}", error),
+                Err(error) => log::error!("Error creating wgpu webgpu renderer: {}", error),
             }
+        }
+    }
+    #[cfg(all(feature = "wgpu-webgl", target_family = "wasm"))]
+    {
+        log::info!("Creating wgpu webgl renderer...");
+        let canvas: HtmlCanvasElement = document
+            .create_element("canvas")
+            .into_js_result()?
+            .dyn_into()
+            .map_err(|_| "Expected HtmlCanvasElement")?;
+
+        match ruffle_render_wgpu::backend::WgpuRenderBackend::for_canvas(&canvas).await {
+            Ok(renderer) => {
+                return Ok((
+                    builder.with_renderer(renderer),
+                    canvas,
+                    "WebGL through wgpu",
+                ));
+            }
+            Err(error) => log::error!("Error creating wgpu webgl renderer: {}", error),
         }
     }
 
@@ -1271,7 +1281,7 @@ async fn create_renderer(
             .map_err(|_| "Expected HtmlCanvasElement")?;
         match ruffle_render_webgl::WebGlRenderBackend::new(&canvas, _is_transparent) {
             Ok(renderer) => {
-                return Ok((builder.with_renderer(renderer), canvas));
+                return Ok((builder.with_renderer(renderer), canvas, "WebGL"));
             }
             Err(error) => log::error!("Error creating WebGL renderer: {}", error),
         }
@@ -1287,7 +1297,7 @@ async fn create_renderer(
             .map_err(|_| "Expected HtmlCanvasElement")?;
         match ruffle_render_canvas::WebCanvasRenderBackend::new(&canvas, _is_transparent) {
             Ok(renderer) => {
-                return Ok((builder.with_renderer(renderer), canvas));
+                return Ok((builder.with_renderer(renderer), canvas, "Canvas"));
             }
             Err(error) => log::error!("Error creating canvas renderer: {}", error),
         }

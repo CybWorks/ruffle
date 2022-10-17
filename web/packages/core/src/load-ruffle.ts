@@ -7,6 +7,7 @@ import {
     simd,
     saturatedFloatToInt,
     signExtensions,
+    referenceTypes,
 } from "wasm-feature-detect";
 import { setPolyfillsOnLoad } from "./js-polyfills";
 import { publicPath } from "./public-path";
@@ -45,6 +46,7 @@ async function fetchRuffle(
             simd(),
             saturatedFloatToInt(),
             signExtensions(),
+            referenceTypes(),
         ])
     ).every(Boolean);
 
@@ -67,9 +69,10 @@ async function fetchRuffle(
         : new URL("../pkg/ruffle_web_bg.wasm", import.meta.url);
     const wasmResponse = await fetch(wasmUrl);
     if (progressCallback) {
-        const contentLength = wasmResponse.headers.get("content-length")!;
+        const contentLength = wasmResponse.headers.get("content-length") || "";
         let bytesLoaded = 0;
-        const bytesTotal = Number(contentLength);
+        // Use parseInt rather than Number so the empty string is coerced to NaN instead of 0
+        const bytesTotal = parseInt(contentLength);
         response = new Response(
             new ReadableStream({
                 async start(controller) {

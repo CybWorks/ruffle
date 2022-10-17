@@ -13,6 +13,7 @@ use crate::avm2::QName;
 use bitflags::bitflags;
 use gc_arena::{Collect, GcCell, MutationContext};
 use std::fmt;
+use std::ops::Deref;
 use swf::avm2::types::{
     Class as AbcClass, Instance as AbcInstance, Method as AbcMethod, MethodBody as AbcMethodBody,
 };
@@ -76,13 +77,13 @@ macro_rules! define_indirect_properties {
                     activation: &mut Activation<'_, 'gc, '_>,
                     this: Option<Object<'gc>>,
                     _args: &[Value<'gc>]
-                ) -> Result<Value<'gc>, Error> {
-                    use crate::avm2::QName;
+                ) -> Result<Value<'gc>, Error<'gc>> {
+                    use crate::avm2::Multiname;
                     use crate::avm2::globals::NS_RUFFLE_INTERNAL;
 
                     if let Some(this) = this {
                         return this.get_property(
-                            &QName::new(Namespace::Private(NS_RUFFLE_INTERNAL.into()), $name).into(),
+                            &Multiname::new(Namespace::Private(NS_RUFFLE_INTERNAL.into()), $name),
                             activation,
                         );
                     }
@@ -96,7 +97,7 @@ macro_rules! define_indirect_properties {
 
                 $self.define_instance_trait(Trait::from_slot(
                     QName::new(Namespace::Private(NS_RUFFLE_INTERNAL.into()), $name),
-                    QName::new(Namespace::Package($type_ns.into()), $type_name).into(),
+                    Multiname::new(Namespace::Package($type_ns.into()), $type_name),
                     None,
                 ));
             })();
@@ -120,7 +121,7 @@ pub(crate) use define_indirect_properties;
 ///  read for traits).
 ///  * `activation` - The current AVM2 activation.
 pub type AllocatorFn =
-    for<'gc> fn(ClassObject<'gc>, &mut Activation<'_, 'gc, '_>) -> Result<Object<'gc>, Error>;
+    for<'gc> fn(ClassObject<'gc>, &mut Activation<'_, 'gc, '_>) -> Result<Object<'gc>, Error<'gc>>;
 
 #[derive(Clone, Collect)]
 #[collect(require_static)]
@@ -302,15 +303,15 @@ impl<'gc> Class<'gc> {
         unit: TranslationUnit<'gc>,
         class_index: u32,
         activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Result<GcCell<'gc, Self>, Error> {
+    ) -> Result<GcCell<'gc, Self>, Error<'gc>> {
         let abc = unit.abc();
-        let abc_class: Result<&AbcClass, Error> = abc
+        let abc_class: Result<&AbcClass, Error<'gc>> = abc
             .classes
             .get(class_index as usize)
             .ok_or_else(|| "LoadError: Class index not valid".into());
         let abc_class = abc_class?;
 
-        let abc_instance: Result<&AbcInstance, Error> = abc
+        let abc_instance: Result<&AbcInstance, Error<'gc>> = abc
             .instances
             .get(class_index as usize)
             .ok_or_else(|| "LoadError: Instance index not valid".into());
@@ -321,11 +322,11 @@ impl<'gc> Class<'gc> {
         let super_class = if abc_instance.super_name.0 == 0 {
             None
         } else {
-            Some(Multiname::from_abc_multiname_static(
-                unit,
-                abc_instance.super_name,
-                activation.context.gc_context,
-            )?)
+            Some(
+                unit.pool_multiname_static(abc_instance.super_name, activation.context.gc_context)?
+                    .deref()
+                    .clone(),
+            )
         };
 
         let protected_namespace = if let Some(ns) = &abc_instance.protected_namespace {
@@ -340,11 +341,11 @@ impl<'gc> Class<'gc> {
 
         let mut interfaces = Vec::with_capacity(abc_instance.interfaces.len());
         for interface_name in &abc_instance.interfaces {
-            interfaces.push(Multiname::from_abc_multiname_static(
-                unit,
-                *interface_name,
-                activation.context.gc_context,
-            )?);
+            interfaces.push(
+                unit.pool_multiname_static(*interface_name, activation.context.gc_context)?
+                    .deref()
+                    .clone(),
+            );
         }
 
         let instance_init = unit.load_method(abc_instance.init_method, false, activation)?;
@@ -363,7 +364,7 @@ impl<'gc> Class<'gc> {
         if unit.domain().is_avm2_global_domain(activation) {
             instance_allocator = activation.avm2().native_instance_allocator_table
                 [class_index as usize]
-                .map(Allocator);
+                .map(|(_name, ptr)| Allocator(ptr));
         }
 
         Ok(GcCell::allocate(
@@ -405,7 +406,7 @@ impl<'gc> Class<'gc> {
         unit: TranslationUnit<'gc>,
         class_index: u32,
         activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error<'gc>> {
         if self.traits_loaded {
             return Ok(());
         }
@@ -413,13 +414,13 @@ impl<'gc> Class<'gc> {
         self.traits_loaded = true;
 
         let abc = unit.abc();
-        let abc_class: Result<&AbcClass, Error> = abc
+        let abc_class: Result<&AbcClass, Error<'gc>> = abc
             .classes
             .get(class_index as usize)
             .ok_or_else(|| "LoadError: Class index not valid".into());
         let abc_class = abc_class?;
 
-        let abc_instance: Result<&AbcInstance, Error> = abc
+        let abc_instance: Result<&AbcInstance, Error<'gc>> = abc
             .instances
             .get(class_index as usize)
             .ok_or_else(|| "LoadError: Instance index not valid".into());
@@ -443,7 +444,7 @@ impl<'gc> Class<'gc> {
     /// This should be called at class creation time once the superclass name
     /// has been resolved. It will return Ok for a valid class, and a
     /// VerifyError for any invalid class.
-    pub fn validate_class(&self, superclass: Option<ClassObject<'gc>>) -> Result<(), Error> {
+    pub fn validate_class(&self, superclass: Option<ClassObject<'gc>>) -> Result<(), Error<'gc>> {
         // System classes do not throw verify errors.
         if self.is_system {
             return Ok(());
@@ -512,7 +513,7 @@ impl<'gc> Class<'gc> {
         translation_unit: TranslationUnit<'gc>,
         method: &AbcMethod,
         body: &AbcMethodBody,
-    ) -> Result<GcCell<'gc, Self>, Error> {
+    ) -> Result<GcCell<'gc, Self>, Error<'gc>> {
         let name =
             translation_unit.pool_string(method.name.as_u30(), activation.context.gc_context)?;
         let mut traits = Vec::with_capacity(body.traits.len());
@@ -589,7 +590,7 @@ impl<'gc> Class<'gc> {
         for &(name, value) in items {
             self.define_class_trait(Trait::from_const(
                 QName::new(Namespace::public(), name),
-                QName::new(Namespace::public(), "String").into(),
+                Multiname::public("String"),
                 Some(value.into()),
             ));
         }
@@ -599,7 +600,7 @@ impl<'gc> Class<'gc> {
         for &(name, value) in items {
             self.define_class_trait(Trait::from_const(
                 QName::new(Namespace::public(), name),
-                QName::new(Namespace::public(), "Number").into(),
+                Multiname::public("Number"),
                 Some(value.into()),
             ));
         }
@@ -609,7 +610,7 @@ impl<'gc> Class<'gc> {
         for &(name, value) in items {
             self.define_class_trait(Trait::from_const(
                 QName::new(Namespace::public(), name),
-                QName::new(Namespace::public(), "uint").into(),
+                Multiname::public("uint"),
                 Some(value.into()),
             ));
         }
@@ -619,7 +620,7 @@ impl<'gc> Class<'gc> {
         for &(name, value) in items {
             self.define_class_trait(Trait::from_const(
                 QName::new(Namespace::public(), name),
-                QName::new(Namespace::public(), "int").into(),
+                Multiname::public("int"),
                 Some(value.into()),
             ));
         }
@@ -748,7 +749,7 @@ impl<'gc> Class<'gc> {
         for &(name, value) in items {
             self.define_instance_trait(Trait::from_slot(
                 QName::new(Namespace::public(), name),
-                QName::new(Namespace::public(), "Number").into(),
+                Multiname::public("Number"),
                 value.map(|v| v.into()),
             ));
         }
@@ -762,7 +763,7 @@ impl<'gc> Class<'gc> {
         for &(name, type_ns, type_name) in items {
             self.define_instance_trait(Trait::from_slot(
                 QName::new(Namespace::public(), name),
-                QName::new(Namespace::Package(type_ns.into()), type_name).into(),
+                Multiname::new(Namespace::Package(type_ns.into()), type_name),
                 None,
             ));
         }
@@ -790,7 +791,7 @@ impl<'gc> Class<'gc> {
         for &(ns, name, type_ns, type_name) in items {
             self.define_instance_trait(Trait::from_slot(
                 QName::new(Namespace::Private(ns.into()), name),
-                QName::new(Namespace::Package(type_ns.into()), type_name).into(),
+                Multiname::new(Namespace::Package(type_ns.into()), type_name),
                 None,
             ));
         }

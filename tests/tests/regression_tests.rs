@@ -13,23 +13,21 @@ use ruffle_core::context::UpdateContext;
 use ruffle_core::events::MouseButton as RuffleMouseButton;
 use ruffle_core::external::Value as ExternalValue;
 use ruffle_core::external::{ExternalInterfaceMethod, ExternalInterfaceProvider};
+use ruffle_core::limits::ExecutionLimit;
 use ruffle_core::tag_utils::SwfMovie;
 use ruffle_core::{Player, PlayerBuilder, PlayerEvent, ViewportDimensions};
 use ruffle_input_format::{AutomatedEvent, InputInjector, MouseButton as InputMouseButton};
 
 #[cfg(feature = "imgtests")]
-use ruffle_render_wgpu::{target::TextureTarget, wgpu, WgpuRenderBackend};
+use ruffle_render_wgpu::backend::WgpuRenderBackend;
+#[cfg(feature = "imgtests")]
+use ruffle_render_wgpu::{target::TextureTarget, wgpu};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-
-#[cfg(feature = "imgtests")]
-fn get_img_platform_suffix(info: &wgpu::AdapterInfo) -> String {
-    format!("{}-{:?}", std::env::consts::OS, info.backend)
-}
 
 const RUN_IMG_TESTS: bool = cfg!(feature = "imgtests");
 
@@ -152,6 +150,7 @@ swf_tests! {
     (as2_super_and_this_v8, "avm1/as2_super_and_this_v8", 1),
     (as2_super_via_manual_prototype, "avm1/as2_super_via_manual_prototype", 1),
     (as3_add, "avm2/add", 1),
+    (as3_application_domain, "avm2/application_domain", 1),
     (as3_array_access, "avm2/array_access", 1),
     (as3_array_concat, "avm2/array_concat", 1),
     (as3_array_constr, "avm2/array_constr", 1),
@@ -187,10 +186,21 @@ swf_tests! {
     (as3_astypelate, "avm2/astypelate", 1),
     (as3_bitand, "avm2/bitand", 1),
     (as3_bitmap_constr, "avm2/bitmap_constr", 1),
+    (as3_bitmap_data, "avm2/bitmap_data", 1),
+    (as3_bitmapdata_copypixels, "avm2/bitmapdata_copypixels", 2, img = true),
     #[ignore] (as3_bitmap_properties, "avm2/bitmap_properties", 1),
+    (as3_bitmap_subclass, "avm2/bitmap_subclass", 1),
+    #[cfg_attr(not(feature = "imgtests"), ignore)] (as3_bitmap_subclass_properties, "avm2/bitmap_subclass_properties", 1, img = true),
     (as3_bitmap_timeline, "avm2/bitmap_timeline", 1),
+    #[cfg_attr(not(feature = "imgtests"), ignore)] (as3_bitmapdata_clone, "avm2/bitmapdata_clone", 1, img = true),
     (as3_bitmapdata_constr, "avm2/bitmapdata_constr", 1),
-    #[ignore] (as3_bitmapdata_embedded, "avm2/bitmapdata_embedded", 1),
+    (as3_bitmapdata_dispose, "avm2/bitmapdata_dispose", 1),
+    // We need a render backend in order to call `BitmapData.draw`
+    #[cfg_attr(not(feature = "imgtests"), ignore)] (as3_bitmapdata_draw, "avm2/bitmapdata_draw", 1, img = true),
+    #[cfg_attr(not(feature = "imgtests"), ignore)] (as3_bitmapdata_opaque, "avm2/bitmapdata_opaque", 1, img = true),
+    (as3_bitmapdata_zero_size, "avm2/bitmapdata_zero_size", 1),
+    #[cfg_attr(not(feature = "imgtests"), ignore)] (as3_bitmapdata_embedded, "avm2/bitmapdata_embedded", 1, img = true),
+    (as3_bitmapdata_fillrect, "avm2/bitmapdata_fillrect", 1),
     (as3_bitnot, "avm2/bitnot", 1),
     (as3_bitor, "avm2/bitor", 1),
     (as3_bitxor, "avm2/bitxor", 1),
@@ -199,12 +209,15 @@ swf_tests! {
     (as3_boolean_tostring, "avm2/boolean_tostring", 1),
     (as3_bytearray_readobject_amf0, "avm2/bytearray_readobject_amf0", 1),
     (as3_bytearray_readobject_amf3, "avm2/bytearray_readobject_amf3", 1),
+    (as3_bytearray_writeobject, "avm2/bytearray_writeobject", 1),
     (as3_bytearray, "avm2/bytearray", 1),
+    (as3_checkfilter, "avm2/checkfilter", 1),
     (as3_class_call, "avm2/class_call", 1),
     (as3_class_cast_call, "avm2/class_cast_call", 1),
     (as3_class_enumeration, "avm2/class_enumeration", 1),
     (as3_class_is, "avm2/class_is", 1),
     (as3_class_methods, "avm2/class_methods", 1),
+    (as3_class_object_properties, "avm2/class_object_properties", 1),
     (as3_class_singleton, "avm2/class_singleton", 1),
     (as3_class_supercalls_mismatched, "avm2/class_supercalls_mismatched", 1),
     (as3_class_to_locale_string, "avm2/class_to_locale_string", 1),
@@ -237,6 +250,7 @@ swf_tests! {
     (as3_displayobject_blendmode, "avm2/displayobject_blendmode", 1, img = true),
     (as3_displayobject_hittestobject, "avm2/displayobject_hittestobject", 1),
     (as3_displayobject_hittestpoint, "avm2/displayobject_hittestpoint", 2),
+    (as3_displayobject_mask, "avm2/displayobject_mask", 1, img = true),
     (as3_displayobject_name, "avm2/displayobject_name", 4),
     (as3_displayobject_parent, "avm2/displayobject_parent", 4),
     (as3_displayobject_root, "avm2/displayobject_root", 4),
@@ -266,6 +280,8 @@ swf_tests! {
     (as3_displayobjectcontainer_timelineinstance, "avm2/displayobjectcontainer_timelineinstance", 6),
     (as3_documentclass, "avm2/documentclass", 1),
     (as3_domain_memory, "avm2/domain_memory", 1),
+    (as3_drag_drop, "avm2/drag_drop", 14),
+    (as3_edittext_antialiastype, "avm2/edittext_antialiastype", 1),
     (as3_edittext_default_format, "avm2/edittext_default_format", 1),
     (as3_edittext_html_entity, "avm2/edittext_html_entity", 1),
     (as3_edittext_html_roundtrip, "avm2/edittext_html_roundtrip", 1),
@@ -273,6 +289,9 @@ swf_tests! {
     (as3_edittext_newline_stripping, "avm2/edittext_newline_stripping", 1),
     (as3_edittext_width_height, "avm2/edittext_width_height", 1),
     (as3_equals, "avm2/equals", 1),
+    (as3_error_stack_trace, "avm2/error_stack_trace", 1),
+    (as3_error_tostring, "avm2/error_tostring", 1),
+    (as3_error_tostring_more, "avm2/error_tostring_more", 1),
     (as3_es3_inheritance, "avm2/es3_inheritance", 1),
     (as3_es4_inheritance, "avm2/es4_inheritance", 1),
     (as3_es4_interfaces, "avm2/es4_interfaces", 1),
@@ -307,6 +326,8 @@ swf_tests! {
     (as3_function_call_via_call, "avm2/function_call_via_call", 1),
     (as3_function_call, "avm2/function_call", 1),
     #[ignore] (as3_function_proto, "avm2/function_proto", 1),
+    (as3_function_length, "avm2/function_length", 1),
+    (as3_function_object, "avm2/function_object", 1),
     (as3_function_to_locale_string, "avm2/function_to_locale_string", 1),
     (as3_function_to_string, "avm2/function_to_string", 1),
     (as3_function_type, "avm2/function_type", 1),
@@ -337,6 +358,7 @@ swf_tests! {
     (as3_increment, "avm2/increment", 1),
     (as3_instanceof, "avm2/instanceof", 1),
     (as3_int_constr, "avm2/int_constr", 1),
+    (as3_int_edge_cases, "avm2/int_edge_cases", 1),
     #[ignore] (as3_int_toexponential, "avm2/int_toexponential", 1), //Ignored because Flash Player has a print routine that adds extraneous zeros to things
     (as3_int_tofixed, "avm2/int_tofixed", 1),
     #[ignore] (as3_int_toprecision, "avm2/int_toprecision", 1), //Ignored because Flash Player has a print routine that adds extraneous zeros to things
@@ -357,6 +379,7 @@ swf_tests! {
     (as3_lessequals, "avm2/lessequals", 1),
     (as3_lessthan, "avm2/lessthan", 1),
     (as3_loader_events, "avm2/loader_events", 3, img = true),
+    (as3_loader_loadbytes_events, "avm2/loader_loadbytes_events", 3, img = true),
     (as3_loaderinfo_events, "avm2/loaderinfo_events", 2),
     (as3_loaderinfo_properties, "avm2/loaderinfo_properties", 2),
     (as3_loaderinfo_root, "avm2/loaderinfo_root", 1),
@@ -491,9 +514,13 @@ swf_tests! {
     (as3_string_constr, "avm2/string_constr", 1),
     (as3_string_indexof_lastindexof, "avm2/string_indexof_lastindexof", 1),
     (as3_string_length, "avm2/string_length", 1),
+    (as3_string_locale_compare, "avm2/string_locale_compare", 1),
     (as3_string_match, "avm2/string_match", 1),
     (as3_string_replace, "avm2/string_replace", 1),
+    (as3_string_search, "avm2/string_search", 1),
+    (as3_swz, "avm2/swz", 10),
     (as3_try_catch, "avm2/try_catch", 1),
+    (as3_try_catch_typed, "avm2/try_catch_typed", 1),
     (as3_string_slice_substr_substring, "avm2/string_slice_substr_substring", 1),
     (as3_string_split, "avm2/string_split", 1),
     (as3_subtract, "avm2/subtract", 1),
@@ -511,6 +538,7 @@ swf_tests! {
     (as3_uint_tostring, "avm2/uint_tostring", 1),
     (as3_unchecked_function, "avm2/unchecked_function", 1),
     (as3_url_loader, "avm2/url_loader", 1),
+    (as3_url_vars, "avm2/url_vars", 1),
     (as3_urshift, "avm2/urshift", 1),
     (as3_vector_coercion, "avm2/vector_coercion", 1),
     (as3_vector_concat, "avm2/vector_concat", 1),
@@ -538,12 +566,14 @@ swf_tests! {
     (as3_virtual_properties, "avm2/virtual_properties", 1),
     (as3_with, "avm2/with", 1),
     (as3_escape, "avm2/escape", 1),
+    (as3_escape_multi_byte, "avm2/escape_multi_byte", 1),
     (attach_movie, "avm1/attach_movie", 1),
     (bad_placeobject_clipaction, "avm1/bad_placeobject_clipaction", 2),
     (bad_swf_tag_past_eof, "avm1/bad_swf_tag_past_eof", 1),
     (bevel_filter, "avm1/bevel_filter", 1),
     (bitmap_data, "avm1/bitmap_data", 1),
     (bitmap_data_compare, "avm1/bitmap_data_compare", 1),
+    (bitmap_data_copypixels, "avm1/bitmap_data_copypixels", 2, img = true),
     (bitmap_data_max_size_swf10, "avm1/bitmap_data_max_size_swf10", 1),
     (bitmap_data_max_size_swf9, "avm1/bitmap_data_max_size_swf9", 1),
     (bitmap_data_noise, "avm1/bitmap_data_noise", 1),
@@ -568,25 +598,7 @@ swf_tests! {
     (create_empty_movie_clip, "avm1/create_empty_movie_clip", 2),
     (cross_movie_root, "avm1/cross_movie_root", 5),
     (custom_clip_methods, "avm1/custom_clip_methods", 3),
-    (date_constructor, "avm1/date/constructor", 1),
-    (date_is_special, "avm1/date_is_special", 1),
-    (date_set_date, "avm1/date/setDate", 1),
-    (date_set_full_year, "avm1/date/setFullYear", 1),
-    (date_set_hours, "avm1/date/setHours", 1),
-    (date_set_milliseconds, "avm1/date/setMilliseconds", 1),
-    (date_set_minutes, "avm1/date/setMinutes", 1),
-    (date_set_month, "avm1/date/setMonth", 1),
-    (date_set_seconds, "avm1/date/setSeconds", 1),
-    (date_set_time, "avm1/date/setTime", 1),
-    (date_set_utc_date, "avm1/date/setUTCDate", 1),
-    (date_set_utc_full_year, "avm1/date/setUTCFullYear", 1),
-    (date_set_utc_hours, "avm1/date/setUTCHours", 1),
-    (date_set_utc_milliseconds, "avm1/date/setUTCMilliseconds", 1),
-    (date_set_utc_minutes, "avm1/date/setUTCMinutes", 1),
-    (date_set_utc_month, "avm1/date/setUTCMonth", 1),
-    (date_set_utc_seconds, "avm1/date/setUTCSeconds", 1),
-    (date_set_year, "avm1/date/setYear", 1),
-    (date_utc, "avm1/date/UTC", 1),
+    (date, "avm1/date", 1),
     (default_names, "avm1/default_names", 6),
     (define_function_case_sensitive, "avm1/define_function_case_sensitive", 2),
     (define_function2_preload_order, "avm1/define_function2_preload_order", 1),
@@ -601,6 +613,7 @@ swf_tests! {
     (drop_shadow_filter, "avm1/drop_shadow_filter", 1),
     (duplicate_movie_clip_drawing, "avm1/duplicate_movie_clip_drawing", 1),
     (duplicate_movie_clip, "avm1/duplicate_movie_clip", 1),
+    (edittext_antialiastype, "avm1/edittext_antialiastype", 1),
     (edittext_default_format, "avm1/edittext_default_format", 1),
     (edittext_font_size, "avm1/edittext_font_size", 1),
     (edittext_html_entity, "avm1/edittext_html_entity", 1),
@@ -720,7 +733,7 @@ swf_tests! {
     (mouse_events, "avm1/mouse_events", 8),
     (movieclip_depth_methods, "avm1/movieclip_depth_methods", 3),
     (movieclip_get_instance_at_depth, "avm1/movieclip_get_instance_at_depth", 1),
-    (movieclip_hittest_shapeflag, "avm1/movieclip_hittest_shapeflag", 10),
+    (movieclip_hittest_shapeflag, "avm1/movieclip_hittest_shapeflag", 11),
     (movieclip_hittest, "avm1/movieclip_hittest", 1),
     (movieclip_init_object, "avm1/movieclip_init_object", 1),
     (movieclip_lockroot, "avm1/movieclip_lockroot", 10),
@@ -814,6 +827,7 @@ swf_tests! {
     (unloadmovienum, "avm1/unloadmovienum", 11),
     (use_hand_cursor, "avm1/use_hand_cursor", 1),
     (variable_args, "avm1/variable_args", 1),
+    (waitforframe, "avm1/waitforframe", 1),
     (watch_textfield, "avm1/watch_textfield", 1),
     (watch_virtual_property_proto, "avm1/watch_virtual_property_proto", 1),
     #[ignore] (watch_virtual_property, "avm1/watch_virtual_property", 1),
@@ -1005,7 +1019,7 @@ fn shared_object_avm1() -> Result<(), Error> {
     // Test SharedObject persistence. Run an SWF that saves data
     // to a shared object twice and verify that the data is saved.
     let mut memory_storage_backend: Box<dyn StorageBackend> =
-        Box::new(MemoryStorageBackend::default());
+        Box::<MemoryStorageBackend>::default();
 
     // Initial run; no shared object data.
     test_swf_with_hooks(
@@ -1039,6 +1053,60 @@ fn shared_object_avm1() -> Result<(), Error> {
         1,
         "tests/swfs/avm1/shared_object/input2.json",
         "tests/swfs/avm1/shared_object/output2.txt",
+        |player| {
+            // Swap in the previous storage backend.
+            let mut player = player.lock().unwrap();
+            std::mem::swap(player.storage_mut(), &mut memory_storage_backend);
+            Ok(())
+        },
+        |_player| Ok(()),
+        false,
+        false,
+    )?;
+
+    Ok(())
+}
+
+#[test]
+fn shared_object_avm2() -> Result<(), Error> {
+    set_logger();
+    // Test SharedObject persistence. Run an SWF that saves data
+    // to a shared object twice and verify that the data is saved.
+    let mut memory_storage_backend: Box<dyn StorageBackend> =
+        Box::<MemoryStorageBackend>::default();
+
+    // Initial run; no shared object data.
+    test_swf_with_hooks(
+        "tests/swfs/avm2/shared_object/test.swf",
+        1,
+        "tests/swfs/avm2/shared_object/input1.json",
+        "tests/swfs/avm2/shared_object/output1.txt",
+        |_player| Ok(()),
+        |player| {
+            // Save the storage backend for next run.
+            let mut player = player.lock().unwrap();
+            std::mem::swap(player.storage_mut(), &mut memory_storage_backend);
+            Ok(())
+        },
+        false,
+        false,
+    )?;
+
+    // Verify that the flash cookie matches the expected one
+    let expected = std::fs::read("tests/swfs/avm2/shared_object/RuffleTest.sol")?;
+    assert_eq!(
+        expected,
+        memory_storage_backend
+            .get("localhost//RuffleTest")
+            .unwrap_or_default()
+    );
+
+    // Re-run the SWF, verifying that the shared object persists.
+    test_swf_with_hooks(
+        "tests/swfs/avm2/shared_object/test.swf",
+        1,
+        "tests/swfs/avm2/shared_object/input2.json",
+        "tests/swfs/avm2/shared_object/output2.txt",
         |player| {
             // Swap in the previous storage backend.
             let mut player = player.lock().unwrap();
@@ -1258,6 +1326,7 @@ fn test_swf_approx(
                         expected_captures.len(),
                         "Differing numbers of regex captures"
                     );
+
                     // Each capture group (other than group 0, which is always the entire regex
                     // match) represents a floating-point value
                     for (actual_val, expected_val) in actual_captures
@@ -1339,8 +1408,7 @@ fn run_swf(
 
         builder = builder
             .with_renderer(WgpuRenderBackend::new(Arc::new(descriptors), target)?)
-            .with_viewport_dimensions(width, height, 1.0)
-            .with_software_video();
+            .with_viewport_dimensions(width, height, 1.0);
     };
 
     let player = builder
@@ -1374,6 +1442,13 @@ fn run_swf(
         if frame_time_sleep {
             std::thread::sleep(frame_time_duration);
         }
+
+        while !player
+            .lock()
+            .unwrap()
+            .preload(&mut ExecutionLimit::exhausted())
+        {}
+
         player.lock().unwrap().run_frame();
         player.lock().unwrap().update_timers(frame_time);
         executor.run();
@@ -1416,9 +1491,14 @@ fn run_swf(
             .renderer_mut()
             .downcast_mut::<WgpuRenderBackend<TextureTarget>>()
             .unwrap();
-        let actual_image = renderer.capture_frame().expect("Failed to capture image");
 
-        let suffix = get_img_platform_suffix(&renderer.descriptors().info);
+        // Use straight alpha, since we want to save this as a PNG
+        let actual_image = renderer
+            .capture_frame(false)
+            .expect("Failed to capture image");
+
+        let info = renderer.descriptors().adapter.get_info();
+        let suffix = format!("{}-{:?}", std::env::consts::OS, info.backend);
 
         let expected_image_path = base_path.join(format!("expected-{}.png", &suffix));
         let expected_image = image::open(&expected_image_path);

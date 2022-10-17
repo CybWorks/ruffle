@@ -5,6 +5,7 @@ use crate::prelude::*;
 use crate::tag_utils::SwfMovie;
 use gc_arena::{Collect, Gc, GcCell, MutationContext};
 use ruffle_render::backend::{RenderBackend, ShapeHandle};
+use ruffle_render::commands::CommandHandler;
 use std::cell::{Ref, RefCell, RefMut};
 use std::sync::Arc;
 use swf::{Fixed16, Fixed8, Twips};
@@ -94,7 +95,7 @@ impl<'gc> TDisplayObject<'gc> for MorphShape<'gc> {
         let static_data = this.static_data;
         let shape_handle = static_data.get_shape(context.renderer, context.library, ratio);
         context
-            .renderer
+            .commands
             .render_shape(shape_handle, context.transform_stack.transform());
     }
 
@@ -297,15 +298,13 @@ impl MorphShapeStatic {
             line_styles,
         };
 
-        let bounds = ruffle_render::shape_utils::calculate_shape_bounds(&shape[..]);
+        let bounds = ruffle_render::shape_utils::calculate_shape_bounds(&shape);
         let shape = swf::Shape {
             version: 4,
             id: 0,
-            shape_bounds: bounds,
-            edge_bounds: bounds,
-            has_fill_winding_rule: false,
-            has_non_scaling_strokes: false,
-            has_scaling_strokes: true,
+            shape_bounds: bounds.clone(),
+            edge_bounds: bounds.clone(),
+            flags: swf::ShapeFlag::HAS_SCALING_STROKES,
             styles,
             shape,
         };
