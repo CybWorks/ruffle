@@ -1,3 +1,5 @@
+#![deny(clippy::unwrap_used)]
+
 //! Ruffle web frontend.
 mod audio;
 mod log_adapter;
@@ -6,7 +8,7 @@ mod storage;
 mod ui;
 
 use generational_arena::{Arena, Index};
-use js_sys::{Array, Function, JsString, Object, Promise, Uint8Array};
+use js_sys::{Array, Function, Object, Promise, Uint8Array};
 use ruffle_core::config::Letterbox;
 use ruffle_core::context::UpdateContext;
 use ruffle_core::events::{KeyCode, MouseButton, MouseWheelDelta};
@@ -15,14 +17,20 @@ use ruffle_core::external::{
 };
 use ruffle_core::tag_utils::SwfMovie;
 use ruffle_core::{Color, Player, PlayerBuilder, PlayerEvent, StaticCallstack, ViewportDimensions};
+use ruffle_render::quality::StageQuality;
 use ruffle_video_software::backend::SoftwareVideoBackend;
 use ruffle_web_common::JsResult;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::str::FromStr;
 use std::sync::Once;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::{cell::RefCell, error::Error, num::NonZeroI32};
+use tracing_subscriber::layer::{Layered, SubscriberExt};
+use tracing_subscriber::registry::Registry;
+use tracing_wasm::{WASMLayer, WASMLayerConfigBuilder};
+use url::Url;
 use wasm_bindgen::{prelude::*, JsCast, JsValue};
 use web_sys::{
     AddEventListenerOptions, Element, Event, EventTarget, HtmlCanvasElement, HtmlElement,
@@ -37,7 +45,7 @@ thread_local! {
     /// issues with lifetimes and type parameters (which cannot be exported with wasm-bindgen).
     static INSTANCES: RefCell<Arena<RefCell<RuffleInstance>>> = RefCell::new(Arena::new());
 
-    static CURRENT_CONTEXT: RefCell<Option<*mut UpdateContext<'static, 'static, 'static>>> = RefCell::new(None);
+    static CURRENT_CONTEXT: RefCell<Option<*mut UpdateContext<'static, 'static>>> = RefCell::new(None);
 }
 
 type AnimationHandler = Closure<dyn FnMut(f64)>;
@@ -66,7 +74,7 @@ struct RuffleInstance {
     unload_callback: Option<Closure<dyn FnMut(Event)>>,
     has_focus: bool,
     trace_observer: Arc<RefCell<JsValue>>,
-    renderer_name: &'static str,
+    log_subscriber: Arc<Layered<WASMLayer, Registry>>,
 }
 
 #[wasm_bindgen]
@@ -116,7 +124,16 @@ struct JavascriptInterface {
     js_player: JavascriptPlayer,
 }
 
-#[derive(Serialize, Deserialize)]
+fn deserialize_log_level<'de, D>(deserializer: D) -> Result<tracing::Level, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let value: String = serde::Deserialize::deserialize(deserializer)?;
+    tracing::Level::from_str(&value).map_err(D::Error::custom)
+}
+
+#[derive(Deserialize)]
 struct Config {
     #[serde(rename = "allowScriptAccess")]
     allow_script_access: bool,
@@ -146,11 +163,14 @@ struct Config {
     #[serde(rename = "warnOnUnsupportedContent")]
     warn_on_unsupported_content: bool,
 
-    #[serde(rename = "logLevel")]
-    log_level: log::Level,
+    #[serde(rename = "logLevel", deserialize_with = "deserialize_log_level")]
+    log_level: tracing::Level,
 
     #[serde(rename = "maxExecutionDuration")]
     max_execution_duration: Duration,
+
+    #[serde(rename = "playerVersion")]
+    player_version: Option<u8>,
 }
 
 /// Metadata about the playing SWF file to be passed back to JavaScript.
@@ -186,7 +206,7 @@ impl Ruffle {
     pub fn new(parent: HtmlElement, js_player: JavascriptPlayer, config: JsValue) -> Promise {
         wasm_bindgen_futures::future_to_promise(async move {
             let config: Config = serde_wasm_bindgen::from_value(config)
-                .map_err(|e| format!("Error parsing config: {}", e))?;
+                .map_err(|e| format!("Error parsing config: {e}"))?;
 
             if RUFFLE_GLOBAL_PANIC.is_completed() {
                 // If an actual panic happened, then we can't trust the state it left us in.
@@ -222,9 +242,24 @@ impl Ruffle {
     /// Play an arbitrary movie on this instance.
     ///
     /// This method should only be called once per player.
-    pub fn load_data(&mut self, swf_data: Uint8Array, parameters: JsValue) -> Result<(), JsValue> {
-        let mut movie = SwfMovie::from_data(&swf_data.to_vec(), None, None)
-            .map_err(|e| format!("Error loading movie: {}", e))?;
+    pub fn load_data(
+        &mut self,
+        swf_data: Uint8Array,
+        parameters: JsValue,
+        swf_name: String,
+    ) -> Result<(), JsValue> {
+        let window = web_sys::window().ok_or("Expected window")?;
+        let mut url = Url::from_str(&window.location().href()?)
+            .map_err(|e| format!("Error creating url: {e}"))?;
+        url.set_query(None);
+        url.set_fragment(None);
+        if let Ok(mut segments) = url.path_segments_mut() {
+            segments.pop();
+            segments.push(&swf_name);
+        }
+
+        let mut movie = SwfMovie::from_data(&swf_data.to_vec(), Some(url.to_string()), None)
+            .map_err(|e| format!("Error loading movie: {e}"))?;
         movie.append_parameters(parse_movie_parameters(&parameters));
 
         self.on_metadata(movie.header());
@@ -260,10 +295,9 @@ impl Ruffle {
         let _ = self.with_core_mut(|core| core.set_volume(value));
     }
 
-    pub fn renderer_name(&self) -> JsString {
-        self.with_instance(|instance| instance.renderer_name)
-            .unwrap_or("Unknown")
-            .into()
+    pub fn renderer_debug_info(&self) -> JsValue {
+        self.with_core(|core| JsValue::from_str(&core.renderer().debug_info()))
+            .unwrap_or(JsValue::NULL)
     }
 
     // after the context menu is closed, remember to call `clear_custom_menu_items`!
@@ -456,13 +490,20 @@ impl Ruffle {
         js_player: JavascriptPlayer,
         config: Config,
     ) -> Result<Ruffle, Box<dyn Error>> {
-        let _ = console_log::init_with_level(config.log_level);
+        let log_subscriber = Arc::new(
+            Registry::default().with(WASMLayer::new(
+                WASMLayerConfigBuilder::new()
+                    .set_max_level(config.log_level)
+                    .build(),
+            )),
+        );
+        let _subscriber = tracing::subscriber::set_default(log_subscriber.clone());
         let allow_script_access = config.allow_script_access;
 
         let window = web_sys::window().ok_or("Expected window")?;
         let document = window.document().ok_or("Expected document")?;
 
-        let (mut builder, canvas, renderer_name) =
+        let (mut builder, canvas) =
             create_renderer(PlayerBuilder::new(), &document, &config).await?;
 
         parent
@@ -472,7 +513,7 @@ impl Ruffle {
         if let Ok(audio) = audio::WebAudioBackend::new() {
             builder = builder.with_audio(audio);
         } else {
-            log::error!("Unable to create audio backend. No audio will be played.");
+            tracing::error!("Unable to create audio backend. No audio will be played.");
         }
         builder = builder.with_navigator(navigator::WebNavigatorBackend::new(
             allow_script_access,
@@ -485,8 +526,15 @@ impl Ruffle {
                 builder = builder.with_storage(storage::LocalStorageBackend::new(s));
             }
             err => {
-                log::warn!("Unable to use localStorage: {:?}\nData will not save.", err);
+                tracing::warn!("Unable to use localStorage: {:?}\nData will not save.", err);
             }
+        };
+
+        let default_quality = if ruffle_web_common::is_mobile_or_tablet() {
+            tracing::info!("Running on a mobile device; defaulting to low quality");
+            StageQuality::Low
+        } else {
+            StageQuality::High
         };
 
         let trace_observer = Arc::new(RefCell::new(JsValue::UNDEFINED));
@@ -497,6 +545,13 @@ impl Ruffle {
             .with_letterbox(config.letterbox)
             .with_max_execution_duration(config.max_execution_duration)
             .with_warn_on_unsupported_content(config.warn_on_unsupported_content)
+            .with_player_version(config.player_version)
+            .with_quality(
+                config
+                    .quality
+                    .and_then(|q| StageQuality::from_str(&q).ok())
+                    .unwrap_or(default_quality),
+            )
             .build();
 
         let mut callstack = None;
@@ -507,7 +562,6 @@ impl Ruffle {
             }
             core.set_show_menu(config.show_menu);
             core.set_stage_align(config.salign.as_deref().unwrap_or(""));
-            core.set_quality(config.quality.as_deref().unwrap_or("high"));
             core.set_scale_mode(config.scale.as_deref().unwrap_or("showAll"));
             core.set_window_mode(config.wmode.as_deref().unwrap_or("window"));
 
@@ -542,7 +596,7 @@ impl Ruffle {
             timestamp: None,
             has_focus: false,
             trace_observer,
-            renderer_name,
+            log_subscriber,
         };
 
         // Prevent touch-scrolling on canvas.
@@ -663,7 +717,7 @@ impl Ruffle {
 
             // Create mouse up handler.
             let mouse_up_callback = Closure::wrap(Box::new(move |js_event: PointerEvent| {
-                let _ = ruffle.with_instance_mut(|instance| {
+                let _ = ruffle.with_instance(|instance| {
                     if let Some(target) = js_event.current_target() {
                         let _ = target
                             .unchecked_ref::<Element>()
@@ -825,6 +879,8 @@ impl Ruffle {
                 let instances = instances.try_borrow()?;
                 if let Some(instance) = instances.get(self.0) {
                     let instance = instance.try_borrow()?;
+                    let _subscriber =
+                        tracing::subscriber::set_default(instance.log_subscriber.clone());
                     Ok(f(&instance))
                 } else {
                     Err(RuffleInstanceError::InstanceNotFound)
@@ -833,7 +889,7 @@ impl Ruffle {
             .map_err(RuffleInstanceError::from)
             .and_then(std::convert::identity);
         if let Err(e) = &ret {
-            log::error!("{}", e);
+            tracing::error!("{}", e);
         }
         ret
     }
@@ -848,6 +904,8 @@ impl Ruffle {
                 let instances = instances.try_borrow()?;
                 if let Some(instance) = instances.get(self.0) {
                     let mut instance = instance.try_borrow_mut()?;
+                    let _subscriber =
+                        tracing::subscriber::set_default(instance.log_subscriber.clone());
                     Ok(f(&mut instance))
                 } else {
                     Err(RuffleInstanceError::InstanceNotFound)
@@ -856,7 +914,7 @@ impl Ruffle {
             .map_err(RuffleInstanceError::from)
             .and_then(std::convert::identity);
         if let Err(e) = &ret {
-            log::error!("{}", e);
+            tracing::error!("{}", e);
         }
         ret
     }
@@ -871,6 +929,8 @@ impl Ruffle {
                 let instances = instances.try_borrow()?;
                 if let Some(instance) = instances.get(self.0) {
                     let instance = instance.try_borrow()?;
+                    let _subscriber =
+                        tracing::subscriber::set_default(instance.log_subscriber.clone());
                     // This clone lets us drop the instance borrow to avoid potential double-borrows.
                     let core = instance.core.clone();
                     drop(instance);
@@ -885,7 +945,7 @@ impl Ruffle {
             .map_err(RuffleInstanceError::from)
             .and_then(std::convert::identity);
         if let Err(e) = &ret {
-            log::error!("{}", e);
+            tracing::error!("{}", e);
         }
         ret
     }
@@ -900,6 +960,8 @@ impl Ruffle {
                 let instances = instances.try_borrow()?;
                 if let Some(instance) = instances.get(self.0) {
                     let instance = instance.try_borrow()?;
+                    let _subscriber =
+                        tracing::subscriber::set_default(instance.log_subscriber.clone());
                     // This clone lets us drop the instance to avoid potential double-borrows.
                     let core = instance.core.clone();
                     drop(instance);
@@ -914,7 +976,7 @@ impl Ruffle {
             .map_err(RuffleInstanceError::from)
             .and_then(std::convert::identity);
         if let Err(e) = &ret {
-            log::error!("{}", e);
+            tracing::error!("{}", e);
         }
         ret
     }
@@ -996,15 +1058,13 @@ impl Ruffle {
 
     fn on_metadata(&self, swf_header: &ruffle_core::swf::HeaderExt) {
         let _ = self.with_instance(|instance| {
-            let width = swf_header.stage_size().x_max - swf_header.stage_size().x_min;
-            let height = swf_header.stage_size().y_max - swf_header.stage_size().y_min;
             // Convert the background color to an HTML hex color ("#FFFFFF").
             let background_color = swf_header
                 .background_color()
                 .map(|color| format!("#{:06X}", color.to_rgb()));
             let metadata = MovieMetadata {
-                width: width.to_pixels(),
-                height: height.to_pixels(),
+                width: swf_header.stage_size().width().to_pixels(),
+                height: swf_header.stage_size().height().to_pixels(),
                 frame_rate: swf_header.frame_rate().to_f32(),
                 num_frames: swf_header.num_frames(),
                 uncompressed_len: swf_header.uncompressed_len(),
@@ -1032,7 +1092,7 @@ impl RuffleInstance {
             .map(|core| f(&core))
             .map_err(|_| RuffleInstanceError::TryLockError);
         if let Err(e) = &ret {
-            log::error!("{}", e);
+            tracing::error!("{}", e);
         }
         ret
     }
@@ -1047,7 +1107,7 @@ impl RuffleInstance {
             .map(|mut core| f(&mut core))
             .map_err(|_| RuffleInstanceError::TryLockError);
         if let Err(e) = &ret {
-            log::error!("{}", e);
+            tracing::error!("{}", e);
         }
         ret
     }
@@ -1073,17 +1133,12 @@ struct JavascriptMethod {
 }
 
 impl ExternalInterfaceMethod for JavascriptMethod {
-    fn call(
-        &self,
-        context: &mut UpdateContext<'_, '_, '_>,
-        args: &[ExternalValue],
-    ) -> ExternalValue {
+    fn call(&self, context: &mut UpdateContext<'_, '_>, args: &[ExternalValue]) -> ExternalValue {
         let old_context = CURRENT_CONTEXT.with(|v| {
             v.replace(Some(unsafe {
-                std::mem::transmute::<
-                    &mut UpdateContext,
-                    &mut UpdateContext<'static, 'static, 'static>,
-                >(context)
+                std::mem::transmute::<&mut UpdateContext, &mut UpdateContext<'static, 'static>>(
+                    context,
+                )
             } as *mut UpdateContext))
         });
         let result = if let Some(function) = self.function.dyn_ref::<Function>() {
@@ -1215,7 +1270,7 @@ async fn create_renderer(
     builder: PlayerBuilder,
     document: &web_sys::Document,
     config: &Config,
-) -> Result<(PlayerBuilder, HtmlCanvasElement, &'static str), Box<dyn Error>> {
+) -> Result<(PlayerBuilder, HtmlCanvasElement), Box<dyn Error>> {
     #[cfg(not(any(feature = "canvas", feature = "webgpu", feature = "wgpu-webgl")))]
     std::compile_error!("You must enable one of the render backend features (e.g., webgl).");
 
@@ -1232,7 +1287,7 @@ async fn create_renderer(
             .and_then(|window| js_sys::Reflect::has(&window.navigator(), &JsValue::from_str("gpu")))
             .unwrap_or_default()
         {
-            log::info!("Creating wgpu webgpu renderer...");
+            tracing::info!("Creating wgpu webgpu renderer...");
             let canvas: HtmlCanvasElement = document
                 .create_element("canvas")
                 .into_js_result()?
@@ -1241,15 +1296,15 @@ async fn create_renderer(
 
             match ruffle_render_wgpu::backend::WgpuRenderBackend::for_canvas(&canvas).await {
                 Ok(renderer) => {
-                    return Ok((builder.with_renderer(renderer), canvas, "WebGPU"));
+                    return Ok((builder.with_renderer(renderer), canvas));
                 }
-                Err(error) => log::error!("Error creating wgpu webgpu renderer: {}", error),
+                Err(error) => tracing::error!("Error creating wgpu webgpu renderer: {}", error),
             }
         }
     }
     #[cfg(all(feature = "wgpu-webgl", target_family = "wasm"))]
     {
-        log::info!("Creating wgpu webgl renderer...");
+        tracing::info!("Creating wgpu webgl renderer...");
         let canvas: HtmlCanvasElement = document
             .create_element("canvas")
             .into_js_result()?
@@ -1258,13 +1313,9 @@ async fn create_renderer(
 
         match ruffle_render_wgpu::backend::WgpuRenderBackend::for_canvas(&canvas).await {
             Ok(renderer) => {
-                return Ok((
-                    builder.with_renderer(renderer),
-                    canvas,
-                    "WebGL through wgpu",
-                ));
+                return Ok((builder.with_renderer(renderer), canvas));
             }
-            Err(error) => log::error!("Error creating wgpu webgl renderer: {}", error),
+            Err(error) => tracing::error!("Error creating wgpu webgl renderer: {}", error),
         }
     }
 
@@ -1273,7 +1324,7 @@ async fn create_renderer(
     // with `getContext`.
     #[cfg(feature = "webgl")]
     {
-        log::info!("Creating WebGL renderer...");
+        tracing::info!("Creating WebGL renderer...");
         let canvas: HtmlCanvasElement = document
             .create_element("canvas")
             .into_js_result()?
@@ -1281,15 +1332,15 @@ async fn create_renderer(
             .map_err(|_| "Expected HtmlCanvasElement")?;
         match ruffle_render_webgl::WebGlRenderBackend::new(&canvas, _is_transparent) {
             Ok(renderer) => {
-                return Ok((builder.with_renderer(renderer), canvas, "WebGL"));
+                return Ok((builder.with_renderer(renderer), canvas));
             }
-            Err(error) => log::error!("Error creating WebGL renderer: {}", error),
+            Err(error) => tracing::error!("Error creating WebGL renderer: {}", error),
         }
     }
 
     #[cfg(feature = "canvas")]
     {
-        log::info!("Falling back to Canvas renderer...");
+        tracing::info!("Falling back to Canvas renderer...");
         let canvas: HtmlCanvasElement = document
             .create_element("canvas")
             .into_js_result()?
@@ -1297,9 +1348,9 @@ async fn create_renderer(
             .map_err(|_| "Expected HtmlCanvasElement")?;
         match ruffle_render_canvas::WebCanvasRenderBackend::new(&canvas, _is_transparent) {
             Ok(renderer) => {
-                return Ok((builder.with_renderer(renderer), canvas, "Canvas"));
+                return Ok((builder.with_renderer(renderer), canvas));
             }
-            Err(error) => log::error!("Error creating canvas renderer: {}", error),
+            Err(error) => tracing::error!("Error creating canvas renderer: {}", error),
         }
     }
 
@@ -1463,6 +1514,7 @@ fn web_to_ruffle_key_code(key_code: &str) -> KeyCode {
         "NumpadSubtract" => KeyCode::NumpadMinus,
         "NumpadDecimal" => KeyCode::NumpadPeriod,
         "NumpadDivide" => KeyCode::NumpadSlash,
+        "NumpadEnter" => KeyCode::Return,
         "PageUp" => KeyCode::PgUp,
         "PageDown" => KeyCode::PgDown,
         "End" => KeyCode::End,

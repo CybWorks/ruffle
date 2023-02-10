@@ -178,14 +178,14 @@ impl PathSegment {
         self.points.len() <= 1
     }
 
-    fn start(&self) -> (Twips, Twips) {
-        let pt = &self.points.first().unwrap();
-        (pt.x, pt.y)
+    fn start(&self) -> Option<(Twips, Twips)> {
+        let pt = &self.points.first()?;
+        Some((pt.x, pt.y))
     }
 
-    fn end(&self) -> (Twips, Twips) {
-        let pt = &self.points.last().unwrap();
-        (pt.x, pt.y)
+    fn end(&self) -> Option<(Twips, Twips)> {
+        let pt = &self.points.last()?;
+        Some((pt.x, pt.y))
     }
 
     fn is_closed(&self) -> bool {
@@ -195,7 +195,7 @@ impl PathSegment {
     fn to_draw_commands(&self) -> impl '_ + Iterator<Item = DrawCommand> {
         assert!(!self.is_empty());
         let mut i = self.points.iter();
-        let first = i.next().unwrap();
+        let first = i.next().expect("Points should not be empty");
         std::iter::once(DrawCommand::MoveTo {
             x: first.x,
             y: first.y,

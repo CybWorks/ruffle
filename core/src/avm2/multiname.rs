@@ -3,6 +3,7 @@ use crate::avm2::script::TranslationUnit;
 use crate::avm2::Error;
 use crate::avm2::Namespace;
 use crate::avm2::QName;
+use crate::avm2::{Object, Value};
 use crate::string::{AvmString, WStr, WString};
 use bitflags::bitflags;
 use gc_arena::Gc;
@@ -220,18 +221,43 @@ impl<'gc> Multiname<'gc> {
         })
     }
 
+    #[inline(never)]
+    #[cold]
+    pub fn try_replace_with_qname(
+        &self,
+        obj: Object<'gc>,
+        activation: &mut Activation<'_, 'gc>,
+    ) -> Option<Self> {
+        if let Object::QNameObject(qname_object) = obj {
+            if self.has_lazy_ns() {
+                let _ = activation.pop_stack(); // ignore the ns component
+            }
+            let qname = qname_object.qname().expect("Empty QName");
+            return Some((*qname).into());
+        }
+        None
+    }
+
     pub fn fill_with_runtime_params(
         &self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<Self, Error<'gc>> {
         let name = if self.has_lazy_name() {
-            Some(activation.avm2().pop().coerce_to_string(activation)?)
+            let name_value = activation.pop_stack();
+
+            if let Value::Object(name_obj) = name_value {
+                if let Some(result) = self.try_replace_with_qname(name_obj, activation) {
+                    return Ok(result);
+                }
+            }
+
+            Some(name_value.coerce_to_string(activation)?)
         } else {
             self.name
         };
 
         let ns = if self.has_lazy_ns() {
-            let ns_value = activation.avm2().pop();
+            let ns_value = activation.pop_stack();
             let ns = ns_value.as_namespace()?;
             NamespaceSet::single(*ns)
         } else {
@@ -362,6 +388,30 @@ impl<'gc> Multiname<'gc> {
             }
 
             uri.push_str(WStr::from_units(b">"));
+        }
+
+        AvmString::new(mc, uri)
+    }
+
+    // note: I didn't look very deeply into how different exactly this should be
+    // this is currently generally based on to_qualified_name, without params and leading ::
+    pub fn to_error_qualified_name(&self, mc: MutationContext<'gc, '_>) -> AvmString<'gc> {
+        let mut uri = WString::new();
+        let ns = match self.ns.get(0).filter(|_| self.ns.len() == 1) {
+            Some(Namespace::Any) => "*".into(),
+            Some(ns) => ns.as_uri(),
+            None => "".into(),
+        };
+
+        if !ns.is_empty() {
+            uri.push_str(&ns);
+            uri.push_str(WStr::from_units(b"::"));
+        }
+
+        if let Some(name) = self.name {
+            uri.push_str(&name);
+        } else {
+            uri.push_str(WStr::from_units(b"*"));
         }
 
         AvmString::new(mc, uri)

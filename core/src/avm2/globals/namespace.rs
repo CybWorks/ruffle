@@ -9,28 +9,31 @@ use crate::avm2::Error;
 use crate::avm2::Multiname;
 use crate::avm2::Namespace;
 use crate::avm2::QName;
+use crate::avm2_stub_constructor;
 use gc_arena::{GcCell, MutationContext};
 
 /// Implements `Namespace`'s instance initializer.
 pub fn instance_init<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    avm2_stub_constructor!(activation, "Namespace");
     Err("Namespace constructor is a stub.".into())
 }
 
 fn class_call<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    avm2_stub_constructor!(activation, "Namespace");
     Err("Namespace constructor is a stub.".into())
 }
 
 /// Implements `Namespace`'s native instance initializer.
 pub fn native_instance_init<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -43,7 +46,7 @@ pub fn native_instance_init<'gc>(
 
 /// Implements `Namespace`'s class initializer.
 pub fn class_init<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {

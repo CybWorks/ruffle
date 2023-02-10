@@ -12,7 +12,7 @@ mod callable_value;
 mod debug;
 mod error;
 mod fscommand;
-mod globals;
+pub(crate) mod globals;
 mod object;
 mod property;
 mod property_map;
@@ -46,9 +46,9 @@ pub use value::Value;
 macro_rules! avm_warn {
     ($activation: ident, $($arg:tt)*) => (
         if cfg!(feature = "avm_debug") {
-            log::warn!("{} -- in {}", format!($($arg)*), $activation.id)
+            tracing::warn!("{} -- in {}", format!($($arg)*), $activation.id)
         } else {
-            log::warn!($($arg)*)
+            tracing::warn!($($arg)*)
         }
     )
 }
@@ -57,9 +57,37 @@ macro_rules! avm_warn {
 macro_rules! avm_error {
     ($activation: ident, $($arg:tt)*) => (
         if cfg!(feature = "avm_debug") {
-            log::error!("{} -- in {}", format!($($arg)*), $activation.id)
+            tracing::error!("{} -- in {}", format!($($arg)*), $activation.id)
         } else {
-            log::error!($($arg)*)
+            tracing::error!($($arg)*)
         }
     )
+}
+
+#[macro_export]
+macro_rules! avm1_stub {
+    ($activation: ident, $class: literal, $method: literal) => {
+        #[cfg_attr(
+            feature = "known_stubs",
+            linkme::distributed_slice($crate::stub::KNOWN_STUBS)
+        )]
+        static STUB: $crate::stub::Stub = $crate::stub::Stub::Avm1Method {
+            class: $class,
+            method: $method,
+            specifics: None,
+        };
+        $activation.context.stub_tracker.encounter(&STUB);
+    };
+    ($activation: ident, $class: literal, $method: literal, $specifics: literal) => {
+        #[cfg_attr(
+            feature = "known_stubs",
+            linkme::distributed_slice($crate::stub::KNOWN_STUBS)
+        )]
+        static STUB: $crate::stub::Stub = $crate::stub::Stub::Avm1Method {
+            class: $class,
+            method: $method,
+            specifics: Some($specifics),
+        };
+        $activation.context.stub_tracker.encounter(&STUB);
+    };
 }

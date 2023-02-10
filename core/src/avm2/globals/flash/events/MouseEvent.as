@@ -2,6 +2,7 @@
 package flash.events
 {
     import flash.display.InteractiveObject;
+    import __ruffle__.stub_method;
 
     public class MouseEvent extends Event
     {
@@ -73,6 +74,11 @@ package flash.events
         override public function toString() : String
         {
             return this.formatToString("MouseEvent","type","bubbles","cancelable","eventPhase","localX","localY","stageX","stageY","relatedObject","ctrlKey","altKey","shiftKey","buttonDown","delta");
+        }
+
+        public function updateAfterEvent():void {
+            // TODO - determine when we should actually force a frame to be rendered.
+            stub_method("flash.events.MouseEvent", "updateAfterEvent");
         }
 
         public native function get stageX() : Number;

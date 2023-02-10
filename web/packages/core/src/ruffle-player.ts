@@ -14,6 +14,7 @@ import {
 import type { MovieMetadata } from "./movie-metadata";
 import type { InternalContextMenuItem } from "./context-menu";
 import { swfFileName } from "./swf-file-name";
+import { buildInfo } from "./build-info";
 
 export const FLASH_MIMETYPE = "application/x-shockwave-flash";
 export const FUTURESPLASH_MIMETYPE = "application/futuresplash";
@@ -40,6 +41,7 @@ const enum PanicError {
     WasmNotFound,
     WasmDisabledMicrosoftEdge,
     SwfFetchError,
+    SwfCors,
 }
 
 // Safari still requires prefixed fullscreen APIs, see:
@@ -145,6 +147,7 @@ export class RufflePlayer extends HTMLElement {
     private _readyState: ReadyState;
 
     private panicked = false;
+    private _cachedDebugInfo: string | null = null;
 
     private isExtension = false;
 
@@ -441,6 +444,7 @@ export class RufflePlayer extends HTMLElement {
             this,
             this.loadedConfig
         );
+        this._cachedDebugInfo = this.instance!.renderer_debug_info();
         console.log(
             "New Ruffle instance created (WebAssembly extensions: " +
                 (ruffleConstructor.is_wasm_simd_used() ? "ON" : "OFF") +
@@ -636,7 +640,8 @@ export class RufflePlayer extends HTMLElement {
                 console.log("Loading SWF data");
                 this.instance!.load_data(
                     new Uint8Array(options.data),
-                    sanitizeParameters(options.parameters)
+                    sanitizeParameters(options.parameters),
+                    options.swfFileName || "movie.swf"
                 );
             }
         } catch (err) {
@@ -864,7 +869,7 @@ export class RufflePlayer extends HTMLElement {
 
         const extensionString = this.isExtension ? "extension" : "";
         items.push({
-            text: `About Ruffle ${extensionString} (%VERSION_NAME%)`,
+            text: `About Ruffle ${extensionString} (${buildInfo.versionName})`,
             onClick() {
                 window.open(RUFFLE_ORIGIN, "_blank");
             },
@@ -1154,11 +1159,11 @@ export class RufflePlayer extends HTMLElement {
         );
 
         dataArray.push("\n# Ruffle Info\n");
-        dataArray.push(`Version: %VERSION_NUMBER%\n`);
-        dataArray.push(`Name: %VERSION_NAME%\n`);
-        dataArray.push(`Channel: %VERSION_CHANNEL%\n`);
-        dataArray.push(`Built: %BUILD_DATE%\n`);
-        dataArray.push(`Commit: %COMMIT_HASH%\n`);
+        dataArray.push(`Version: ${buildInfo.versionNumber}\n`);
+        dataArray.push(`Name: ${buildInfo.versionName}\n`);
+        dataArray.push(`Channel: ${buildInfo.versionChannel}\n`);
+        dataArray.push(`Built: ${buildInfo.buildDate}\n`);
+        dataArray.push(`Commit: ${buildInfo.commitHash}\n`);
         dataArray.push(`Is extension: ${this.isExtension}\n`);
         dataArray.push("\n# Metadata\n");
         if (this.metadata) {
@@ -1238,7 +1243,7 @@ export class RufflePlayer extends HTMLElement {
 
         const errorText = errorArray.join("");
 
-        const buildDate = new Date("%BUILD_DATE%");
+        const buildDate = new Date(buildInfo.buildDate);
         const monthsPrior = new Date();
         monthsPrior.setMonth(monthsPrior.getMonth() - 6); // 6 months prior
         const isBuildOutdated = monthsPrior > buildDate;
@@ -1284,7 +1289,7 @@ export class RufflePlayer extends HTMLElement {
                 `;
                 errorFooter = `
                     <li><a target="_top" href="${RUFFLE_ORIGIN}/demo">Web Demo</a></li>
-                    <li><a target="_top" href="https://github.com/ruffle-rs/ruffle/tags">Desktop Application</a></li>
+                    <li><a target="_top" href="${RUFFLE_ORIGIN}#downloads">Desktop Application</a></li>
                 `;
                 break;
             case PanicError.JavascriptConfiguration:
@@ -1333,6 +1338,18 @@ export class RufflePlayer extends HTMLElement {
                     <li><a href="#" id="panic-view-details">View Error Details</a></li>
                 `;
                 break;
+            case PanicError.SwfCors:
+                // Self hosted: Cannot load SWF file - CORS issues
+                errorBody = `
+                    <p>Ruffle failed to load the Flash SWF file.</p>
+                    <p>Access to fetch has likely been blocked by CORS policy.</p>
+                    <p>If you are the server administrator, please consult the Ruffle wiki for help.</p>
+                `;
+                errorFooter = `
+                    <li><a target="_top" href="https://github.com/ruffle-rs/ruffle/wiki/Using-Ruffle#configure-cors-header">View Ruffle Wiki</a></li>
+                    <li><a href="#" id="panic-view-details">View Error Details</a></li>
+                `;
+                break;
             case PanicError.WasmCors:
                 // Self hosted: Cannot load `.wasm` file - CORS issues
                 errorBody = `
@@ -1341,7 +1358,7 @@ export class RufflePlayer extends HTMLElement {
                     <p>If you are the server administrator, please consult the Ruffle wiki for help.</p>
                 `;
                 errorFooter = `
-                    <li><a target="_top" href="https://github.com/ruffle-rs/ruffle/wiki/Using-Ruffle#web">View Ruffle Wiki</a></li>
+                    <li><a target="_top" href="https://github.com/ruffle-rs/ruffle/wiki/Using-Ruffle#configure-cors-header">View Ruffle Wiki</a></li>
                     <li><a href="#" id="panic-view-details">View Error Details</a></li>
                 `;
                 break;
@@ -1390,7 +1407,7 @@ export class RufflePlayer extends HTMLElement {
                     <p>If you are the server administrator, we invite you to try loading the file on a blank page.</p>
                 `;
                 if (isBuildOutdated) {
-                    errorBody += `<p>You can also try to upload a more recent version of Ruffle that may circumvent the issue (current build is outdated: %BUILD_DATE%).</p>`;
+                    errorBody += `<p>You can also try to upload a more recent version of Ruffle that may circumvent the issue (current build is outdated: ${buildInfo.buildDate}).</p>`;
                 }
                 errorFooter = `
                     <li>${actionTag}</li>
@@ -1415,7 +1432,7 @@ export class RufflePlayer extends HTMLElement {
                 if (!isBuildOutdated) {
                     errorBody += `<p>This isn't supposed to happen, so we'd really appreciate if you could file a bug!</p>`;
                 } else {
-                    errorBody += `<p>If you are the server administrator, please try to upload a more recent version of Ruffle (current build is outdated: %BUILD_DATE%).</p>`;
+                    errorBody += `<p>If you are the server administrator, please try to upload a more recent version of Ruffle (current build is outdated: ${buildInfo.buildDate}).</p>`;
                 }
                 errorFooter = `
                     <li>${actionTag}</li>
@@ -1452,27 +1469,32 @@ export class RufflePlayer extends HTMLElement {
 
     displayRootMovieDownloadFailedMessage(): void {
         if (
-            window.location.origin === this.swfUrl!.origin ||
-            !this.isExtension ||
-            !window.location.protocol.includes("http")
+            this.isExtension &&
+            window.location.origin !== this.swfUrl!.origin
         ) {
+            this.hidePreloader();
+            const div = document.createElement("div");
+            div.id = "message_overlay";
+            div.innerHTML = `<div class="message">
+                <p>Ruffle wasn't able to run the Flash embedded in this page.</p>
+                <p>You can try to open the file in a separate tab, to sidestep this issue.</p>
+                <div>
+                    <a target="_blank" href="${this.swfUrl}">Open in a new tab</a>
+                </div>
+            </div>`;
+            this.container.prepend(div);
+        } else {
             const error = new Error("Failed to fetch: " + this.swfUrl);
-            error.ruffleIndexError = PanicError.SwfFetchError;
+            if (!this.swfUrl!.protocol.includes("http")) {
+                error.ruffleIndexError = PanicError.FileProtocol;
+            } else if (window.location.origin === this.swfUrl!.origin) {
+                error.ruffleIndexError = PanicError.SwfFetchError;
+            } else {
+                // This is a selfhosted build of Ruffle that tried to make a cross-origin request
+                error.ruffleIndexError = PanicError.SwfCors;
+            }
             this.panic(error);
-            return;
         }
-
-        this.hidePreloader();
-        const div = document.createElement("div");
-        div.id = "message_overlay";
-        div.innerHTML = `<div class="message">
-            <p>Ruffle wasn't able to run the Flash embedded in this page.</p>
-            <p>You can try to open the file in a separate tab, to sidestep this issue.</p>
-            <div>
-                <a target="_blank" href="${this.swfUrl}">Open in a new tab</a>
-            </div>
-        </div>`;
-        this.container.prepend(div);
     }
 
     displayUnsupportedMessage(): void {
@@ -1515,8 +1537,16 @@ export class RufflePlayer extends HTMLElement {
 
     protected debugPlayerInfo(): string {
         let result = `Allows script access: ${this.loadedConfig.allowScriptAccess}\n`;
+        let renderInfo = `(Cached) ${this._cachedDebugInfo}`;
         if (this.instance) {
-            result += `Renderer: ${this.instance.renderer_name()}\n`;
+            try {
+                renderInfo = this.instance.renderer_debug_info();
+            } catch {
+                // ignored
+            }
+        }
+        if (renderInfo) {
+            result += `${renderInfo}\n`;
         }
         return result;
     }

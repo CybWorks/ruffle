@@ -4,7 +4,7 @@ use crate::avm1::function::{Executable, FunctionObject};
 use crate::avm1::property::Attribute;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Object, ScriptObject, TObject, Value};
-use crate::display_object::{DisplayObject, Lists, TDisplayObject, TDisplayObjectContainer};
+use crate::display_object::{DisplayObject, TDisplayObject, TDisplayObjectContainer};
 use crate::string::{AvmString, WStr, WString};
 use gc_arena::Collect;
 use gc_arena::MutationContext;
@@ -81,7 +81,7 @@ const GLOBAL_DECLS: &[Declaration] = declare_properties! {
 };
 
 pub fn trace<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -97,7 +97,7 @@ pub fn trace<'gc>(
 }
 
 pub fn is_finite<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -109,7 +109,7 @@ pub fn is_finite<'gc>(
 }
 
 pub fn is_nan<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -121,7 +121,7 @@ pub fn is_nan<'gc>(
 }
 
 pub fn parse_int<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -231,7 +231,7 @@ pub fn parse_int<'gc>(
 }
 
 pub fn get_infinity<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -243,7 +243,7 @@ pub fn get_infinity<'gc>(
 }
 
 pub fn get_nan<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -255,7 +255,7 @@ pub fn get_nan<'gc>(
 }
 
 pub fn parse_float<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -268,7 +268,7 @@ pub fn parse_float<'gc>(
 }
 
 pub fn set_interval<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -276,7 +276,7 @@ pub fn set_interval<'gc>(
 }
 
 pub fn set_timeout<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -284,7 +284,7 @@ pub fn set_timeout<'gc>(
 }
 
 pub fn create_timer<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
     is_timeout: bool,
@@ -332,7 +332,7 @@ pub fn create_timer<'gc>(
 }
 
 pub fn clear_interval<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -341,14 +341,14 @@ pub fn clear_interval<'gc>(
         .unwrap_or(&Value::Undefined)
         .coerce_to_i32(activation)?;
     if !activation.context.timers.remove(id) {
-        log::info!("clearInterval: Timer {} does not exist", id);
+        tracing::info!("clearInterval: Timer {} does not exist", id);
     }
 
     Ok(Value::Undefined)
 }
 
 pub fn clear_timeout<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -357,14 +357,14 @@ pub fn clear_timeout<'gc>(
         .unwrap_or(&Value::Undefined)
         .coerce_to_i32(activation)?;
     if !activation.context.timers.remove(id) {
-        log::info!("clearTimeout: Timer {} does not exist", id);
+        tracing::info!("clearTimeout: Timer {} does not exist", id);
     }
 
     Ok(Value::Undefined)
 }
 
 pub fn update_after_event<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -374,7 +374,7 @@ pub fn update_after_event<'gc>(
 }
 
 pub fn escape<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -405,7 +405,7 @@ pub fn escape<'gc>(
 }
 
 pub fn unescape<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -1168,7 +1168,7 @@ pub fn create_globals<'gc>(
 /// The depth of objects placed on the timeline in the Flash IDE start from 0 in the SWF,
 /// but are negative when queried from MovieClip.getDepth().
 /// Add this to convert from AS -> SWF depth.
-const AVM_DEPTH_BIAS: i32 = 16384;
+pub const AVM_DEPTH_BIAS: i32 = 16384;
 
 /// The maximum depth that the AVM will allow you to swap or attach clips to.
 /// What is the derivation of this number...?
@@ -1179,7 +1179,7 @@ const AVM_MAX_DEPTH: i32 = 2_130_706_428;
 const AVM_MAX_REMOVE_DEPTH: i32 = 2_130_706_416;
 
 fn get_depth<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -1192,10 +1192,7 @@ fn get_depth<'gc>(
     Ok(Value::Undefined)
 }
 
-pub fn remove_display_object<'gc>(
-    this: DisplayObject<'gc>,
-    activation: &mut Activation<'_, 'gc, '_>,
-) {
+pub fn remove_display_object<'gc>(this: DisplayObject<'gc>, activation: &mut Activation<'_, 'gc>) {
     let depth = this.depth().wrapping_sub(0);
     // Can only remove positive depths (when offset by the AVM depth bias).
     // Generally this prevents you from removing non-dynamically created clips,
@@ -1204,7 +1201,7 @@ pub fn remove_display_object<'gc>(
     if depth >= AVM_DEPTH_BIAS && depth < AVM_MAX_REMOVE_DEPTH && !this.removed() {
         // Need a parent to remove from.
         if let Some(mut parent) = this.avm1_parent().and_then(|o| o.as_movie_clip()) {
-            parent.remove_child(&mut activation.context, this, Lists::all());
+            parent.remove_child(&mut activation.context, this);
         }
     }
 }
@@ -1214,7 +1211,7 @@ pub fn remove_display_object<'gc>(
 mod tests {
     use super::*;
 
-    fn setup<'gc>(activation: &mut Activation<'_, 'gc, '_>) -> Object<'gc> {
+    fn setup<'gc>(activation: &mut Activation<'_, 'gc>) -> Object<'gc> {
         create_globals(activation.context.gc_context).1
     }
 

@@ -243,7 +243,7 @@ fn capture_single_swf(descriptors: Arc<Descriptors>, opt: &Opt) -> Result<()> {
     } else {
         for (frame, image) in frames.iter().enumerate() {
             let mut path: PathBuf = (&output).into();
-            path.push(format!("{}.png", frame));
+            path.push(format!("{frame}.png"));
             image.save(&path)?;
         }
     }
@@ -266,7 +266,7 @@ fn capture_single_swf(descriptors: Arc<Descriptors>, opt: &Opt) -> Result<()> {
     if let Some(progress) = progress {
         progress.finish_with_message(message);
     } else {
-        println!("{}", message);
+        println!("{message}");
     }
 
     Ok(())
@@ -331,7 +331,7 @@ fn capture_multiple_swfs(descriptors: Arc<Descriptors>, opt: &Opt) -> Result<()>
                 let _ = create_dir_all(&parent);
                 for (frame, image) in frames.iter().enumerate() {
                     let mut destination = parent.clone();
-                    destination.push(format!("{}.png", frame));
+                    destination.push(format!("{frame}.png"));
                     image.save(&destination)?;
                 }
             }
@@ -358,7 +358,7 @@ fn capture_multiple_swfs(descriptors: Arc<Descriptors>, opt: &Opt) -> Result<()>
     if let Some(progress) = progress {
         progress.finish_with_message(message);
     } else {
-        println!("{}", message);
+        println!("{message}");
     }
 
     Ok(())
@@ -381,9 +381,12 @@ fn trace_path(_opt: &Opt) -> Option<&Path> {
 
 fn main() -> Result<()> {
     let opt: Opt = Opt::parse();
-    let instance = wgpu::Instance::new(opt.graphics.into());
-    let descriptors =
-        futures::executor::block_on(WgpuRenderBackend::<TextureTarget>::build_descriptors(
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: opt.graphics.into(),
+        dx12_shader_compiler: wgpu::Dx12Compiler::default(),
+    });
+    let (adapter, device, queue) =
+        futures::executor::block_on(WgpuRenderBackend::<TextureTarget>::request_device(
             opt.graphics.into(),
             instance,
             None,
@@ -392,7 +395,7 @@ fn main() -> Result<()> {
         ))
         .map_err(|e| anyhow!(e.to_string()))?;
 
-    let descriptors = Arc::new(descriptors);
+    let descriptors = Arc::new(Descriptors::new(adapter, device, queue));
 
     if opt.swf.is_file() {
         capture_single_swf(descriptors, &opt)?;

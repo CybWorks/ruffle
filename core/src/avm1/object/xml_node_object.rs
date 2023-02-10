@@ -44,8 +44,8 @@ impl fmt::Debug for XmlNodeObject<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let this = self.0.read();
         f.debug_struct("XmlNodeObject")
-            .field("base", &this.base)
             .field("node", &this.node)
+            .field("ptr", &self.0.as_ptr())
             .finish()
     }
 }
@@ -55,7 +55,7 @@ impl<'gc> TObject<'gc> for XmlNodeObject<'gc> {
 
     fn create_bare_object(
         &self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         this: Object<'gc>,
     ) -> Result<Object<'gc>, Error<'gc>> {
         Ok(Self::from_xml_node(

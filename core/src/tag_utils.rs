@@ -135,17 +135,21 @@ impl SwfMovie {
 
     /// The width of the movie in twips.
     pub fn width(&self) -> Twips {
-        self.header.stage_size().x_max - self.header.stage_size().x_min
+        self.header.stage_size().width()
     }
 
     /// The height of the movie in twips.
     pub fn height(&self) -> Twips {
-        self.header.stage_size().y_max - self.header.stage_size().y_min
+        self.header.stage_size().height()
     }
 
     /// Get the URL this SWF was fetched from.
     pub fn url(&self) -> Option<&str> {
         self.url.as_deref()
+    }
+
+    pub fn set_url(&mut self, url: Option<String>) {
+        self.url = url;
     }
 
     /// Get the URL that triggered the fetch of this SWF.
@@ -381,7 +385,7 @@ where
     loop {
         let (tag_code, tag_len) = reader.read_tag_code_and_length()?;
         if tag_len > reader.get_ref().len() {
-            log::error!("Unexpected EOF when reading tag");
+            tracing::error!("Unexpected EOF when reading tag");
             *reader.get_mut() = &reader.get_ref()[reader.get_ref().len()..];
             return Ok(false);
         }
@@ -394,7 +398,7 @@ where
 
             match result {
                 Err(e) => {
-                    log::error!("Error running definition tag: {:?}, got {}", tag, e)
+                    tracing::error!("Error running definition tag: {:?}, got {}", tag, e)
                 }
                 Ok(ControlFlow::Exit) => {
                     *reader.get_mut() = end_slice;
@@ -403,7 +407,7 @@ where
                 Ok(ControlFlow::Continue) => {}
             }
         } else {
-            log::warn!("Unknown tag code: {:?}", tag_code);
+            tracing::warn!("Unknown tag code: {:?}", tag_code);
         }
 
         *reader.get_mut() = end_slice;

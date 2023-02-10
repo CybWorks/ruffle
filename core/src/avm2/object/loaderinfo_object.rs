@@ -10,6 +10,7 @@ use crate::avm2::EventObject;
 use crate::context::UpdateContext;
 use crate::display_object::{DisplayObject, TDisplayObject};
 use crate::tag_utils::SwfMovie;
+use core::fmt;
 use gc_arena::{Collect, GcCell, MutationContext};
 use std::cell::{Ref, RefMut};
 use std::sync::Arc;
@@ -17,7 +18,7 @@ use std::sync::Arc;
 /// A class instance allocator that allocates LoaderInfo objects.
 pub fn loaderinfo_allocator<'gc>(
     class: ClassObject<'gc>,
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
 ) -> Result<Object<'gc>, Error<'gc>> {
     let base = ScriptObjectData::new(class);
 
@@ -47,7 +48,7 @@ pub fn loaderinfo_allocator<'gc>(
 }
 
 /// Represents a thing which can be loaded by a loader.
-#[derive(Collect, Debug, Clone)]
+#[derive(Collect, Clone)]
 #[collect(no_drop)]
 pub enum LoaderStream<'gc> {
     /// An SWF movie that has not yet loaded.
@@ -74,11 +75,19 @@ pub enum LoaderStream<'gc> {
 
 /// An Object which represents a loadable object, such as a SWF movie or image
 /// resource.
-#[derive(Collect, Debug, Clone, Copy)]
+#[derive(Collect, Clone, Copy)]
 #[collect(no_drop)]
 pub struct LoaderInfoObject<'gc>(GcCell<'gc, LoaderInfoObjectData<'gc>>);
 
-#[derive(Collect, Debug, Clone)]
+impl fmt::Debug for LoaderInfoObject<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LoaderInfoObject")
+            .field("ptr", &self.0.as_ptr())
+            .finish()
+    }
+}
+
+#[derive(Collect, Clone)]
 #[collect(no_drop)]
 pub struct LoaderInfoObjectData<'gc> {
     /// All normal script data.
@@ -106,7 +115,7 @@ pub struct LoaderInfoObjectData<'gc> {
 impl<'gc> LoaderInfoObject<'gc> {
     /// Box a movie into a loader info object.
     pub fn from_movie(
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         movie: Arc<SwfMovie>,
         root: DisplayObject<'gc>,
         loader: Option<Object<'gc>>,
@@ -150,7 +159,7 @@ impl<'gc> LoaderInfoObject<'gc> {
     /// Use `None` as the root clip to indicate that this is the stage's loader
     /// info.
     pub fn not_yet_loaded(
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         movie: Arc<SwfMovie>,
         loader: Option<Object<'gc>>,
         root_clip: Option<DisplayObject<'gc>>,
@@ -201,7 +210,7 @@ impl<'gc> LoaderInfoObject<'gc> {
         return self.0.read().uncaught_error_events;
     }
 
-    pub fn fire_init_and_complete_events(&self, context: &mut UpdateContext<'_, 'gc, '_>) {
+    pub fn fire_init_and_complete_events(&self, context: &mut UpdateContext<'_, 'gc>) {
         if !self.0.read().init_event_fired {
             self.0.write(context.gc_context).init_event_fired = true;
 
@@ -210,7 +219,7 @@ impl<'gc> LoaderInfoObject<'gc> {
             let init_evt = EventObject::bare_default_event(context, "init");
 
             if let Err(e) = Avm2::dispatch_event(context, init_evt, (*self).into()) {
-                log::error!(
+                tracing::error!(
                     "Encountered AVM2 error when broadcasting `init` event: {}",
                     e
                 );
@@ -233,7 +242,7 @@ impl<'gc> LoaderInfoObject<'gc> {
                 let complete_evt = EventObject::bare_default_event(context, "complete");
 
                 if let Err(e) = Avm2::dispatch_event(context, complete_evt, (*self).into()) {
-                    log::error!(
+                    tracing::error!(
                         "Encountered AVM2 error when broadcasting `complete` event: {}",
                         e
                     );

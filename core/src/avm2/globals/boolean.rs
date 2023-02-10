@@ -1,7 +1,7 @@
 //! `Boolean` impl
 
 use crate::avm2::activation::Activation;
-use crate::avm2::class::Class;
+use crate::avm2::class::{Class, ClassAttributes};
 use crate::avm2::method::{Method, NativeMethodImpl};
 use crate::avm2::object::{primitive_allocator, FunctionObject, Object, TObject};
 use crate::avm2::value::Value;
@@ -13,7 +13,7 @@ use gc_arena::{GcCell, MutationContext};
 
 /// Implements `Boolean`'s instance initializer.
 fn instance_init<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -35,7 +35,7 @@ fn instance_init<'gc>(
 
 /// Implements `Boolean`'s native instance initializer.
 fn native_instance_init<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -48,7 +48,7 @@ fn native_instance_init<'gc>(
 
 /// Implements `Boolean`'s class initializer.
 fn class_init<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -91,7 +91,7 @@ fn class_init<'gc>(
 
 /// Implements `Boolean.toString`
 fn to_string<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -110,7 +110,7 @@ fn to_string<'gc>(
 
 /// Implements `Boolean.valueOf`
 fn value_of<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -134,6 +134,7 @@ pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>
     );
 
     let mut write = class.write(mc);
+    write.set_attributes(ClassAttributes::FINAL | ClassAttributes::SEALED);
     write.set_instance_allocator(primitive_allocator);
     write.set_native_instance_init(Method::from_builtin(
         native_instance_init,

@@ -78,8 +78,13 @@ impl VideoBackend for SoftwareVideoBackend {
             .ok_or(Error::VideoStreamIsNotRegistered)?;
 
         let frame = stream.decoder.decode_frame(encoded_frame)?;
-        let handle = if let Some(bitmap) = stream.bitmap {
-            renderer.update_texture(bitmap, frame.width.into(), frame.height.into(), frame.rgba)?;
+        let handle = if let Some(bitmap) = stream.bitmap.clone() {
+            renderer.update_texture(
+                &bitmap,
+                frame.width.into(),
+                frame.height.into(),
+                frame.rgba,
+            )?;
             bitmap
         } else {
             let bitmap = Bitmap::new(
@@ -90,7 +95,7 @@ impl VideoBackend for SoftwareVideoBackend {
             );
             renderer.register_bitmap(bitmap)?
         };
-        stream.bitmap = Some(handle);
+        stream.bitmap = Some(handle.clone());
 
         Ok(BitmapInfo {
             handle,

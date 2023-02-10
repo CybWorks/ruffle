@@ -45,7 +45,7 @@ pub enum PropagationMode {
 
 /// Represents data fields of an event that can be fired on an object that
 /// implements `IEventDispatcher`.
-#[derive(Clone, Collect, Debug)]
+#[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct Event<'gc> {
     /// Whether or not the event "bubbles" - fires on it's parents after it
@@ -174,7 +174,7 @@ impl<'gc> Event<'gc> {
 }
 
 /// A set of handlers organized by event type, priority, and order added.
-#[derive(Clone, Collect, Debug)]
+#[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct DispatchList<'gc>(FnvHashMap<AvmString<'gc>, BTreeMap<i32, Vec<EventHandler<'gc>>>>);
 
@@ -306,7 +306,7 @@ impl<'gc> Default for DispatchList<'gc> {
 }
 
 /// A single instance of an event handler.
-#[derive(Clone, Collect, Debug)]
+#[derive(Clone, Collect)]
 #[collect(no_drop)]
 struct EventHandler<'gc> {
     /// The event handler to call.
@@ -369,17 +369,17 @@ pub fn parent_of(target: Object<'_>) -> Option<Object<'_>> {
 /// event's phase to match what targets you are dispatching to, or you will
 /// call the wrong handlers.
 pub fn dispatch_event_to_target<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
+    dispatcher: Object<'gc>,
     target: Object<'gc>,
     event: Object<'gc>,
 ) -> Result<(), Error<'gc>> {
     avm_debug!(
         activation.context.avm2,
-        "Event dispatch: {} to {:?}",
+        "Event dispatch: {} to {target:?}",
         event.as_event().unwrap().event_type(),
-        target
     );
-    let dispatch_list = target
+    let dispatch_list = dispatcher
         .get_property(
             &Multiname::new(Namespace::private(NS_EVENT_DISPATCHER), "dispatch_list"),
             activation,
@@ -419,7 +419,7 @@ pub fn dispatch_event_to_target<'gc>(
         let object = activation.global_scope();
 
         if let Err(err) = handler.call(object, &[event.into()], activation) {
-            log::error!(
+            tracing::error!(
                 "Error dispatching event {:?} to handler {:?} : {:?}",
                 event,
                 handler,
@@ -432,7 +432,7 @@ pub fn dispatch_event_to_target<'gc>(
 }
 
 pub fn dispatch_event<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     event: Object<'gc>,
 ) -> Result<bool, Error<'gc>> {
@@ -463,7 +463,7 @@ pub fn dispatch_event<'gc>(
             break;
         }
 
-        dispatch_event_to_target(activation, *ancestor, event)?;
+        dispatch_event_to_target(activation, *ancestor, *ancestor, event)?;
     }
 
     event
@@ -472,7 +472,7 @@ pub fn dispatch_event<'gc>(
         .set_phase(EventPhase::AtTarget);
 
     if !event.as_event().unwrap().is_propagation_stopped() {
-        dispatch_event_to_target(activation, target, event)?;
+        dispatch_event_to_target(activation, this, target, event)?;
     }
 
     event
@@ -486,7 +486,7 @@ pub fn dispatch_event<'gc>(
                 break;
             }
 
-            dispatch_event_to_target(activation, *ancestor, event)?;
+            dispatch_event_to_target(activation, *ancestor, *ancestor, event)?;
         }
     }
 

@@ -1,17 +1,15 @@
 //! Audio decoders.
 
 mod adpcm;
-#[cfg(any(feature = "minimp3", feature = "symphonia"))]
+#[cfg(feature = "mp3")]
 mod mp3;
 #[cfg(feature = "nellymoser")]
 mod nellymoser;
 mod pcm;
 
 pub use adpcm::AdpcmDecoder;
-#[cfg(feature = "minimp3")]
-pub use mp3::minimp3::{mp3_metadata, Mp3Decoder};
-#[cfg(all(feature = "symphonia", not(feature = "minimp3")))]
-pub use mp3::symphonia::{mp3_metadata, Mp3Decoder};
+#[cfg(feature = "mp3")]
+pub use mp3::{mp3_metadata, Mp3Decoder};
 #[cfg(feature = "nellymoser")]
 pub use nellymoser::NellymoserDecoder;
 pub use pcm::PcmDecoder;
@@ -23,13 +21,9 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[cfg(feature = "minimp3")]
-    #[error("Couldn't decode MP3 using minimp3")]
-    InvalidMp3(#[from] mp3::minimp3::Error),
-
-    #[cfg(all(feature = "symphonia", not(feature = "minimp3")))]
-    #[error("Couldn't decode MP3 using symphonia")]
-    InvalidMp3(#[from] mp3::symphonia::Error),
+    #[cfg(all(feature = "mp3"))]
+    #[error("Couldn't decode MP3")]
+    InvalidMp3(#[from] mp3::Error),
 
     #[error("Couldn't decode ADPCM")]
     InvalidAdpcm(#[from] adpcm::Error),
@@ -56,7 +50,7 @@ pub fn make_decoder<R: 'static + Read + Send + Sync>(
     let decoder: Box<dyn Decoder> = match format.compression {
         AudioCompression::UncompressedUnknownEndian => {
             // Cross fingers that it's little endian.
-            log::warn!("make_decoder: PCM sound is unknown endian; assuming little endian");
+            tracing::warn!("make_decoder: PCM sound is unknown endian; assuming little endian");
             Box::new(PcmDecoder::new(
                 data,
                 format.is_stereo,
@@ -75,7 +69,7 @@ pub fn make_decoder<R: 'static + Read + Send + Sync>(
             format.is_stereo,
             format.sample_rate,
         )?),
-        #[cfg(any(feature = "minimp3", feature = "symphonia"))]
+        #[cfg(feature = "mp3")]
         AudioCompression::Mp3 => Box::new(Mp3Decoder::new(data)?),
         #[cfg(feature = "nellymoser")]
         AudioCompression::Nellymoser => {
@@ -313,8 +307,9 @@ impl Iterator for StreamTagReader {
                             // RESEARCHME: How does Flash Player actually determine when there is an audio gap or not?
                             // If an MP3 audio track has gaps, Flash Player will often play it out of sync (too early).
                             // Seems closely related to `stream_info.num_samples_per_block`.
-                            let num_samples =
-                                u16::from_le_bytes(audio_block[..2].try_into().unwrap());
+                            let num_samples = u16::from_le_bytes(
+                                audio_block[..2].try_into().expect("2 bytes fit into a u16"),
+                            );
                             self.mp3_samples_buffered += i32::from(num_samples);
                             audio_block = &audio_block[4..];
                         }

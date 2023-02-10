@@ -8,6 +8,7 @@ use crate::avm2::object::{ClassObject, Object, ObjectPtr, TObject};
 use crate::avm2::scope::ScopeChain;
 use crate::avm2::value::Value;
 use crate::avm2::Error;
+use core::fmt;
 use gc_arena::{Collect, Gc, GcCell, MutationContext};
 use std::cell::{Ref, RefMut};
 
@@ -20,7 +21,7 @@ use std::cell::{Ref, RefMut};
 /// or `FunctionObject::from_function`.
 pub fn function_allocator<'gc>(
     class: ClassObject<'gc>,
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
 ) -> Result<Object<'gc>, Error<'gc>> {
     let base = ScriptObjectData::new(class);
 
@@ -51,11 +52,19 @@ pub fn function_allocator<'gc>(
 }
 
 /// An Object which can be called to execute its function code.
-#[derive(Collect, Debug, Clone, Copy)]
+#[derive(Collect, Clone, Copy)]
 #[collect(no_drop)]
 pub struct FunctionObject<'gc>(GcCell<'gc, FunctionObjectData<'gc>>);
 
-#[derive(Collect, Debug, Clone)]
+impl fmt::Debug for FunctionObject<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FunctionObject")
+            .field("ptr", &self.0.as_ptr())
+            .finish()
+    }
+}
+
+#[derive(Collect, Clone)]
 #[collect(no_drop)]
 pub struct FunctionObjectData<'gc> {
     /// Base script object
@@ -74,7 +83,7 @@ impl<'gc> FunctionObject<'gc> {
     /// This associated constructor will also create and initialize an empty
     /// `Object` prototype for the function.
     pub fn from_function(
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         method: Method<'gc>,
         scope: ScopeChain<'gc>,
     ) -> Result<FunctionObject<'gc>, Error<'gc>> {
@@ -97,7 +106,7 @@ impl<'gc> FunctionObject<'gc> {
     /// The given `reciever`, if supplied, will override any user-specified
     /// `this` parameter.
     pub fn from_method(
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         method: Method<'gc>,
         scope: ScopeChain<'gc>,
         receiver: Option<Object<'gc>>,
@@ -142,16 +151,13 @@ impl<'gc> TObject<'gc> for FunctionObject<'gc> {
         self.0.as_ptr() as *const ObjectPtr
     }
 
-    fn to_string(
-        &self,
-        _activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Result<Value<'gc>, Error<'gc>> {
+    fn to_string(&self, _activation: &mut Activation<'_, 'gc>) -> Result<Value<'gc>, Error<'gc>> {
         Ok("function Function() {}".into())
     }
 
     fn to_locale_string(
         &self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
         self.to_string(activation)
     }
@@ -172,7 +178,7 @@ impl<'gc> TObject<'gc> for FunctionObject<'gc> {
         self,
         receiver: Option<Object<'gc>>,
         arguments: &[Value<'gc>],
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
         self.0
             .read()
@@ -182,7 +188,7 @@ impl<'gc> TObject<'gc> for FunctionObject<'gc> {
 
     fn construct(
         self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         arguments: &[Value<'gc>],
     ) -> Result<Object<'gc>, Error<'gc>> {
         let prototype = self.prototype().unwrap();

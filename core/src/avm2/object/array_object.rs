@@ -8,13 +8,14 @@ use crate::avm2::value::Value;
 use crate::avm2::Error;
 use crate::avm2::Multiname;
 use crate::string::AvmString;
+use core::fmt;
 use gc_arena::{Collect, GcCell, MutationContext};
 use std::cell::{Ref, RefMut};
 
 /// A class instance allocator that allocates array objects.
 pub fn array_allocator<'gc>(
     class: ClassObject<'gc>,
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
 ) -> Result<Object<'gc>, Error<'gc>> {
     let base = ScriptObjectData::new(class);
 
@@ -29,11 +30,19 @@ pub fn array_allocator<'gc>(
 }
 
 /// An Object which stores numerical properties in an array.
-#[derive(Collect, Debug, Clone, Copy)]
+#[derive(Collect, Clone, Copy)]
 #[collect(no_drop)]
 pub struct ArrayObject<'gc>(GcCell<'gc, ArrayObjectData<'gc>>);
 
-#[derive(Collect, Debug, Clone)]
+impl fmt::Debug for ArrayObject<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ArrayObject")
+            .field("ptr", &self.0.as_ptr())
+            .finish()
+    }
+}
+
+#[derive(Collect, Clone)]
 #[collect(no_drop)]
 pub struct ArrayObjectData<'gc> {
     /// Base script object
@@ -45,7 +54,7 @@ pub struct ArrayObjectData<'gc> {
 
 impl<'gc> ArrayObject<'gc> {
     /// Construct an empty array.
-    pub fn empty(activation: &mut Activation<'_, 'gc, '_>) -> Result<Object<'gc>, Error<'gc>> {
+    pub fn empty(activation: &mut Activation<'_, 'gc>) -> Result<Object<'gc>, Error<'gc>> {
         Self::from_storage(activation, ArrayStorage::new(0))
     }
 
@@ -53,7 +62,7 @@ impl<'gc> ArrayObject<'gc> {
     ///
     /// This will produce an instance of the system `Array` class.
     pub fn from_storage(
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         array: ArrayStorage<'gc>,
     ) -> Result<Object<'gc>, Error<'gc>> {
         let class = activation.avm2().classes().array;
@@ -88,7 +97,7 @@ impl<'gc> TObject<'gc> for ArrayObject<'gc> {
     fn get_property_local(
         self,
         name: &Multiname<'gc>,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
         let read = self.0.read();
 
@@ -109,7 +118,7 @@ impl<'gc> TObject<'gc> for ArrayObject<'gc> {
         self,
         name: &Multiname<'gc>,
         value: Value<'gc>,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<(), Error<'gc>> {
         let mut write = self.0.write(activation.context.gc_context);
 
@@ -129,7 +138,7 @@ impl<'gc> TObject<'gc> for ArrayObject<'gc> {
         self,
         name: &Multiname<'gc>,
         value: Value<'gc>,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<(), Error<'gc>> {
         let mut write = self.0.write(activation.context.gc_context);
 
@@ -147,7 +156,7 @@ impl<'gc> TObject<'gc> for ArrayObject<'gc> {
 
     fn delete_property_local(
         self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         name: &Multiname<'gc>,
     ) -> Result<bool, Error<'gc>> {
         if name.contains_public_namespace() {
@@ -184,7 +193,7 @@ impl<'gc> TObject<'gc> for ArrayObject<'gc> {
     fn get_next_enumerant(
         self,
         mut last_index: u32,
-        _activation: &mut Activation<'_, 'gc, '_>,
+        _activation: &mut Activation<'_, 'gc>,
     ) -> Result<Option<u32>, Error<'gc>> {
         let read = self.0.read();
         let num_enumerants = read.base.num_enumerants();
@@ -210,7 +219,7 @@ impl<'gc> TObject<'gc> for ArrayObject<'gc> {
     fn get_enumerant_name(
         self,
         index: u32,
-        _activation: &mut Activation<'_, 'gc, '_>,
+        _activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
         let arr_len = self.0.read().array.length() as u32;
         if arr_len >= index {
@@ -233,10 +242,7 @@ impl<'gc> TObject<'gc> for ArrayObject<'gc> {
             || self.base().property_is_enumerable(name)
     }
 
-    fn to_string(
-        &self,
-        _activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Result<Value<'gc>, Error<'gc>> {
+    fn to_string(&self, _activation: &mut Activation<'_, 'gc>) -> Result<Value<'gc>, Error<'gc>> {
         Ok(Value::Object(Object::from(*self)))
     }
 

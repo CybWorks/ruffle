@@ -106,7 +106,7 @@ impl<'gc> Executable<'gc> {
         &self,
         unbound_receiver: Option<Object<'gc>>,
         mut arguments: &[Value<'gc>],
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         callee: Object<'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
         let ret = match self {
@@ -288,7 +288,7 @@ impl<'gc> fmt::Debug for Executable<'gc> {
         match self {
             Self::Action(be) => fmt
                 .debug_struct("Executable::Action")
-                .field("method", &be.method)
+                .field("method", &Gc::as_ptr(be.method))
                 .field("scope", &be.scope)
                 .field("receiver", &be.receiver)
                 .finish(),

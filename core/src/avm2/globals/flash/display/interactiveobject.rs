@@ -10,11 +10,12 @@ use crate::avm2::Multiname;
 use crate::avm2::Namespace;
 use crate::avm2::QName;
 use crate::display_object::{TDisplayObject, TInteractiveObject};
+use crate::{avm2_stub_getter, avm2_stub_setter};
 use gc_arena::{GcCell, MutationContext};
 
 /// Implements `flash.display.InteractiveObject`'s instance constructor.
 pub fn instance_init<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -23,7 +24,7 @@ pub fn instance_init<'gc>(
 
 /// Implements `flash.display.InteractiveObject`'s native instance constructor.
 pub fn native_instance_init<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -36,7 +37,7 @@ pub fn native_instance_init<'gc>(
 
 /// Implements `flash.display.InteractiveObject`'s class constructor.
 pub fn class_init<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -45,7 +46,7 @@ pub fn class_init<'gc>(
 
 /// Implements `InteractiveObject.mouseEnabled`'s getter.
 pub fn mouse_enabled<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -61,7 +62,7 @@ pub fn mouse_enabled<'gc>(
 
 /// Implements `InteractiveObject.mouseEnabled`'s setter.
 pub fn set_mouse_enabled<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -82,7 +83,7 @@ pub fn set_mouse_enabled<'gc>(
 
 /// Implements `InteractiveObject.doubleClickEnabled`'s getter.
 pub fn double_click_enabled<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -98,7 +99,7 @@ pub fn double_click_enabled<'gc>(
 
 /// Implements `InteractiveObject.doubleClickEnabled`'s setter.
 pub fn set_double_click_enabled<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -119,7 +120,7 @@ pub fn set_double_click_enabled<'gc>(
 
 /// Implements `InteractiveObject.contextMenu`'s getter.
 fn context_menu<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -135,7 +136,7 @@ fn context_menu<'gc>(
 
 /// Implements `InteractiveObject.contextMenu`'s setter.
 fn set_context_menu<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -156,26 +157,68 @@ fn set_context_menu<'gc>(
     Ok(Value::Undefined)
 }
 
-/// Stub getter & setter for `tabEnabled`.
 pub fn tab_enabled<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    log::warn!("InteractiveObject.tabEnabled is a stub");
+    avm2_stub_getter!(activation, "flash.display.InteractiveObject", "tabEnabled");
 
     Ok(false.into())
 }
 
-/// Stub getter & setter for `tabIndex`.
-pub fn tab_index<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+pub fn set_tab_enabled<'gc>(
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    log::warn!("InteractiveObject.tabIndex is a stub");
+    avm2_stub_setter!(activation, "flash.display.InteractiveObject", "tabIndex");
+
+    Ok(Value::Undefined)
+}
+
+pub fn tab_index<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    _this: Option<Object<'gc>>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    avm2_stub_getter!(activation, "flash.display.InteractiveObject", "tabIndex");
 
     Ok((-1).into())
+}
+
+pub fn set_tab_index<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    _this: Option<Object<'gc>>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    avm2_stub_setter!(activation, "flash.display.InteractiveObject", "tabIndex");
+
+    Ok(Value::Undefined)
+}
+
+pub fn focus_rect<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    _this: Option<Object<'gc>>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    avm2_stub_getter!(activation, "flash.display.InteractiveObject", "focusRect");
+    Ok(Value::Null)
+}
+
+pub fn set_focus_rect<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    _this: Option<Object<'gc>>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    // NOTE: all values other than true or null are converted to false. (false/null do differ)
+
+    // let's only warn on true, as games sometimes just set focusRect to false for some reason.
+    if matches!(args.get(0), Some(Value::Bool(true))) {
+        avm2_stub_setter!(activation, "flash.display.InteractiveObject", "focusRect");
+    }
+
+    Ok(Value::Null)
 }
 
 /// Construct `InteractiveObject`'s class.
@@ -215,8 +258,9 @@ pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>
             Some(set_double_click_enabled),
         ),
         ("contextMenu", Some(context_menu), Some(set_context_menu)),
-        ("tabEnabled", Some(tab_enabled), Some(tab_enabled)),
-        ("tabIndex", Some(tab_index), Some(tab_index)),
+        ("tabEnabled", Some(tab_enabled), Some(set_tab_enabled)),
+        ("tabIndex", Some(tab_index), Some(set_tab_index)),
+        ("focusRect", Some(focus_rect), Some(set_focus_rect)),
     ];
     write.define_public_builtin_instance_properties(mc, PUBLIC_INSTANCE_PROPERTIES);
 

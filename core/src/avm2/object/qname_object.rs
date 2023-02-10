@@ -6,13 +6,14 @@ use crate::avm2::object::{ClassObject, Object, ObjectPtr, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
 use crate::avm2::QName;
+use core::fmt;
 use gc_arena::{Collect, GcCell, MutationContext};
 use std::cell::{Ref, RefMut};
 
 /// A class instance allocator that allocates QName objects.
 pub fn qname_allocator<'gc>(
     class: ClassObject<'gc>,
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
 ) -> Result<Object<'gc>, Error<'gc>> {
     let base = ScriptObjectData::new(class);
 
@@ -24,11 +25,19 @@ pub fn qname_allocator<'gc>(
 }
 
 /// An Object which represents a boxed QName.
-#[derive(Collect, Debug, Clone, Copy)]
+#[derive(Collect, Clone, Copy)]
 #[collect(no_drop)]
 pub struct QNameObject<'gc>(GcCell<'gc, QNameObjectData<'gc>>);
 
-#[derive(Collect, Debug, Clone)]
+impl fmt::Debug for QNameObject<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QNameObject")
+            .field("ptr", &self.0.as_ptr())
+            .finish()
+    }
+}
+
+#[derive(Collect, Clone)]
 #[collect(no_drop)]
 pub struct QNameObjectData<'gc> {
     /// All normal script data.
@@ -41,7 +50,7 @@ pub struct QNameObjectData<'gc> {
 impl<'gc> QNameObject<'gc> {
     /// Box a QName into an object.
     pub fn from_qname(
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         qname: QName<'gc>,
     ) -> Result<Object<'gc>, Error<'gc>> {
         let class = activation.avm2().classes().qname;

@@ -90,7 +90,7 @@ impl<'gc> QName<'gc> {
 
         if let Some((package_name, local_name)) = parts {
             Self {
-                ns: Namespace::Package(AvmString::new(mc, package_name)),
+                ns: Namespace::Namespace(AvmString::new(mc, package_name)),
                 name: AvmString::new(mc, local_name),
             }
         } else {
@@ -157,7 +157,6 @@ impl<'gc> QName<'gc> {
     pub fn as_uri(&self, mc: MutationContext<'gc, '_>) -> AvmString<'gc> {
         let ns = match &self.ns {
             Namespace::Namespace(s) => s,
-            Namespace::Package(s) => s,
             Namespace::PackageInternal(s) => s,
             Namespace::Protected(s) => s,
             Namespace::Explicit(s) => s,
@@ -180,8 +179,8 @@ impl<'gc> QName<'gc> {
 impl<'gc> Debug for QName<'gc> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         match self.to_qualified_name_no_mc() {
-            Either::Left(name) => write!(f, "{}", name),
-            Either::Right(name) => write!(f, "{}", name),
+            Either::Left(name) => write!(f, "{name}"),
+            Either::Right(name) => write!(f, "{name}"),
         }
     }
 }

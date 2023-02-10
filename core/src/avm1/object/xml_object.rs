@@ -117,7 +117,7 @@ impl<'gc> XmlObject<'gc> {
     /// This method does not yet actually remove existing node contents.
     pub fn replace_with_str(
         &mut self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         data: &WStr,
         ignore_white: bool,
     ) -> Result<(), quick_xml::Error> {
@@ -221,8 +221,8 @@ impl fmt::Debug for XmlObject<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let this = self.0.read();
         f.debug_struct("XmlObject")
-            .field("base", &this.base)
-            .field("root", &self.0.read().root)
+            .field("root", &this.root)
+            .field("ptr", &self.0.as_ptr())
             .finish()
     }
 }
@@ -232,7 +232,7 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
 
     fn create_bare_object(
         &self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         this: Object<'gc>,
     ) -> Result<Object<'gc>, Error<'gc>> {
         Ok(Self::empty(activation.context.gc_context, this).into())

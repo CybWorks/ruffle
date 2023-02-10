@@ -21,7 +21,7 @@ use swf::avm2::types::{
     AbcFile, Index, Method as AbcMethod, Multiname as AbcMultiname, Script as AbcScript,
 };
 
-#[derive(Copy, Clone, Debug, Collect)]
+#[derive(Copy, Clone, Collect)]
 #[collect(no_drop)]
 pub struct TranslationUnit<'gc>(GcCell<'gc, TranslationUnitData<'gc>>);
 
@@ -37,7 +37,7 @@ pub struct TranslationUnit<'gc>(GcCell<'gc, TranslationUnitData<'gc>>);
 /// names preloaded. This roughly corresponds to the logical "loading" phase of
 /// ABC execution as documented in the AVM2 Overview. "Linking" takes place by
 /// constructing the appropriate runtime object for that item.
-#[derive(Clone, Debug, Collect)]
+#[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct TranslationUnitData<'gc> {
     /// The domain that all scripts in the translation unit export defs to.
@@ -131,7 +131,7 @@ impl<'gc> TranslationUnit<'gc> {
         self,
         method_index: Index<AbcMethod>,
         is_function: bool,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<Method<'gc>, Error<'gc>> {
         let read = self.0.read();
         if let Some(Some(method)) = read.methods.get(method_index.0 as usize) {
@@ -175,7 +175,7 @@ impl<'gc> TranslationUnit<'gc> {
     pub fn load_class(
         self,
         class_index: u32,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<GcCell<'gc, Class<'gc>>, Error<'gc>> {
         let read = self.0.read();
         if let Some(Some(class)) = read.classes.get(class_index as usize) {
@@ -198,7 +198,7 @@ impl<'gc> TranslationUnit<'gc> {
     pub fn load_script(
         self,
         script_index: u32,
-        uc: &mut UpdateContext<'_, 'gc, '_>,
+        uc: &mut UpdateContext<'_, 'gc>,
     ) -> Result<Script<'gc>, Error<'gc>> {
         let read = self.0.read();
         if let Some(Some(scripts)) = read.scripts.get(script_index as usize) {
@@ -250,7 +250,7 @@ impl<'gc> TranslationUnit<'gc> {
                 .constant_pool
                 .strings
                 .get(string_index as usize - 1)
-                .ok_or_else(|| format!("Unknown string constant {}", string_index))?,
+                .ok_or_else(|| format!("Unknown string constant {string_index}"))?,
         );
         write.strings[string_index as usize] = Some(avm_string);
 
@@ -329,11 +329,11 @@ impl<'gc> TranslationUnit<'gc> {
 }
 
 /// A loaded Script from an ABC file.
-#[derive(Copy, Clone, Debug, Collect)]
+#[derive(Copy, Clone, Collect)]
 #[collect(no_drop)]
 pub struct Script<'gc>(GcCell<'gc, ScriptData<'gc>>);
 
-#[derive(Clone, Debug, Collect)]
+#[derive(Clone, Collect)]
 #[collect(no_drop)]
 struct ScriptData<'gc> {
     /// The global object for the script.
@@ -402,7 +402,7 @@ impl<'gc> Script<'gc> {
         script_index: u32,
         globals: Object<'gc>,
         domain: Domain<'gc>,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<Self, Error<'gc>> {
         let abc = unit.abc();
         let script: Result<&AbcScript, Error<'gc>> = abc
@@ -436,7 +436,7 @@ impl<'gc> Script<'gc> {
         &mut self,
         unit: TranslationUnit<'gc>,
         script_index: u32,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<(), Error<'gc>> {
         let mut write = self.0.write(activation.context.gc_context);
 
@@ -486,7 +486,7 @@ impl<'gc> Script<'gc> {
     /// the same stack.
     pub fn globals(
         &mut self,
-        context: &mut UpdateContext<'_, 'gc, '_>,
+        context: &mut UpdateContext<'_, 'gc>,
     ) -> Result<Object<'gc>, Error<'gc>> {
         let mut write = self.0.write(context.gc_context);
 

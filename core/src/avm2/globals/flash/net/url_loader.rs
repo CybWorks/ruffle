@@ -10,7 +10,7 @@ use crate::loader::DataFormat;
 
 /// Native function definition for `URLLoader.load`
 pub fn load<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -32,7 +32,7 @@ pub fn load<'gc>(
         } else if &data_format == b"variables" {
             DataFormat::Variables
         } else {
-            return Err(format!("Unknown data format: {}", data_format).into());
+            return Err(format!("Unknown data format: {data_format}").into());
         };
 
         return spawn_fetch(activation, this, request, data_format);
@@ -41,7 +41,7 @@ pub fn load<'gc>(
 }
 
 fn spawn_fetch<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     loader_object: Object<'gc>,
     url_request: &Object<'gc>,
     data_format: DataFormat,
@@ -55,7 +55,7 @@ fn spawn_fetch<'gc>(
         .coerce_to_string(activation)?;
 
     let method = NavigationMethod::from_method_str(&method_str).unwrap_or_else(|| {
-        log::error!("Unknown HTTP method type {:?}", method_str);
+        tracing::error!("Unknown HTTP method type {:?}", method_str);
         NavigationMethod::Get
     });
 

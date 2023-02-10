@@ -4,6 +4,9 @@
 use convert_case::{Boundary, Case, Casing};
 use proc_macro2::TokenStream;
 use quote::quote;
+use regex::RegexBuilder;
+use std::ffi::OsStr;
+use std::fs;
 use std::fs::File;
 use std::io::ErrorKind;
 use std::io::Write;
@@ -13,6 +16,7 @@ use std::str::FromStr;
 use swf::avm2::types::*;
 use swf::avm2::write::Writer;
 use swf::{DoAbc, DoAbcFlag, Header, Tag};
+use walkdir::WalkDir;
 
 // The metadata name - all metadata in our .as files
 // should be of the form `[Ruffle(key1 = value1, key2 = value2)]`
@@ -20,6 +24,9 @@ const RUFFLE_METADATA_NAME: &str = "Ruffle";
 // Indicates that we should generate a reference to an instance allocator
 // method (used as a metadata key with `Ruffle` metadata)
 const METADATA_INSTANCE_ALLOCATOR: &str = "InstanceAllocator";
+// Indicates that we should generate a reference to a native initializer
+// method (used as a metadata key with `Ruffle` metadata)
+const METADATA_NATIVE_INSTANCE_INIT: &str = "NativeInstanceInit";
 
 /// If successful, returns a list of paths that were used. If this is run
 /// from a build script, these paths should be printed with
@@ -27,6 +34,7 @@ const METADATA_INSTANCE_ALLOCATOR: &str = "InstanceAllocator";
 pub fn build_playerglobal(
     repo_root: PathBuf,
     out_dir: PathBuf,
+    with_stubs: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let classes_dir = repo_root.join("core/src/avm2/globals/");
     let asc_path = repo_root.join("core/build_playerglobal/asc.jar");
@@ -55,7 +63,7 @@ pub fn build_playerglobal(
     match status {
         Ok(code) => {
             if !code.success() {
-                return Err(format!("Compiling failed with code {:?}", code).into());
+                return Err(format!("Compiling failed with code {code:?}").into());
             }
         }
         Err(err) => {
@@ -73,6 +81,10 @@ pub fn build_playerglobal(
     std::fs::remove_file(playerglobal.with_extension("abc"))?;
     std::fs::remove_file(playerglobal.with_extension("cpp"))?;
     std::fs::remove_file(playerglobal.with_extension("h"))?;
+
+    if with_stubs {
+        collect_stubs(&classes_dir, &out_dir)?;
+    }
 
     bytes = write_native_table(&bytes, &out_dir)?;
 
@@ -95,7 +107,7 @@ fn resolve_multiname_name<'a>(abc: &'a AbcFile, multiname: &Multiname) -> &'a st
     if let Multiname::QName { name, .. } | Multiname::Multiname { name, .. } = multiname {
         &abc.constant_pool.strings[name.0 as usize - 1]
     } else {
-        panic!("Unexpected Multiname {:?}", multiname);
+        panic!("Unexpected Multiname {multiname:?}");
     }
 }
 
@@ -106,10 +118,10 @@ fn resolve_multiname_ns<'a>(abc: &'a AbcFile, multiname: &Multiname) -> &'a str 
         if let Namespace::Package(p) = ns {
             &abc.constant_pool.strings[p.0 as usize - 1]
         } else {
-            panic!("Unexpected Namespace {:?}", ns);
+            panic!("Unexpected Namespace {ns:?}");
         }
     } else {
-        panic!("Unexpected Multiname {:?}", multiname);
+        panic!("Unexpected Multiname {multiname:?}");
     }
 }
 
@@ -120,10 +132,22 @@ fn flash_to_rust_path(path: &str) -> String {
     let components = path
         .split('.')
         .map(|component| {
+            // Special-case this so that it matches the Flash namespace
+            if component == "display3D" {
+                return component.to_string();
+            }
+
+            let mut without_boundaries = vec![Boundary::DigitUpper];
+            // Special case for classes ending in '3D' - we want to ave something like
+            // 'vertex_buffer_3d' instead of 'vertex_buffer3d'
+            if !component.ends_with("3D") {
+                // Do not split on a letter followed by a digit, so e.g. `atan2` won't become `atan_2`.
+                without_boundaries.extend(&[Boundary::UpperDigit, Boundary::LowerDigit]);
+            }
+
             component
                 .from_case(Case::Camel)
-                // Do not split on a letter followed by a digit, so e.g. `atan2` won't become `atan_2`.
-                .without_boundaries(&[Boundary::UpperDigit, Boundary::LowerDigit])
+                .without_boundaries(&without_boundaries)
                 .to_case(Case::Snake)
         })
         .collect::<Vec<_>>();
@@ -250,7 +274,8 @@ fn write_native_table(data: &[u8], out_dir: &Path) -> Result<Vec<u8>, Box<dyn st
 
     let none_tokens = quote! { None };
     let mut rust_paths = vec![none_tokens.clone(); abc.methods.len()];
-    let mut rust_instance_allocators = vec![none_tokens; abc.classes.len()];
+    let mut rust_instance_allocators = vec![none_tokens.clone(); abc.classes.len()];
+    let mut rust_native_instance_initializers = vec![none_tokens; abc.classes.len()];
 
     let mut check_trait = |trait_: &Trait, parent: Option<Index<Multiname>>| {
         let method_id = match trait_.kind {
@@ -265,7 +290,7 @@ fn write_native_table(data: &[u8], out_dir: &Path) -> Result<Vec<u8>, Box<dyn st
                 method
             }
             TraitKind::Function { .. } => {
-                panic!("TraitKind::Function is not supported: {:?}", trait_)
+                panic!("TraitKind::Function is not supported: {trait_:?}")
             }
             _ => return,
         };
@@ -301,14 +326,15 @@ fn write_native_table(data: &[u8], out_dir: &Path) -> Result<Vec<u8>, Box<dyn st
             &abc.constant_pool.multinames[class_name_idx as usize - 1],
         );
 
-        let method_name = "::".to_string() + &flash_to_rust_path(class_name) + "_allocator";
-
+        let instance_allocator_method_name =
+            "::".to_string() + &flash_to_rust_path(class_name) + "_allocator";
+        let native_instance_init_method_name = "::native_instance_init".to_string();
         for metadata_idx in &trait_.metadata {
             let metadata = &abc.metadata[metadata_idx.0 as usize];
             let name = &abc.constant_pool.strings[metadata.name.0 as usize - 1];
             match name.as_str() {
                 RUFFLE_METADATA_NAME => {}
-                _ => panic!("Unexpected class metadata {:?}", name),
+                _ => panic!("Unexpected class metadata {name:?}"),
             }
 
             for item in &metadata.items {
@@ -323,10 +349,25 @@ fn write_native_table(data: &[u8], out_dir: &Path) -> Result<Vec<u8>, Box<dyn st
                     (None, METADATA_INSTANCE_ALLOCATOR) => {
                         // This results in a path of the form
                         // `crate::avm2::globals::<path::to::class>::<class_allocator>`
-                        rust_instance_allocators[class_id as usize] =
-                            rust_method_name_and_path(&abc, trait_, None, "", &method_name);
+                        rust_instance_allocators[class_id as usize] = rust_method_name_and_path(
+                            &abc,
+                            trait_,
+                            None,
+                            "",
+                            &instance_allocator_method_name,
+                        );
                     }
-                    _ => panic!("Unexpected metadata pair ({:?}, {})", key, value),
+                    (None, METADATA_NATIVE_INSTANCE_INIT) => {
+                        rust_native_instance_initializers[class_id as usize] =
+                            rust_method_name_and_path(
+                                &abc,
+                                trait_,
+                                None,
+                                "",
+                                &native_instance_init_method_name,
+                            )
+                    }
+                    _ => panic!("Unexpected metadata pair ({key:?}, {value})"),
                 }
             }
         }
@@ -383,6 +424,14 @@ fn write_native_table(data: &[u8], out_dir: &Path) -> Result<Vec<u8>, Box<dyn st
         pub const NATIVE_INSTANCE_ALLOCATOR_TABLE: &[Option<(&'static str, crate::avm2::class::AllocatorFn)>] = &[
             #(#rust_instance_allocators,)*
         ];
+
+        // This is very similar to `NATIVE_METHOD_TABLE`, but we have one entry per
+        // class, rather than per method. When an entry is `Some(fn_ptr)`, we use
+        // `fn_ptr` as the native initializer for the corresponding class when we
+        // load it into Ruffle.
+        pub const NATIVE_INSTANCE_INIT_TABLE: &[Option<(&'static str, crate::avm2::method::NativeMethodImpl)>] = &[
+            #(#rust_native_instance_initializers,)*
+        ];
     }
     .to_string();
 
@@ -402,4 +451,97 @@ fn write_native_table(data: &[u8], out_dir: &Path) -> Result<Vec<u8>, Box<dyn st
     writer.write(abc).expect("Failed to write modified ABC");
 
     Ok(out_bytes)
+}
+
+fn collect_stubs(root: &Path, out_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let pattern = RegexBuilder::new(
+        r#"
+            \b (?P<type> stub_method | stub_getter | stub_setter | stub_constructor) \s* 
+            \( \s*
+                "(?P<class> .+)" \s*
+                , \s*
+                "(?P<property> .+)" \s*
+                (?:|
+                    , \s*
+                    "(?P<specifics> .+)" \s*
+                )
+            \) \s*
+            ;
+        "#,
+    )
+    .ignore_whitespace(true)
+    .build()?;
+
+    let mut stubs = Vec::new();
+
+    for entry in WalkDir::new(root)
+        .into_iter()
+        .filter_map(|f| f.ok())
+        .filter(|f| f.path().extension() == Some(OsStr::new("as")))
+    {
+        let contents = fs::read_to_string(entry.path())?;
+        for entry in pattern.captures_iter(&contents) {
+            let class = &entry["class"];
+            let property = entry.name("property").map(|m| m.as_str());
+            let specifics = entry.name("specifics").map(|m| m.as_str());
+
+            match (&entry["type"], property, specifics) {
+                ("stub_method", Some(property), Some(specifics)) => stubs.push(quote! {
+                    crate::stub::Stub::Avm2Method {
+                        class: Cow::Borrowed(#class),
+                        method: Cow::Borrowed(#property),
+                        specifics: Cow::Borrowed(#specifics)
+                    }
+                }),
+                ("stub_method", Some(property), None) => stubs.push(quote! {
+                    crate::stub::Stub::Avm2Method {
+                        class: Cow::Borrowed(#class),
+                        method: Cow::Borrowed(#property),
+                        specifics: None
+                    }
+                }),
+                ("stub_getter", Some(property), _) => stubs.push(quote! {
+                    crate::stub::Stub::Avm2Getter {
+                        class: Cow::Borrowed(#class),
+                        property: Cow::Borrowed(#property)
+                    }
+                }),
+                ("stub_setter", Some(property), _) => stubs.push(quote! {
+                    crate::stub::Stub::Avm2Setter {
+                        class: Cow::Borrowed(#class),
+                        property: Cow::Borrowed(#property)
+                    }
+                }),
+                ("stub_constructor", Some(property), _) => stubs.push(quote! {
+                    // Property is actually specifics here
+                    crate::stub::Stub::Avm2Constructor {
+                        class: Cow::Borrowed(#class),
+                        specifics: Some(Cow::Borrowed(#property))
+                    }
+                }),
+                ("stub_constructor", None, _) => stubs.push(quote! {
+                    crate::stub::Stub::Avm2Constructor {
+                        class: Cow::Borrowed(#class),
+                        specifics: None
+                    }
+                }),
+                _ => panic!("Unsupported stub type {}", &entry["type"]),
+            }
+        }
+    }
+
+    let stub_block = quote! {
+        #[cfg(feature = "known_stubs")]
+        use std::borrow::Cow;
+
+        #[cfg(feature = "known_stubs")]
+        pub static AS_DEFINED_STUBS: &[crate::stub::Stub] = &[
+            #(#stubs,)*
+        ];
+    };
+
+    let mut as_stub_file = File::create(out_dir.join("actionscript_stubs.rs"))?;
+    as_stub_file.write_all(stub_block.to_string().as_bytes())?;
+
+    Ok(())
 }

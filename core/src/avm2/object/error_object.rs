@@ -10,13 +10,15 @@ use crate::avm2::value::Value;
 use crate::avm2::Error;
 use crate::avm2::Multiname;
 use crate::string::WString;
+use core::fmt;
 use gc_arena::{Collect, GcCell, MutationContext};
 use std::cell::{Ref, RefMut};
+use std::fmt::Debug;
 
 /// A class instance allocator that allocates Error objects.
 pub fn error_allocator<'gc>(
     class: ClassObject<'gc>,
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
 ) -> Result<Object<'gc>, Error<'gc>> {
     let base = ScriptObjectData::new(class);
 
@@ -31,11 +33,20 @@ pub fn error_allocator<'gc>(
     .into())
 }
 
-#[derive(Clone, Collect, Debug, Copy)]
+#[derive(Clone, Collect, Copy)]
 #[collect(no_drop)]
 pub struct ErrorObject<'gc>(GcCell<'gc, ErrorObjectData<'gc>>);
 
-#[derive(Clone, Collect, Debug)]
+impl fmt::Debug for ErrorObject<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ErrorObject")
+            .field("class", &self.debug_class_name())
+            .field("ptr", &self.0.as_ptr())
+            .finish()
+    }
+}
+
+#[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct ErrorObjectData<'gc> {
     /// Base script object
@@ -48,7 +59,7 @@ pub struct ErrorObjectData<'gc> {
 impl<'gc> ErrorObject<'gc> {
     pub fn display(
         &self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<AvmString<'gc>, Error<'gc>> {
         let name = self
             .get_property(&Multiname::public("name"), activation)?
@@ -69,7 +80,7 @@ impl<'gc> ErrorObject<'gc> {
     #[cfg(feature = "avm_debug")]
     pub fn display_full(
         &self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<AvmString<'gc>, Error<'gc>> {
         let mut output = WString::new();
         output.push_str(&self.display(activation)?);
@@ -80,7 +91,7 @@ impl<'gc> ErrorObject<'gc> {
     #[cfg(not(feature = "avm_debug"))]
     pub fn display_full(
         &self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<AvmString<'gc>, Error<'gc>> {
         self.display(activation)
     }
@@ -88,6 +99,18 @@ impl<'gc> ErrorObject<'gc> {
     #[cfg(feature = "avm_debug")]
     fn call_stack(&self) -> Ref<CallStack<'gc>> {
         Ref::map(self.0.read(), |r| &r.call_stack)
+    }
+
+    fn debug_class_name(&self) -> Box<dyn Debug + 'gc> {
+        self.0
+            .try_read()
+            .map(|obj| {
+                obj.base
+                    .instance_of()
+                    .map(|cls| cls.debug_class_name())
+                    .unwrap_or_else(|| Box::new("None"))
+            })
+            .unwrap_or_else(|err| Box::new(err))
     }
 }
 
@@ -108,10 +131,7 @@ impl<'gc> TObject<'gc> for ErrorObject<'gc> {
         Ok(Value::Object(Object::from(*self)))
     }
 
-    fn to_string(
-        &self,
-        activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Result<Value<'gc>, Error<'gc>> {
+    fn to_string(&self, activation: &mut Activation<'_, 'gc>) -> Result<Value<'gc>, Error<'gc>> {
         Ok(self.display(activation)?.into())
     }
 

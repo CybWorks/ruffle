@@ -5,13 +5,14 @@ use crate::avm2::object::{ClassObject, Object, ObjectPtr, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
 use crate::avm2::Multiname;
+use core::fmt;
 use gc_arena::{Collect, GcCell, MutationContext};
 use std::cell::{Ref, RefMut};
 
 /// A class instance allocator that allocates ByteArray objects.
 pub fn byte_array_allocator<'gc>(
     class: ClassObject<'gc>,
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
 ) -> Result<Object<'gc>, Error<'gc>> {
     let base = ScriptObjectData::new(class);
 
@@ -25,11 +26,19 @@ pub fn byte_array_allocator<'gc>(
     .into())
 }
 
-#[derive(Clone, Collect, Debug, Copy)]
+#[derive(Clone, Collect, Copy)]
 #[collect(no_drop)]
 pub struct ByteArrayObject<'gc>(GcCell<'gc, ByteArrayObjectData<'gc>>);
 
-#[derive(Clone, Collect, Debug)]
+impl fmt::Debug for ByteArrayObject<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ByteArrayObject")
+            .field("ptr", &self.0.as_ptr())
+            .finish()
+    }
+}
+
+#[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct ByteArrayObjectData<'gc> {
     /// Base script object
@@ -40,7 +49,7 @@ pub struct ByteArrayObjectData<'gc> {
 
 impl<'gc> ByteArrayObject<'gc> {
     pub fn from_storage(
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         bytes: ByteArrayStorage,
     ) -> Result<Object<'gc>, Error<'gc>> {
         let class = activation.avm2().classes().bytearray;
@@ -78,7 +87,7 @@ impl<'gc> TObject<'gc> for ByteArrayObject<'gc> {
     fn get_property_local(
         self,
         name: &Multiname<'gc>,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
         let read = self.0.read();
 
@@ -101,7 +110,7 @@ impl<'gc> TObject<'gc> for ByteArrayObject<'gc> {
         self,
         name: &Multiname<'gc>,
         value: Value<'gc>,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<(), Error<'gc>> {
         let mut write = self.0.write(activation.context.gc_context);
 
@@ -124,7 +133,7 @@ impl<'gc> TObject<'gc> for ByteArrayObject<'gc> {
         self,
         name: &Multiname<'gc>,
         value: Value<'gc>,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<(), Error<'gc>> {
         let mut write = self.0.write(activation.context.gc_context);
 
@@ -145,7 +154,7 @@ impl<'gc> TObject<'gc> for ByteArrayObject<'gc> {
 
     fn delete_property_local(
         self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         name: &Multiname<'gc>,
     ) -> Result<bool, Error<'gc>> {
         if name.contains_public_namespace() {

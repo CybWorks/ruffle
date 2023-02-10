@@ -2,25 +2,20 @@
 
 use crate::avm2::activation::Activation;
 use crate::avm2::array::ArrayStorage;
-use crate::avm2::class::Class;
 use crate::avm2::globals::array::ArrayIter;
-use crate::avm2::method::{Method, NativeMethodImpl};
 use crate::avm2::object::{ArrayObject, FunctionObject, Object, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
 use crate::avm2::Multiname;
-use crate::avm2::Namespace;
-use crate::avm2::QName;
 use crate::ecma_conversions::f64_to_wrapping_i32;
 use crate::string::{AvmString, Units};
-use gc_arena::{GcCell, MutationContext};
 use serde::Serialize;
 use serde_json::{Map as JsonObject, Value as JsonValue};
 use std::borrow::Cow;
 use std::ops::Deref;
 
 fn deserialize_json_inner<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     json: JsonValue,
     reviver: Option<Object<'gc>>,
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -72,7 +67,7 @@ fn deserialize_json_inner<'gc>(
 }
 
 fn deserialize_json<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     json: JsonValue,
     reviver: Option<Object<'gc>>,
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -115,7 +110,7 @@ impl<'gc> AvmSerializer<'gc> {
     /// only used if either the `toJSON` step or replacer function step happens, so we only need to evaluate the key there.
     fn map_value(
         &self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         key: impl Fn() -> AvmString<'gc>,
         value: Value<'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
@@ -147,7 +142,7 @@ impl<'gc> AvmSerializer<'gc> {
 
     fn serialize_object(
         &mut self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         obj: Object<'gc>,
     ) -> Result<JsonValue, Error<'gc>> {
         let mut js_obj = JsonObject::new();
@@ -192,7 +187,7 @@ impl<'gc> AvmSerializer<'gc> {
     /// Note that this doesn't actually check if the object passed can be iterated using ArrayIter, it just assumes it can.
     fn serialize_iterable(
         &mut self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         iterable: Object<'gc>,
     ) -> Result<JsonValue, Error<'gc>> {
         let mut js_arr = Vec::new();
@@ -209,7 +204,7 @@ impl<'gc> AvmSerializer<'gc> {
 
     fn serialize_value(
         &mut self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         value: Value<'gc>,
     ) -> Result<JsonValue, Error<'gc>> {
         Ok(match value {
@@ -245,7 +240,7 @@ impl<'gc> AvmSerializer<'gc> {
     /// Same thing as serialize_value, but maps the value before calling it.
     fn serialize(
         &mut self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         value: Value<'gc>,
     ) -> Result<JsonValue, Error<'gc>> {
         let mapped = self.map_value(activation, || "".into(), value)?;
@@ -253,27 +248,9 @@ impl<'gc> AvmSerializer<'gc> {
     }
 }
 
-/// Implements `JSON`'s instance initializer.
-pub fn instance_init<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Err("ArgumentError: Error #2012: JSON class cannot be instantiated.".into())
-}
-
-/// Implements `JSON`'s class initializer.
-pub fn class_init<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Ok(Value::Undefined)
-}
-
 /// Implements `JSON.parse`.
 pub fn parse<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -289,7 +266,7 @@ pub fn parse<'gc>(
 
 /// Implements `JSON.stringify`.
 pub fn stringify<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -345,22 +322,4 @@ pub fn stringify<'gc>(
         None => serde_json::to_vec(&json).expect("JSON serialization cannot fail"),
     };
     Ok(AvmString::new_utf8_bytes(activation.context.gc_context, &result).into())
-}
-
-/// Construct `JSON`'s class.
-pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>> {
-    let class = Class::new(
-        QName::new(Namespace::public(), "JSON"),
-        Some(Multiname::public("Object")),
-        Method::from_builtin(instance_init, "<JSON instance initializer>", mc),
-        Method::from_builtin(class_init, "<JSON class initializer>", mc),
-        mc,
-    );
-
-    let mut write = class.write(mc);
-
-    const PUBLIC_CLASS_METHODS: &[(&str, NativeMethodImpl)] =
-        &[("parse", parse), ("stringify", stringify)];
-    write.define_public_builtin_class_methods(mc, PUBLIC_CLASS_METHODS);
-    class
 }

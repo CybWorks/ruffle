@@ -7,7 +7,7 @@ use crate::avm2::value::{abc_default_value, Value};
 use crate::avm2::Error;
 use crate::avm2::Multiname;
 use crate::string::AvmString;
-use gc_arena::{Collect, CollectionContext, Gc, MutationContext};
+use gc_arena::{Collect, Gc, MutationContext};
 use std::fmt;
 use std::ops::Deref;
 use std::rc::Rc;
@@ -31,7 +31,7 @@ use swf::avm2::types::{
 /// your function yields `None`, you must ensure that the top-most activation
 /// in the AVM1 runtime will return with the value of this function.
 pub type NativeMethodImpl = for<'gc> fn(
-    &mut Activation<'_, 'gc, '_>,
+    &mut Activation<'_, 'gc>,
     Option<Object<'gc>>,
     &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>>;
@@ -54,7 +54,7 @@ impl<'gc> ParamConfig<'gc> {
     fn from_abc_param(
         config: &AbcMethodParam,
         txunit: TranslationUnit<'gc>,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<Self, Error<'gc>> {
         let param_name = if let Some(name) = &config.name {
             txunit.pool_string(name.0, activation.context.gc_context)?
@@ -101,7 +101,7 @@ impl<'gc> ParamConfig<'gc> {
 }
 
 /// Represents a reference to an AVM2 method and body.
-#[derive(Collect, Clone, Debug)]
+#[derive(Collect, Clone)]
 #[collect(no_drop)]
 pub struct BytecodeMethod<'gc> {
     /// The translation unit this function was defined in.
@@ -136,7 +136,7 @@ impl<'gc> BytecodeMethod<'gc> {
         txunit: TranslationUnit<'gc>,
         abc_method: Index<AbcMethod>,
         is_function: bool,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<Self, Error<'gc>> {
         let abc = txunit.abc();
         let mut signature = Vec::new();
@@ -256,9 +256,11 @@ impl<'gc> BytecodeMethod<'gc> {
 }
 
 /// An uninstantiated method
-#[derive(Clone)]
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
 pub struct NativeMethod<'gc> {
     /// The function to call to execute the method.
+    #[collect(require_static)]
     pub method: NativeMethodImpl,
 
     /// The name of the method.
@@ -270,12 +272,6 @@ pub struct NativeMethod<'gc> {
     /// Whether or not this method accepts parameters beyond those
     /// mentioned in the parameter list.
     pub is_variadic: bool,
-}
-
-unsafe impl<'gc> Collect for NativeMethod<'gc> {
-    fn trace(&self, cc: CollectionContext) {
-        self.signature.trace(cc);
-    }
 }
 
 impl<'gc> fmt::Debug for NativeMethod<'gc> {
@@ -291,7 +287,7 @@ impl<'gc> fmt::Debug for NativeMethod<'gc> {
 
 /// An uninstantiated method that can either be natively implemented or sourced
 /// from an ABC file.
-#[derive(Clone, Collect, Debug)]
+#[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub enum Method<'gc> {
     /// A native method.
@@ -353,6 +349,20 @@ impl<'gc> Method<'gc> {
                 Err("Attempted to unwrap a native method as a user-defined one".into())
             }
             Method::Bytecode(bm) => Ok(bm),
+        }
+    }
+
+    pub fn signature(&self) -> &[ParamConfig<'gc>] {
+        match self {
+            Method::Native(nm) => &nm.signature,
+            Method::Bytecode(bm) => bm.signature(),
+        }
+    }
+
+    pub fn is_variadic(&self) -> bool {
+        match self {
+            Method::Native(nm) => nm.is_variadic,
+            Method::Bytecode(bm) => bm.is_variadic(),
         }
     }
 

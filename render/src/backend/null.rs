@@ -1,14 +1,24 @@
+use std::borrow::Cow;
+use std::sync::Arc;
+
 use crate::backend::{RenderBackend, ShapeHandle, ViewportDimensions};
-use crate::bitmap::{Bitmap, BitmapHandle, BitmapInfo, BitmapSource};
+use crate::bitmap::{Bitmap, BitmapHandle, BitmapHandleImpl, BitmapSize, BitmapSource, SyncHandle};
 use crate::commands::CommandList;
 use crate::error::Error;
+use crate::quality::StageQuality;
 use crate::shape_utils::DistilledShape;
+use gc_arena::MutationContext;
 use swf::Color;
+
+use super::{Context3D, Context3DCommand};
 
 pub struct NullBitmapSource;
 
 impl BitmapSource for NullBitmapSource {
-    fn bitmap(&self, _id: u16) -> Option<BitmapInfo> {
+    fn bitmap_size(&self, _id: u16) -> Option<BitmapSize> {
+        None
+    }
+    fn bitmap_handle(&self, _id: u16, _renderer: &mut dyn RenderBackend) -> Option<BitmapHandle> {
         None
     }
 }
@@ -22,6 +32,9 @@ impl NullRenderer {
         Self { dimensions }
     }
 }
+#[derive(Clone, Debug)]
+struct NullBitmapHandle;
+impl BitmapHandleImpl for NullBitmapHandle {}
 
 impl RenderBackend for NullRenderer {
     fn viewport_dimensions(&self) -> ViewportDimensions {
@@ -54,28 +67,41 @@ impl RenderBackend for NullRenderer {
         _width: u32,
         _height: u32,
         _commands: CommandList,
-        _clear_color: Color,
-    ) -> Result<Bitmap, Error> {
-        Err(Error::Unimplemented)
+    ) -> Option<Box<dyn SyncHandle>> {
+        None
     }
 
     fn submit_frame(&mut self, _clear: Color, _commands: CommandList) {}
-
-    fn get_bitmap_pixels(&mut self, _bitmap: BitmapHandle) -> Option<Bitmap> {
-        None
-    }
     fn register_bitmap(&mut self, _bitmap: Bitmap) -> Result<BitmapHandle, Error> {
-        Ok(BitmapHandle(0))
+        Ok(BitmapHandle(Arc::new(NullBitmapHandle)))
     }
-    fn unregister_bitmap(&mut self, _bitmap: BitmapHandle) {}
 
     fn update_texture(
         &mut self,
-        _bitmap: BitmapHandle,
+        _bitmap: &BitmapHandle,
         _width: u32,
         _height: u32,
         _rgba: Vec<u8>,
     ) -> Result<(), Error> {
         Ok(())
     }
+
+    fn create_context3d(&mut self) -> Result<Box<dyn super::Context3D>, Error> {
+        Err(Error::Unimplemented)
+    }
+
+    fn context3d_present<'gc>(
+        &mut self,
+        _context: &mut dyn Context3D,
+        _commands: Vec<Context3DCommand<'gc>>,
+        _mc: MutationContext<'gc, '_>,
+    ) -> Result<(), Error> {
+        Err(Error::Unimplemented)
+    }
+
+    fn debug_info(&self) -> Cow<'static, str> {
+        Cow::Borrowed("Renderer: Null")
+    }
+
+    fn set_quality(&mut self, _quality: StageQuality) {}
 }

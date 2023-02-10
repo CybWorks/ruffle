@@ -5,7 +5,7 @@ use crate::avm1::property::Attribute;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::runtime::Avm1;
 use crate::avm1::{ScriptObject, TObject, Value};
-use crate::avm_warn;
+use crate::avm1_stub;
 use bitflags::bitflags;
 use core::fmt;
 use gc_arena::MutationContext;
@@ -108,9 +108,9 @@ impl Manufacturer {
         };
 
         if version <= 8 {
-            format!("Macromedia {}", os_part)
+            format!("Macromedia {os_part}")
         } else {
-            format!("Adobe {}", os_part)
+            format!("Adobe {os_part}")
         }
     }
 
@@ -421,7 +421,7 @@ impl Default for SystemProperties {
 }
 
 pub fn set_clipboard<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -437,7 +437,7 @@ pub fn set_clipboard<'gc>(
 }
 
 pub fn show_settings<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -449,18 +449,14 @@ pub fn show_settings<'gc>(
         .unwrap_or(&last_panel_pos.into())
         .coerce_to_i32(activation)?;
 
-    let panel = SettingsPanel::from_u8(panel_pos as u8).unwrap_or(SettingsPanel::Privacy);
+    let _panel = SettingsPanel::from_u8(panel_pos as u8).unwrap_or(SettingsPanel::Privacy);
 
-    avm_warn!(
-        activation,
-        "System.showSettings({:?}) not not implemented",
-        panel
-    );
+    avm1_stub!(activation, "System", "showSettings");
     Ok(Value::Undefined)
 }
 
 pub fn set_use_code_page<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -476,7 +472,7 @@ pub fn set_use_code_page<'gc>(
 }
 
 pub fn get_use_code_page<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -484,7 +480,7 @@ pub fn get_use_code_page<'gc>(
 }
 
 pub fn set_exact_settings<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -500,7 +496,7 @@ pub fn set_exact_settings<'gc>(
 }
 
 pub fn get_exact_settings<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -508,11 +504,11 @@ pub fn get_exact_settings<'gc>(
 }
 
 pub fn on_status<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm_warn!(activation, "System.onStatus() not implemented");
+    avm1_stub!(activation, "System", "onStatus");
     Ok(Value::Undefined)
 }
 

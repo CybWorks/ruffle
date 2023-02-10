@@ -3,7 +3,8 @@
 use crate::avm1::object::NativeObject;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Activation, ArrayObject, Error, Object, ScriptObject, TObject, Value};
-use crate::avm_warn;
+use crate::avm1_stub;
+use crate::display_object::{AutoSizeMode, EditText, TDisplayObject};
 use crate::ecma_conversions::round_to_even;
 use crate::html::TextFormat;
 use crate::string::{AvmString, WStr};
@@ -36,6 +37,17 @@ macro_rules! setter {
     };
 }
 
+macro_rules! method {
+    ($name:ident) => {
+        |activation, this, args| {
+            if let NativeObject::TextFormat(text_format) = this.native() {
+                return $name(activation, &text_format.read(), args);
+            }
+            Ok(Value::Undefined)
+        }
+    };
+}
+
 const PROTO_DECLS: &[Declaration] = declare_properties! {
     "font" => property(getter!(font), setter!(set_font));
     "size" => property(getter!(size), setter!(set_size));
@@ -56,16 +68,17 @@ const PROTO_DECLS: &[Declaration] = declare_properties! {
     "display" => property(getter!(display), setter!(set_display));
     "kerning" => property(getter!(kerning), setter!(set_kerning));
     "letterSpacing" => property(getter!(letter_spacing), setter!(set_letter_spacing));
+    "getTextExtent" => method(method!(get_text_extent); DONT_ENUM | DONT_DELETE);
 };
 
-fn font<'gc>(activation: &mut Activation<'_, 'gc, '_>, text_format: &TextFormat) -> Value<'gc> {
+fn font<'gc>(activation: &mut Activation<'_, 'gc>, text_format: &TextFormat) -> Value<'gc> {
     text_format.font.as_ref().map_or(Value::Null, |font| {
         AvmString::new(activation.context.gc_context, font.clone()).into()
     })
 }
 
 fn set_font<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     text_format: &mut TextFormat,
     value: &Value<'gc>,
 ) -> Result<(), Error<'gc>> {
@@ -76,7 +89,7 @@ fn set_font<'gc>(
     Ok(())
 }
 
-fn size<'gc>(_activation: &mut Activation<'_, 'gc, '_>, text_format: &TextFormat) -> Value<'gc> {
+fn size<'gc>(_activation: &mut Activation<'_, 'gc>, text_format: &TextFormat) -> Value<'gc> {
     text_format
         .size
         .as_ref()
@@ -84,7 +97,7 @@ fn size<'gc>(_activation: &mut Activation<'_, 'gc, '_>, text_format: &TextFormat
 }
 
 fn set_size<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     text_format: &mut TextFormat,
     value: &Value<'gc>,
 ) -> Result<(), Error<'gc>> {
@@ -95,7 +108,7 @@ fn set_size<'gc>(
     Ok(())
 }
 
-fn color<'gc>(_activation: &mut Activation<'_, 'gc, '_>, text_format: &TextFormat) -> Value<'gc> {
+fn color<'gc>(_activation: &mut Activation<'_, 'gc>, text_format: &TextFormat) -> Value<'gc> {
     text_format
         .color
         .as_ref()
@@ -103,7 +116,7 @@ fn color<'gc>(_activation: &mut Activation<'_, 'gc, '_>, text_format: &TextForma
 }
 
 fn set_color<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     text_format: &mut TextFormat,
     value: &Value<'gc>,
 ) -> Result<(), Error<'gc>> {
@@ -114,14 +127,14 @@ fn set_color<'gc>(
     Ok(())
 }
 
-fn url<'gc>(activation: &mut Activation<'_, 'gc, '_>, text_format: &TextFormat) -> Value<'gc> {
+fn url<'gc>(activation: &mut Activation<'_, 'gc>, text_format: &TextFormat) -> Value<'gc> {
     text_format.url.as_ref().map_or(Value::Null, |url| {
         AvmString::new(activation.context.gc_context, url.clone()).into()
     })
 }
 
 fn set_url<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     text_format: &mut TextFormat,
     value: &Value<'gc>,
 ) -> Result<(), Error<'gc>> {
@@ -132,14 +145,14 @@ fn set_url<'gc>(
     Ok(())
 }
 
-fn target<'gc>(activation: &mut Activation<'_, 'gc, '_>, text_format: &TextFormat) -> Value<'gc> {
+fn target<'gc>(activation: &mut Activation<'_, 'gc>, text_format: &TextFormat) -> Value<'gc> {
     text_format.target.as_ref().map_or(Value::Null, |target| {
         AvmString::new(activation.context.gc_context, target.clone()).into()
     })
 }
 
 fn set_target<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     text_format: &mut TextFormat,
     value: &Value<'gc>,
 ) -> Result<(), Error<'gc>> {
@@ -150,7 +163,7 @@ fn set_target<'gc>(
     Ok(())
 }
 
-fn bold<'gc>(_activation: &mut Activation<'_, 'gc, '_>, text_format: &TextFormat) -> Value<'gc> {
+fn bold<'gc>(_activation: &mut Activation<'_, 'gc>, text_format: &TextFormat) -> Value<'gc> {
     text_format
         .bold
         .as_ref()
@@ -158,7 +171,7 @@ fn bold<'gc>(_activation: &mut Activation<'_, 'gc, '_>, text_format: &TextFormat
 }
 
 fn set_bold<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     text_format: &mut TextFormat,
     value: &Value<'gc>,
 ) -> Result<(), Error<'gc>> {
@@ -169,7 +182,7 @@ fn set_bold<'gc>(
     Ok(())
 }
 
-fn italic<'gc>(_activation: &mut Activation<'_, 'gc, '_>, text_format: &TextFormat) -> Value<'gc> {
+fn italic<'gc>(_activation: &mut Activation<'_, 'gc>, text_format: &TextFormat) -> Value<'gc> {
     text_format
         .italic
         .as_ref()
@@ -177,7 +190,7 @@ fn italic<'gc>(_activation: &mut Activation<'_, 'gc, '_>, text_format: &TextForm
 }
 
 fn set_italic<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     text_format: &mut TextFormat,
     value: &Value<'gc>,
 ) -> Result<(), Error<'gc>> {
@@ -188,10 +201,7 @@ fn set_italic<'gc>(
     Ok(())
 }
 
-fn underline<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
-    text_format: &TextFormat,
-) -> Value<'gc> {
+fn underline<'gc>(_activation: &mut Activation<'_, 'gc>, text_format: &TextFormat) -> Value<'gc> {
     text_format
         .underline
         .as_ref()
@@ -199,7 +209,7 @@ fn underline<'gc>(
 }
 
 fn set_underline<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     text_format: &mut TextFormat,
     value: &Value<'gc>,
 ) -> Result<(), Error<'gc>> {
@@ -210,7 +220,7 @@ fn set_underline<'gc>(
     Ok(())
 }
 
-fn align<'gc>(_activation: &mut Activation<'_, 'gc, '_>, text_format: &TextFormat) -> Value<'gc> {
+fn align<'gc>(_activation: &mut Activation<'_, 'gc>, text_format: &TextFormat) -> Value<'gc> {
     text_format
         .align
         .as_ref()
@@ -223,7 +233,7 @@ fn align<'gc>(_activation: &mut Activation<'_, 'gc, '_>, text_format: &TextForma
 }
 
 fn set_align<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     text_format: &mut TextFormat,
     value: &Value<'gc>,
 ) -> Result<(), Error<'gc>> {
@@ -248,10 +258,7 @@ fn set_align<'gc>(
     Ok(())
 }
 
-fn left_margin<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
-    text_format: &TextFormat,
-) -> Value<'gc> {
+fn left_margin<'gc>(_activation: &mut Activation<'_, 'gc>, text_format: &TextFormat) -> Value<'gc> {
     text_format
         .left_margin
         .as_ref()
@@ -259,7 +266,7 @@ fn left_margin<'gc>(
 }
 
 fn set_left_margin<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     text_format: &mut TextFormat,
     value: &Value<'gc>,
 ) -> Result<(), Error<'gc>> {
@@ -271,7 +278,7 @@ fn set_left_margin<'gc>(
 }
 
 fn right_margin<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     text_format: &TextFormat,
 ) -> Value<'gc> {
     text_format
@@ -281,7 +288,7 @@ fn right_margin<'gc>(
 }
 
 fn set_right_margin<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     text_format: &mut TextFormat,
     value: &Value<'gc>,
 ) -> Result<(), Error<'gc>> {
@@ -292,7 +299,7 @@ fn set_right_margin<'gc>(
     Ok(())
 }
 
-fn indent<'gc>(_activation: &mut Activation<'_, 'gc, '_>, text_format: &TextFormat) -> Value<'gc> {
+fn indent<'gc>(_activation: &mut Activation<'_, 'gc>, text_format: &TextFormat) -> Value<'gc> {
     text_format
         .indent
         .as_ref()
@@ -300,7 +307,7 @@ fn indent<'gc>(_activation: &mut Activation<'_, 'gc, '_>, text_format: &TextForm
 }
 
 fn set_indent<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     text_format: &mut TextFormat,
     value: &Value<'gc>,
 ) -> Result<(), Error<'gc>> {
@@ -311,7 +318,7 @@ fn set_indent<'gc>(
     Ok(())
 }
 
-fn leading<'gc>(_activation: &mut Activation<'_, 'gc, '_>, text_format: &TextFormat) -> Value<'gc> {
+fn leading<'gc>(_activation: &mut Activation<'_, 'gc>, text_format: &TextFormat) -> Value<'gc> {
     text_format
         .leading
         .as_ref()
@@ -319,7 +326,7 @@ fn leading<'gc>(_activation: &mut Activation<'_, 'gc, '_>, text_format: &TextFor
 }
 
 fn set_leading<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     text_format: &mut TextFormat,
     value: &Value<'gc>,
 ) -> Result<(), Error<'gc>> {
@@ -331,7 +338,7 @@ fn set_leading<'gc>(
 }
 
 fn block_indent<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     text_format: &TextFormat,
 ) -> Value<'gc> {
     text_format
@@ -341,7 +348,7 @@ fn block_indent<'gc>(
 }
 
 fn set_block_indent<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     text_format: &mut TextFormat,
     value: &Value<'gc>,
 ) -> Result<(), Error<'gc>> {
@@ -352,10 +359,7 @@ fn set_block_indent<'gc>(
     Ok(())
 }
 
-fn tab_stops<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
-    text_format: &TextFormat,
-) -> Value<'gc> {
+fn tab_stops<'gc>(activation: &mut Activation<'_, 'gc>, text_format: &TextFormat) -> Value<'gc> {
     text_format
         .tab_stops
         .as_ref()
@@ -370,7 +374,7 @@ fn tab_stops<'gc>(
 }
 
 fn set_tab_stops<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     text_format: &mut TextFormat,
     value: &Value<'gc>,
 ) -> Result<(), Error<'gc>> {
@@ -390,7 +394,7 @@ fn set_tab_stops<'gc>(
     Ok(())
 }
 
-fn bullet<'gc>(_activation: &mut Activation<'_, 'gc, '_>, text_format: &TextFormat) -> Value<'gc> {
+fn bullet<'gc>(_activation: &mut Activation<'_, 'gc>, text_format: &TextFormat) -> Value<'gc> {
     text_format
         .bullet
         .as_ref()
@@ -398,7 +402,7 @@ fn bullet<'gc>(_activation: &mut Activation<'_, 'gc, '_>, text_format: &TextForm
 }
 
 fn set_bullet<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     text_format: &mut TextFormat,
     value: &Value<'gc>,
 ) -> Result<(), Error<'gc>> {
@@ -409,21 +413,21 @@ fn set_bullet<'gc>(
     Ok(())
 }
 
-fn display<'gc>(activation: &mut Activation<'_, 'gc, '_>, _text_format: &TextFormat) -> Value<'gc> {
-    avm_warn!(activation, "TextFormat.display: Unimplemented");
+fn display<'gc>(activation: &mut Activation<'_, 'gc>, _text_format: &TextFormat) -> Value<'gc> {
+    avm1_stub!(activation, "TextFormat", "display");
     Value::Null
 }
 
 fn set_display<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _text_format: &mut TextFormat,
     _value: &Value<'gc>,
 ) -> Result<(), Error<'gc>> {
-    avm_warn!(activation, "TextFormat.display: Unimplemented");
+    avm1_stub!(activation, "TextFormat", "display");
     Ok(())
 }
 
-fn kerning<'gc>(_activation: &mut Activation<'_, 'gc, '_>, text_format: &TextFormat) -> Value<'gc> {
+fn kerning<'gc>(_activation: &mut Activation<'_, 'gc>, text_format: &TextFormat) -> Value<'gc> {
     text_format
         .kerning
         .as_ref()
@@ -431,7 +435,7 @@ fn kerning<'gc>(_activation: &mut Activation<'_, 'gc, '_>, text_format: &TextFor
 }
 
 fn set_kerning<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     text_format: &mut TextFormat,
     value: &Value<'gc>,
 ) -> Result<(), Error<'gc>> {
@@ -443,7 +447,7 @@ fn set_kerning<'gc>(
 }
 
 fn letter_spacing<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     text_format: &TextFormat,
 ) -> Value<'gc> {
     text_format
@@ -453,7 +457,7 @@ fn letter_spacing<'gc>(
 }
 
 fn set_letter_spacing<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     text_format: &mut TextFormat,
     value: &Value<'gc>,
 ) -> Result<(), Error<'gc>> {
@@ -464,9 +468,75 @@ fn set_letter_spacing<'gc>(
     Ok(())
 }
 
+fn get_text_extent<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    text_format: &TextFormat,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let movie = activation.base_clip().movie();
+    let text = args
+        .get(0)
+        .cloned()
+        .unwrap_or(Value::Undefined)
+        .coerce_to_string(activation)?;
+    let width = args
+        .get(1)
+        .cloned()
+        .map(|v| v.coerce_to_f64(activation))
+        .transpose()?;
+
+    let temp_edittext = EditText::new(
+        &mut activation.context,
+        movie,
+        0.0,
+        0.0,
+        width.unwrap_or(0.0),
+        0.0,
+    );
+
+    temp_edittext.set_autosize(AutoSizeMode::Left, &mut activation.context);
+    temp_edittext.set_word_wrap(width.is_some(), &mut activation.context);
+    temp_edittext.set_new_text_format(text_format.clone(), &mut activation.context);
+    temp_edittext.set_text(&text, &mut activation.context);
+
+    let result = ScriptObject::new(activation.context.gc_context, None);
+    let metrics = temp_edittext
+        .layout_metrics(None)
+        .expect("All text boxes should have at least one line at all times");
+
+    result.set_data(
+        "ascent".into(),
+        metrics.ascent.to_pixels().into(),
+        activation,
+    )?;
+    result.set_data(
+        "descent".into(),
+        metrics.descent.to_pixels().into(),
+        activation,
+    )?;
+    result.set_data("width".into(), metrics.width.to_pixels().into(), activation)?;
+    result.set_data(
+        "height".into(),
+        metrics.height.to_pixels().into(),
+        activation,
+    )?;
+    result.set_data(
+        "textFieldHeight".into(),
+        temp_edittext.height().into(),
+        activation,
+    )?;
+    result.set_data(
+        "textFieldWidth".into(),
+        temp_edittext.width().into(),
+        activation,
+    )?;
+
+    Ok(result.into())
+}
+
 /// `TextFormat` constructor
 pub fn constructor<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {

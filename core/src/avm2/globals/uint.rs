@@ -1,7 +1,7 @@
 //! `uint` impl
 
 use crate::avm2::activation::Activation;
-use crate::avm2::class::Class;
+use crate::avm2::class::{Class, ClassAttributes};
 use crate::avm2::globals::number::{print_with_precision, print_with_radix};
 use crate::avm2::method::{Method, NativeMethodImpl, ParamConfig};
 use crate::avm2::object::{primitive_allocator, FunctionObject, Object, TObject};
@@ -14,7 +14,7 @@ use gc_arena::{GcCell, MutationContext};
 
 /// Implements `uint`'s instance initializer.
 fn instance_init<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -36,7 +36,7 @@ fn instance_init<'gc>(
 
 /// Implements `uint`'s native instance initializer.
 fn native_instance_init<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -49,7 +49,7 @@ fn native_instance_init<'gc>(
 
 /// Implements `uint`'s class initializer.
 fn class_init<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -131,7 +131,7 @@ fn class_init<'gc>(
 
 /// Implements `uint.toExponential`
 fn to_exponential<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -150,7 +150,7 @@ fn to_exponential<'gc>(
 
                 return Ok(AvmString::new_utf8(
                     activation.context.gc_context,
-                    format!("{0:.1$e}", number, digits)
+                    format!("{number:.digits$e}")
                         .replace('e', "e+")
                         .replace("e+-", "e-")
                         .replace("e+0", ""),
@@ -165,7 +165,7 @@ fn to_exponential<'gc>(
 
 /// Implements `uint.toFixed`
 fn to_fixed<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -196,7 +196,7 @@ fn to_fixed<'gc>(
 
 /// Implements `uint.toPrecision`
 fn to_precision<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -223,7 +223,7 @@ fn to_precision<'gc>(
 
 /// Implements `uint.toString`
 fn to_string<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -250,7 +250,7 @@ fn to_string<'gc>(
 
 /// Implements `uint.valueOf`
 fn value_of<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -274,6 +274,7 @@ pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>
     );
 
     let mut write = class.write(mc);
+    write.set_attributes(ClassAttributes::FINAL | ClassAttributes::SEALED);
     write.set_instance_allocator(primitive_allocator);
     write.set_native_instance_init(Method::from_builtin_and_params(
         native_instance_init,

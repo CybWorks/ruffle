@@ -1,9 +1,12 @@
 use crate::utils::BufferDimensions;
 use crate::Error;
-use ruffle_render::utils::unmultiply_alpha_rgba;
 use std::fmt::Debug;
+use std::sync::Arc;
+use tracing::instrument;
 
 pub trait RenderTargetFrame: Debug {
+    fn into_view(self) -> wgpu::TextureView;
+
     fn view(&self) -> &wgpu::TextureView;
 }
 
@@ -26,7 +29,7 @@ pub trait RenderTarget: Debug + 'static {
         queue: &wgpu::Queue,
         command_buffers: I,
         frame: Self::Frame,
-    );
+    ) -> wgpu::SubmissionIndex;
 }
 
 #[derive(Debug)]
@@ -42,6 +45,10 @@ pub struct SwapChainTargetFrame {
 }
 
 impl RenderTargetFrame for SwapChainTargetFrame {
+    fn into_view(self) -> wgpu::TextureView {
+        self.view
+    }
+
     fn view(&self) -> &wgpu::TextureView {
         &self.view
     }
@@ -58,8 +65,9 @@ impl SwapChainTarget {
         // blending are done in sRGB space -- we don't want the GPU to adjust the colors.
         // Some platforms may only support an sRGB surface, in which case we will draw to an
         // intermediate linear buffer and then copy to the sRGB surface.
-        let formats = surface.get_supported_formats(adapter);
-        let format = formats
+        let capabilities = surface.get_capabilities(adapter);
+        let format = capabilities
+            .formats
             .iter()
             .find(|format| {
                 matches!(
@@ -67,7 +75,7 @@ impl SwapChainTarget {
                     wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Bgra8Unorm
                 )
             })
-            .or_else(|| formats.first())
+            .or_else(|| capabilities.formats.first())
             .copied()
             // No surface (rendering to texture), default to linear RBGA.
             .unwrap_or(wgpu::TextureFormat::Rgba8Unorm);
@@ -78,7 +86,7 @@ impl SwapChainTarget {
             width,
             height,
             present_mode: wgpu::PresentMode::Fifo,
-            alpha_mode: surface.get_supported_alpha_modes(adapter)[0],
+            alpha_mode: capabilities.alpha_modes[0],
         };
         surface.configure(device, &surface_config);
         Self {
@@ -115,25 +123,26 @@ impl RenderTarget for SwapChainTarget {
         Ok(SwapChainTargetFrame { texture, view })
     }
 
+    #[instrument(level = "debug", skip_all)]
     fn submit<I: IntoIterator<Item = wgpu::CommandBuffer>>(
         &self,
         _device: &wgpu::Device,
         queue: &wgpu::Queue,
         command_buffers: I,
         frame: Self::Frame,
-    ) {
-        queue.submit(command_buffers);
+    ) -> wgpu::SubmissionIndex {
+        let index = queue.submit(command_buffers);
         frame.texture.present();
+        index
     }
 }
 
 #[derive(Debug)]
 pub struct TextureTarget {
     pub size: wgpu::Extent3d,
-    pub texture: wgpu::Texture,
+    pub texture: Arc<wgpu::Texture>,
     pub format: wgpu::TextureFormat,
-    pub buffer: wgpu::Buffer,
-    pub buffer_dimensions: BufferDimensions,
+    pub buffer: Option<(Arc<wgpu::Buffer>, BufferDimensions)>,
 }
 
 #[derive(Debug)]
@@ -142,6 +151,10 @@ pub struct TextureTargetFrame(wgpu::TextureView);
 impl RenderTargetFrame for TextureTargetFrame {
     fn view(&self) -> &wgpu::TextureView {
         &self.0
+    }
+
+    fn into_view(self) -> wgpu::TextureView {
+        self.0
     }
 }
 
@@ -175,6 +188,7 @@ impl TextureTarget {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
+            view_formats: &[format],
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         });
         let buffer_label = create_debug_label!("Render target buffer");
@@ -187,56 +201,10 @@ impl TextureTarget {
         });
         Ok(Self {
             size,
-            texture,
+            texture: Arc::new(texture),
             format,
-            buffer,
-            buffer_dimensions,
+            buffer: Some((Arc::new(buffer), buffer_dimensions)),
         })
-    }
-
-    /// Captures the current contents of our texture buffer
-    /// as an `RgbaImage`
-    pub fn capture(
-        &self,
-        device: &wgpu::Device,
-        premultiplied_alpha: bool,
-    ) -> Option<image::RgbaImage> {
-        let (sender, receiver) = std::sync::mpsc::channel();
-        let buffer_slice = self.buffer.slice(..);
-        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            sender.send(result).unwrap();
-        });
-        device.poll(wgpu::Maintain::Wait);
-        let result = receiver.recv().unwrap();
-        match result {
-            Ok(()) => {
-                let map = buffer_slice.get_mapped_range();
-                let mut buffer = Vec::with_capacity(
-                    self.buffer_dimensions.height * self.buffer_dimensions.unpadded_bytes_per_row,
-                );
-
-                for chunk in map.chunks(self.buffer_dimensions.padded_bytes_per_row.get() as usize)
-                {
-                    buffer
-                        .extend_from_slice(&chunk[..self.buffer_dimensions.unpadded_bytes_per_row]);
-                }
-
-                // The image copied from the GPU uses premultiplied alpha, so
-                // convert to straight alpha if requested by the user.
-                if !premultiplied_alpha {
-                    unmultiply_alpha_rgba(&mut buffer);
-                }
-
-                let image = image::RgbaImage::from_raw(self.size.width, self.size.height, buffer);
-                drop(map);
-                self.buffer.unmap();
-                image
-            }
-            Err(e) => {
-                log::error!("Unknown error reading capture buffer: {:?}", e);
-                None
-            }
-        }
     }
 }
 
@@ -266,34 +234,39 @@ impl RenderTarget for TextureTarget {
         ))
     }
 
+    #[instrument(level = "debug", skip_all)]
     fn submit<I: IntoIterator<Item = wgpu::CommandBuffer>>(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         command_buffers: I,
         _frame: Self::Frame,
-    ) {
-        let label = create_debug_label!("Render target transfer encoder");
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: label.as_deref(),
-        });
-        encoder.copy_texture_to_buffer(
-            wgpu::ImageCopyTexture {
-                texture: &self.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::ImageCopyBuffer {
-                buffer: &self.buffer,
-                layout: wgpu::ImageDataLayout {
-                    offset: 0,
-                    bytes_per_row: Some(self.buffer_dimensions.padded_bytes_per_row),
-                    rows_per_image: None,
+    ) -> wgpu::SubmissionIndex {
+        if let Some((buffer, dimensions)) = &self.buffer {
+            let label = create_debug_label!("Render target transfer encoder");
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: label.as_deref(),
+            });
+            encoder.copy_texture_to_buffer(
+                wgpu::ImageCopyTexture {
+                    texture: &self.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
                 },
-            },
-            self.size,
-        );
-        queue.submit(command_buffers.into_iter().chain(Some(encoder.finish())));
+                wgpu::ImageCopyBuffer {
+                    buffer,
+                    layout: wgpu::ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(dimensions.padded_bytes_per_row),
+                        rows_per_image: None,
+                    },
+                },
+                self.size,
+            );
+            queue.submit(command_buffers.into_iter().chain(Some(encoder.finish())))
+        } else {
+            queue.submit(command_buffers)
+        }
     }
 }

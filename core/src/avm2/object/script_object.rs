@@ -1,6 +1,7 @@
 //! Default AVM2 object impl
 
 use crate::avm2::activation::Activation;
+use crate::avm2::error;
 use crate::avm2::object::{ClassObject, FunctionObject, Object, ObjectPtr, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::vtable::VTable;
@@ -16,7 +17,7 @@ use std::fmt::Debug;
 /// A class instance allocator that allocates `ScriptObject`s.
 pub fn scriptobject_allocator<'gc>(
     class: ClassObject<'gc>,
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
 ) -> Result<Object<'gc>, Error<'gc>> {
     let base = ScriptObjectData::new(class);
 
@@ -33,7 +34,7 @@ pub struct ScriptObject<'gc>(GcCell<'gc, ScriptObjectData<'gc>>);
 /// Host implementations of `TObject` should embed `ScriptObjectData` and
 /// forward any trait method implementations it does not overwrite to this
 /// struct.
-#[derive(Clone, Collect, Debug)]
+#[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct ScriptObjectData<'gc> {
     /// Values stored on this object.
@@ -144,25 +145,24 @@ impl<'gc> ScriptObjectData<'gc> {
     pub fn get_property_local(
         &self,
         multiname: &Multiname<'gc>,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
         if !multiname.contains_public_namespace() {
-            return Err(format!(
-                "Non-public property {} not found on Object",
-                multiname.to_qualified_name(activation.context.gc_context)
-            )
-            .into());
+            return Err(error::make_reference_error(
+                activation,
+                error::ReferenceErrorCode::InvalidRead,
+                multiname,
+                self.instance_of(),
+            ));
         }
 
-        let local_name = match multiname.local_name() {
-            None => {
-                return Err(format!(
-                    "Unnamed property {} not found on Object",
-                    multiname.to_qualified_name(activation.context.gc_context)
-                )
-                .into())
-            }
-            Some(name) => name,
+        let Some(local_name) = multiname.local_name() else { // when can this happen?
+            return Err(error::make_reference_error(
+                activation,
+                error::ReferenceErrorCode::InvalidRead,
+                multiname,
+                self.instance_of(),
+            ));
         };
 
         let value = self.values.get(&local_name);
@@ -184,32 +184,13 @@ impl<'gc> ScriptObjectData<'gc> {
         // Special case: Unresolvable properties on dynamic classes are treated
         // as dynamic properties that have not yet been set, and yield
         // `undefined`
-        if self
-            .instance_of()
-            .map(|cls| cls.inner_class_definition().read().is_sealed())
-            .unwrap_or(false)
-        {
-            let class_name = self
-                .instance_of()
-                .map(|cls| {
-                    cls.inner_class_definition()
-                        .read()
-                        .name()
-                        .to_qualified_name_err_message(activation.context.gc_context)
-                })
-                .unwrap_or_else(|| AvmString::from("<UNKNOWN>"));
-
-            let message = AvmString::new_utf8(activation.context.gc_context, &format!(
-                "Error #1069: Property {local_name} not found on {class_name} and there is no default value.",
+        if self.is_sealed() {
+            return Err(error::make_reference_error(
+                activation,
+                error::ReferenceErrorCode::InvalidRead,
+                multiname,
+                self.instance_of(),
             ));
-            Err(Error::AvmError(
-                activation
-                    .avm2()
-                    .classes()
-                    .referenceerror
-                    .construct(activation, &[message.into(), 1069.into()])?
-                    .into(),
-            ))
         } else {
             Ok(Value::Undefined)
         }
@@ -219,39 +200,24 @@ impl<'gc> ScriptObjectData<'gc> {
         &mut self,
         multiname: &Multiname<'gc>,
         value: Value<'gc>,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<(), Error<'gc>> {
-        if self
-            .instance_of()
-            .map(|cls| cls.inner_class_definition().read().is_sealed())
-            .unwrap_or(false)
-        {
-            return Err(format!(
-                "Cannot set undefined property {} on {:?}",
-                multiname.to_qualified_name(activation.context.gc_context),
-                self.instance_of()
-                    .map(|cls| cls.inner_class_definition().read().name()),
-            )
-            .into());
+        if self.is_sealed() || !multiname.contains_public_namespace() {
+            return Err(error::make_reference_error(
+                activation,
+                error::ReferenceErrorCode::InvalidWrite,
+                multiname,
+                self.instance_of(),
+            ));
         }
 
-        if !multiname.contains_public_namespace() {
-            return Err(format!(
-                "Non-public property {} not found on Object",
-                multiname.to_qualified_name(activation.context.gc_context)
-            )
-            .into());
-        }
-
-        let local_name = match multiname.local_name() {
-            None => {
-                return Err(format!(
-                    "Unnamed property {} not found on Object",
-                    multiname.to_qualified_name(activation.context.gc_context)
-                )
-                .into())
-            }
-            Some(name) => name,
+        let Some(local_name) = multiname.local_name() else {
+            return Err(error::make_reference_error(
+                activation,
+                error::ReferenceErrorCode::InvalidWrite,
+                multiname,
+                self.instance_of(),
+            ));
         };
 
         match self.values.entry(local_name) {
@@ -271,7 +237,7 @@ impl<'gc> ScriptObjectData<'gc> {
         &mut self,
         multiname: &Multiname<'gc>,
         value: Value<'gc>,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<(), Error<'gc>> {
         self.set_property_local(multiname, value, activation)
     }
@@ -293,7 +259,7 @@ impl<'gc> ScriptObjectData<'gc> {
         self.slots
             .get(id as usize)
             .cloned()
-            .ok_or_else(|| format!("Slot index {} out of bounds!", id).into())
+            .ok_or_else(|| format!("Slot index {id} out of bounds!").into())
     }
 
     /// Set a slot by its index.
@@ -307,7 +273,7 @@ impl<'gc> ScriptObjectData<'gc> {
             *slot = value;
             Ok(())
         } else {
-            Err(format!("Slot index {} out of bounds!", id).into())
+            Err(format!("Slot index {id} out of bounds!").into())
         }
     }
 
@@ -322,7 +288,7 @@ impl<'gc> ScriptObjectData<'gc> {
             *slot = value;
             Ok(())
         } else {
-            Err(format!("Slot index {} out of bounds!", id).into())
+            Err(format!("Slot index {id} out of bounds!").into())
         }
     }
 
@@ -453,6 +419,12 @@ impl<'gc> ScriptObjectData<'gc> {
     /// Get the vtable for this object, if it has one.
     pub fn vtable(&self) -> Option<VTable<'gc>> {
         self.vtable
+    }
+
+    pub fn is_sealed(&self) -> bool {
+        self.instance_of()
+            .map(|cls| cls.inner_class_definition().read().is_sealed())
+            .unwrap_or(false)
     }
 
     /// Set the class object for this object.

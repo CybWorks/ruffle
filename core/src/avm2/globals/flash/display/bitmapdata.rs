@@ -3,12 +3,15 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::class::{Class, ClassAttributes};
 use crate::avm2::method::{Method, NativeMethodImpl};
-use crate::avm2::object::{bitmapdata_allocator, BitmapDataObject, Object, TObject};
+use crate::avm2::object::{
+    bitmapdata_allocator, BitmapDataObject, ByteArrayObject, Object, TObject,
+};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
 use crate::avm2::Multiname;
 use crate::avm2::Namespace;
 use crate::avm2::QName;
+use crate::avm2_stub_method;
 use crate::bitmap::bitmap_data::IBitmapDrawable;
 use crate::bitmap::bitmap_data::{BitmapData, ChannelOptions, Color};
 use crate::bitmap::is_size_valid;
@@ -16,6 +19,7 @@ use crate::character::Character;
 use crate::display_object::Bitmap;
 use crate::swf::BlendMode;
 use gc_arena::{GcCell, MutationContext};
+use ruffle_render::filters::{BlurFilter, ColorMatrixFilter, Filter};
 use ruffle_render::transform::Transform;
 use std::str::FromStr;
 
@@ -24,38 +28,23 @@ use std::str::FromStr;
 /// `bd` is assumed to be an uninstantiated library symbol, associated with the
 /// class named by `name`.
 pub fn fill_bitmap_data_from_symbol<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     bd: Bitmap<'gc>,
     new_bitmap_data: GcCell<'gc, BitmapData<'gc>>,
-    name: Option<QName<'gc>>,
 ) {
-    let bitmap_handle = bd.bitmap_handle();
-
-    if let Some(bitmap_handle) = bitmap_handle {
-        if let Some(bitmap_pixels) = activation.context.renderer.get_bitmap_pixels(bitmap_handle) {
-            let bitmap_pixels: Vec<i32> = bitmap_pixels.into();
-            new_bitmap_data
-                .write(activation.context.gc_context)
-                .set_pixels(
-                    bd.width().into(),
-                    bd.height().into(),
-                    true,
-                    bitmap_pixels.into_iter().map(|p| p.into()).collect(),
-                );
-        } else {
-            log::warn!(
-                "Could not read bitmap data associated with class {:?}",
-                name
-            );
-        }
-    } else {
-        log::error!("Failed to get bitmap handle for {:?}", bd);
-    }
+    new_bitmap_data
+        .write(activation.context.gc_context)
+        .set_pixels(
+            bd.width().into(),
+            bd.height().into(),
+            true,
+            bd.bitmap_data().read().pixels().to_vec(),
+        );
 }
 
 /// Implements `flash.display.BitmapData`'s instance constructor.
 pub fn instance_init<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -85,14 +74,14 @@ pub fn instance_init<'gc>(
             let new_bitmap_data =
                 GcCell::allocate(activation.context.gc_context, BitmapData::default());
 
-            if let Some(Character::Bitmap(bd)) = character {
+            if let Some(Character::Bitmap { bitmap }) = character {
                 // Instantiating BitmapData from an Animate-style bitmap asset
-                fill_bitmap_data_from_symbol(activation, bd, new_bitmap_data, name);
+                fill_bitmap_data_from_symbol(activation, bitmap, new_bitmap_data);
             } else {
                 if character.is_some() {
                     //TODO: Determine if mismatched symbols will still work as a
                     //regular BitmapData subclass, or if this should throw
-                    log::warn!(
+                    tracing::warn!(
                         "BitmapData subclass {:?} is associated with a non-bitmap symbol",
                         name
                     );
@@ -137,7 +126,7 @@ pub fn instance_init<'gc>(
 
 /// Implements `flash.display.BitmapData`'s class constructor.
 pub fn class_init<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -146,7 +135,7 @@ pub fn class_init<'gc>(
 
 /// Implements `BitmapData.width`'s getter.
 pub fn width<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -160,7 +149,7 @@ pub fn width<'gc>(
 
 /// Implements `BitmapData.height`'s getter.
 pub fn height<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -174,7 +163,7 @@ pub fn height<'gc>(
 
 /// Implements `BitmapData.transparent`'s getter.
 pub fn transparent<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -188,7 +177,7 @@ pub fn transparent<'gc>(
 
 /// Implements `BitmapData.scroll`.
 pub fn scroll<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -213,7 +202,7 @@ pub fn scroll<'gc>(
 
 /// Implements `BitmapData.copyPixels`.
 pub fn copy_pixels<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -331,9 +320,43 @@ pub fn copy_pixels<'gc>(
     Ok(Value::Undefined)
 }
 
+/// Implements `BitmapData.getPixels`.
+pub fn get_pixels<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Option<Object<'gc>>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    if let Some(bitmap_data) = this.and_then(|t| t.as_bitmap_data()) {
+        bitmap_data.read().check_valid(activation)?;
+        let rectangle = args
+            .get(0)
+            .unwrap_or(&Value::Undefined)
+            .coerce_to_object(activation)?;
+        let x = rectangle
+            .get_property(&Multiname::public("x"), activation)?
+            .coerce_to_i32(activation)?;
+        let y = rectangle
+            .get_property(&Multiname::public("y"), activation)?
+            .coerce_to_i32(activation)?;
+        let width = rectangle
+            .get_property(&Multiname::public("width"), activation)?
+            .coerce_to_i32(activation)?;
+        let height = rectangle
+            .get_property(&Multiname::public("height"), activation)?
+            .coerce_to_i32(activation)?;
+        let bytearray = ByteArrayObject::from_storage(
+            activation,
+            bitmap_data.read().get_pixels(x, y, width, height)?,
+        )?;
+        return Ok(bytearray.into());
+    }
+
+    Ok(Value::Undefined)
+}
+
 /// Implements `BitmapData.getPixel`.
 pub fn get_pixel<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -355,7 +378,7 @@ pub fn get_pixel<'gc>(
 
 /// Implements `BitmapData.getPixel32`.
 pub fn get_pixel32<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -377,7 +400,7 @@ pub fn get_pixel32<'gc>(
 
 /// Implements `BitmapData.setPixel`.
 pub fn set_pixel<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -404,7 +427,7 @@ pub fn set_pixel<'gc>(
 
 /// Implements `BitmapData.setPixel32`.
 pub fn set_pixel32<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -431,7 +454,7 @@ pub fn set_pixel32<'gc>(
 
 /// Implements `BitmapData.setPixels`.
 pub fn set_pixels<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -487,7 +510,7 @@ pub fn set_pixels<'gc>(
 
 /// Implements `BitmapData.copyChannel`.
 pub fn copy_channel<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -525,43 +548,42 @@ pub fn copy_channel<'gc>(
             .unwrap_or(&Value::Undefined)
             .coerce_to_i32(activation)?;
 
-        let mut bitmap_data_write = bitmap_data.write(activation.context.gc_context);
-        if !bitmap_data_write.disposed() {
-            if let Some(source_bitmap) = source_bitmap.as_bitmap_data() {
-                //TODO: what if source is disposed
-                let src_min_x = source_rect
-                    .get_property(&Multiname::public("x"), activation)?
-                    .coerce_to_u32(activation)?;
-                let src_min_y = source_rect
-                    .get_property(&Multiname::public("y"), activation)?
-                    .coerce_to_u32(activation)?;
-                let src_width = source_rect
-                    .get_property(&Multiname::public("width"), activation)?
-                    .coerce_to_u32(activation)?;
-                let src_height = source_rect
-                    .get_property(&Multiname::public("height"), activation)?
-                    .coerce_to_u32(activation)?;
-                let src_max_x = src_min_x + src_width;
-                let src_max_y = src_min_y + src_height;
+        if let Some(source_bitmap) = source_bitmap.as_bitmap_data() {
+            //TODO: what if source is disposed
+            let src_min_x = source_rect
+                .get_property(&Multiname::public("x"), activation)?
+                .coerce_to_u32(activation)?;
+            let src_min_y = source_rect
+                .get_property(&Multiname::public("y"), activation)?
+                .coerce_to_u32(activation)?;
+            let src_width = source_rect
+                .get_property(&Multiname::public("width"), activation)?
+                .coerce_to_u32(activation)?;
+            let src_height = source_rect
+                .get_property(&Multiname::public("height"), activation)?
+                .coerce_to_u32(activation)?;
+            let src_max_x = src_min_x + src_width;
+            let src_max_y = src_min_y + src_height;
 
-                if GcCell::ptr_eq(bitmap_data, source_bitmap) {
-                    let src_bitmap_data_clone = source_bitmap.read().clone();
-                    bitmap_data_write.copy_channel(
-                        (dest_x, dest_y),
-                        (src_min_x, src_min_y, src_max_x, src_max_y),
-                        &src_bitmap_data_clone,
-                        source_channel,
-                        dest_channel,
-                    );
-                } else {
-                    bitmap_data_write.copy_channel(
-                        (dest_x, dest_y),
-                        (src_min_x, src_min_y, src_max_x, src_max_y),
-                        &source_bitmap.read(),
-                        source_channel,
-                        dest_channel,
-                    );
-                }
+            if GcCell::ptr_eq(bitmap_data, source_bitmap) {
+                let src_bitmap_data_clone = source_bitmap.read().clone();
+                let mut bitmap_data_write = bitmap_data.write(activation.context.gc_context);
+                bitmap_data_write.copy_channel(
+                    (dest_x, dest_y),
+                    (src_min_x, src_min_y, src_max_x, src_max_y),
+                    &src_bitmap_data_clone,
+                    source_channel,
+                    dest_channel,
+                );
+            } else {
+                let mut bitmap_data_write = bitmap_data.write(activation.context.gc_context);
+                bitmap_data_write.copy_channel(
+                    (dest_x, dest_y),
+                    (src_min_x, src_min_y, src_max_x, src_max_y),
+                    &source_bitmap.read(),
+                    source_channel,
+                    dest_channel,
+                );
             }
         }
     }
@@ -569,7 +591,7 @@ pub fn copy_channel<'gc>(
 }
 
 pub fn flood_fill<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -595,7 +617,7 @@ pub fn flood_fill<'gc>(
 }
 
 pub fn noise<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -627,7 +649,7 @@ pub fn noise<'gc>(
 }
 
 pub fn color_transform<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -670,7 +692,7 @@ pub fn color_transform<'gc>(
 }
 
 pub fn get_color_bounds_rect<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -700,21 +722,23 @@ pub fn get_color_bounds_rect<'gc>(
 }
 
 pub fn lock<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    log::warn!("BitmapData.lock - not yet implemented");
+    avm2_stub_method!(activation, "flash.display.BitmapData", "lock");
     Ok(Value::Undefined)
 }
 
 /// Implements `BitmapData.draw`
 pub fn draw<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(bitmap_data) = this.and_then(|this| this.as_bitmap_data()) {
+    if let Some(bitmap_data) = this.and_then(|this| this.as_bitmap_data_wrapper()) {
+        // Drawing onto a BitmapData doesn't use any of the CPU-side pixels
+        let bitmap_data = bitmap_data.overwrite_cpu_pixels(activation.context.gc_context);
         bitmap_data.read().check_valid(activation)?;
         let mut transform = Transform::default();
         let mut blend_mode = BlendMode::Normal;
@@ -741,13 +765,20 @@ pub fn draw<'gc>(
             if let Ok(mode) = BlendMode::from_str(&mode.coerce_to_string(activation)?.to_string()) {
                 blend_mode = mode;
             } else {
-                log::error!("Unknown blend mode {:?}", mode);
+                tracing::error!("Unknown blend mode {:?}", mode);
                 return Err("ArgumentError: Error #2008: Parameter blendMode must be one of the accepted values.".into());
             }
         }
 
-        if args.get(4).is_some() {
-            log::warn!("BitmapData.draw with clip rect - not implemented")
+        let mut clip_rect = None;
+
+        let clip_rect_val = args.get(4).unwrap_or(&Value::Null);
+        if !matches!(clip_rect_val, Value::Null) {
+            let clip_rect_obj = clip_rect_val.coerce_to_object(activation)?;
+            clip_rect = Some(super::displayobject::object_to_rectangle(
+                activation,
+                clip_rect_obj,
+            )?);
         }
 
         let mut bitmap_data = bitmap_data.write(activation.context.gc_context);
@@ -761,10 +792,10 @@ pub fn draw<'gc>(
 
         let source = if let Some(source_object) = source.as_display_object() {
             IBitmapDrawable::DisplayObject(source_object)
-        } else if let Some(source_bitmap) = source.as_bitmap_data() {
+        } else if let Some(source_bitmap) = source.as_bitmap_data_wrapper() {
             IBitmapDrawable::BitmapData(source_bitmap)
         } else {
-            return Err(format!("BitmapData.draw: unexpected source {:?}", source).into());
+            return Err(format!("BitmapData.draw: unexpected source {source:?}").into());
         };
 
         bitmap_data.draw(
@@ -772,6 +803,7 @@ pub fn draw<'gc>(
             transform,
             smoothing,
             blend_mode,
+            clip_rect,
             &mut activation.context,
         );
     }
@@ -780,7 +812,7 @@ pub fn draw<'gc>(
 
 /// Implement `BitmapData.fillRect`
 pub fn fill_rect<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -821,23 +853,21 @@ pub fn fill_rect<'gc>(
 
 /// Implements `BitmapData.dispose`
 pub fn dispose<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(bitmap_data) = this.and_then(|this| this.as_bitmap_data()) {
         // Don't check if we've already disposed this BitmapData - 'BitmapData.dispose()' can be called
         // multiple times
-        bitmap_data
-            .write(activation.context.gc_context)
-            .dispose(activation.context.renderer);
+        bitmap_data.write(activation.context.gc_context).dispose();
     }
     Ok(Value::Undefined)
 }
 
 /// Implement `BitmapData.rect`
 pub fn rect<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -858,17 +888,256 @@ pub fn rect<'gc>(
 
 /// Implement `BitmapData.applyFilter`
 pub fn apply_filter<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
+    activation: &mut Activation<'_, 'gc>,
+    this: Option<Object<'gc>>,
+    args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    log::warn!("BitmapData.applyFilter: Not yet implemented");
+    let args = if args.len() == 4 {
+        [
+            args.get(0).expect("Infallible"),
+            args.get(1).expect("Infallible"),
+            args.get(2).expect("Infallible"),
+            args.get(3).expect("Infallible"),
+        ]
+    } else {
+        return Err("ArgumentError: Error #1063: Argument count mismatch on flash.display::BitmapData/applyFilter(). Expected 4, got 0.".into());
+    };
+    if let Some(dest_bitmap) = this.and_then(|this| this.as_bitmap_data_wrapper()) {
+        let dest_bitmap_data = dest_bitmap.overwrite_cpu_pixels(activation.context.gc_context);
+        dest_bitmap_data.read().check_valid(activation)?;
+        let source_bitmap = args[0]
+            .as_object()
+            .and_then(|o| o.as_bitmap_data())
+            .ok_or_else(|| {
+                Error::from(format!("TypeError: Error #1034: Type Coercion failed: cannot convert {} to flash.display.BitmapData.", args[0].coerce_to_string(activation).unwrap_or_default()))
+            })?;
+        let source_handle = match source_bitmap
+            .write(activation.context.gc_context)
+            .bitmap_handle(activation.context.renderer)
+        {
+            Some(handle) => handle,
+            None => {
+                tracing::warn!("Ignoring BitmapData.apply_filter() with an undrawable source");
+                return Ok(Value::Undefined);
+            }
+        };
+        let source_rect = args[1]
+            .as_object()
+            .and_then(|o| super::displayobject::object_to_rectangle(activation, o).ok())
+            .ok_or_else(|| {
+                Error::from(format!("TypeError: Error #1034: Type Coercion failed: cannot convert {} to flash.geom.Rectangle.", args[1].coerce_to_string(activation).unwrap_or_default()))
+            })?;
+        let source_point = (
+            source_rect.x_min.to_pixels().floor() as u32,
+            source_rect.y_min.to_pixels().floor() as u32,
+        );
+        let source_size = (
+            source_rect.width().to_pixels().ceil() as u32,
+            source_rect.height().to_pixels().ceil() as u32,
+        );
+        let dest_point = args[2]
+            .as_object()
+            .ok_or_else(|| {
+                Error::from(format!("TypeError: Error #1034: Type Coercion failed: cannot convert {} to flash.geom.Point.", args[2].coerce_to_string(activation).unwrap_or_default()))
+            })?;
+        let dest_point = (
+            dest_point
+                .get_property(&Multiname::public("x"), activation)?
+                .coerce_to_u32(activation)?,
+            dest_point
+                .get_property(&Multiname::public("x"), activation)?
+                .coerce_to_u32(activation)?,
+        );
+        let filter = args[3]
+            .as_object()
+            .ok_or_else(|| {
+                Error::from(format!("TypeError: Error #1034: Type Coercion failed: cannot convert {} to flash.filters.BitmapFilter.", args[1].coerce_to_string(activation).unwrap_or_default()))
+            })?;
+
+        let bevel_filter = activation.resolve_class(&Multiname::new(
+            Namespace::package("flash.filters"),
+            "BevelFilter",
+        ))?;
+        let bitmap_filter = activation.resolve_class(&Multiname::new(
+            Namespace::package("flash.filters"),
+            "BitmapFilter",
+        ))?;
+        let blur_filter = activation.resolve_class(&Multiname::new(
+            Namespace::package("flash.filters"),
+            "BlurFilter",
+        ))?;
+        let color_matrix_filter = activation.resolve_class(&Multiname::new(
+            Namespace::package("flash.filters"),
+            "ColorMatrixFilter",
+        ))?;
+        let convolution_filter = activation.resolve_class(&Multiname::new(
+            Namespace::package("flash.filters"),
+            "ConvolutionFilter",
+        ))?;
+        let displacement_map_filter = activation.resolve_class(&Multiname::new(
+            Namespace::package("flash.filters"),
+            "DisplacementMapFilter",
+        ))?;
+        let drop_shadow_filter = activation.resolve_class(&Multiname::new(
+            Namespace::package("flash.filters"),
+            "DropShadowFilter",
+        ))?;
+        let glow_filter = activation.resolve_class(&Multiname::new(
+            Namespace::package("flash.filters"),
+            "GlowFilter",
+        ))?;
+        let gradient_bevel_filter = activation.resolve_class(&Multiname::new(
+            Namespace::package("flash.filters"),
+            "GradientBevelFilter",
+        ))?;
+        let gradient_glow_filter = activation.resolve_class(&Multiname::new(
+            Namespace::package("flash.filters"),
+            "GradientGlowFilter",
+        ))?;
+        // let shader_filter = activation.resolve_class(&Multiname::new(
+        //     Namespace::package("flash.filters"),
+        //     "ShaderFilter",
+        // ))?;
+        let filter = if filter.is_of_type(color_matrix_filter, activation) {
+            let mut matrix = [0.0; 20];
+            if let Some(object) = filter
+                .get_property(&Multiname::public("matrix"), activation)?
+                .as_object()
+            {
+                if let Some(array) = object.as_array_storage() {
+                    for i in 0..matrix.len().min(array.length()) {
+                        matrix[i] = array
+                            .get(i)
+                            .expect("Length was already checked at this point")
+                            .coerce_to_number(activation)?
+                            as f32;
+                    }
+                }
+            }
+            Filter::ColorMatrixFilter(ColorMatrixFilter { matrix })
+        } else if filter.is_of_type(blur_filter, activation) {
+            let blur_x = filter
+                .get_property(&Multiname::public("blurX"), activation)?
+                .coerce_to_number(activation)?;
+            let blur_y = filter
+                .get_property(&Multiname::public("blurY"), activation)?
+                .coerce_to_number(activation)?;
+            let quality = filter
+                .get_property(&Multiname::public("quality"), activation)?
+                .coerce_to_u32(activation)?;
+            Filter::BlurFilter(BlurFilter {
+                blur_x: blur_x as f32,
+                blur_y: blur_y as f32,
+                quality: quality.clamp(1, 15) as u8,
+            })
+        } else if filter.is_of_type(bevel_filter, activation) {
+            avm2_stub_method!(
+                activation,
+                "flash.display.BitmapData",
+                "applyFilter",
+                "with bevel filter"
+            );
+            Filter::default()
+        } else if filter.is_of_type(bitmap_filter, activation) {
+            avm2_stub_method!(
+                activation,
+                "flash.display.BitmapData",
+                "applyFilter",
+                "with bitmap filter"
+            );
+            Filter::default()
+        } else if filter.is_of_type(blur_filter, activation) {
+            avm2_stub_method!(
+                activation,
+                "flash.display.BitmapData",
+                "applyFilter",
+                "with blur filter"
+            );
+            Filter::default()
+        } else if filter.is_of_type(color_matrix_filter, activation) {
+            avm2_stub_method!(
+                activation,
+                "flash.display.BitmapData",
+                "applyFilter",
+                "with color matrix filter"
+            );
+            Filter::default()
+        } else if filter.is_of_type(convolution_filter, activation) {
+            avm2_stub_method!(
+                activation,
+                "flash.display.BitmapData",
+                "applyFilter",
+                "with convolution filter"
+            );
+            Filter::default()
+        } else if filter.is_of_type(displacement_map_filter, activation) {
+            avm2_stub_method!(
+                activation,
+                "flash.display.BitmapData",
+                "applyFilter",
+                "with displacement map filter"
+            );
+            Filter::default()
+        } else if filter.is_of_type(drop_shadow_filter, activation) {
+            avm2_stub_method!(
+                activation,
+                "flash.display.BitmapData",
+                "applyFilter",
+                "with drop shadow filter"
+            );
+            Filter::default()
+        } else if filter.is_of_type(glow_filter, activation) {
+            avm2_stub_method!(
+                activation,
+                "flash.display.BitmapData",
+                "applyFilter",
+                "with glow filter"
+            );
+            Filter::default()
+        } else if filter.is_of_type(gradient_bevel_filter, activation) {
+            avm2_stub_method!(
+                activation,
+                "flash.display.BitmapData",
+                "applyFilter",
+                "with gradient bevel filter"
+            );
+            Filter::default()
+        } else if filter.is_of_type(gradient_glow_filter, activation) {
+            avm2_stub_method!(
+                activation,
+                "flash.display.BitmapData",
+                "applyFilter",
+                "with gradient glow filter"
+            );
+            Filter::default()
+        // } else if filter.is_of_type(shader_filter, activation) {
+        //     avm2_stub_method!(
+        //         activation,
+        //         "flash.display.BitmapData",
+        //         "applyFilter",
+        //         "with shader filter"
+        //     );
+        //     Filter::default()
+        } else {
+            tracing::error!("BitmapData.applyFilter received unknown filter");
+            Filter::default()
+        };
+        let mut dest_bitmap_data = dest_bitmap_data.write(activation.context.gc_context);
+        dest_bitmap_data.apply_filter(
+            &mut activation.context,
+            source_handle,
+            source_point,
+            source_size,
+            dest_point,
+            filter,
+        )
+    }
     Ok(Value::Undefined)
 }
 
 /// Implement `BitmapData.clone`
 pub fn clone<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -897,7 +1166,7 @@ pub fn clone<'gc>(
 
 /// Implement `BitmapData.perlinNoise`
 pub fn perlin_noise<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -1008,6 +1277,7 @@ pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>
     write.define_public_builtin_instance_properties(mc, PUBLIC_INSTANCE_PROPERTIES);
 
     const PUBLIC_INSTANCE_METHODS: &[(&str, NativeMethodImpl)] = &[
+        ("getPixels", get_pixels),
         ("getPixel", get_pixel),
         ("getPixel32", get_pixel32),
         ("setPixel", set_pixel),

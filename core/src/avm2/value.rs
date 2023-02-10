@@ -1,6 +1,7 @@
 //! AVM2 values
 
 use crate::avm2::activation::Activation;
+use crate::avm2::error;
 use crate::avm2::globals::NS_VECTOR;
 use crate::avm2::object::{ClassObject, NamespaceObject, Object, PrimitiveObject, TObject};
 use crate::avm2::script::TranslationUnit;
@@ -510,7 +511,7 @@ pub fn abc_double<'gc>(
 pub fn abc_default_value<'gc>(
     translation_unit: TranslationUnit<'gc>,
     default: &AbcDefaultValue,
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
 ) -> Result<Value<'gc>, Error<'gc>> {
     match default {
         AbcDefaultValue::Int(i) => abc_int(translation_unit, *i).map(|v| v.into()),
@@ -543,7 +544,7 @@ impl<'gc> Value<'gc> {
             Value::Object(ns) => ns
                 .as_namespace()
                 .ok_or_else(|| "Expected Namespace, found Object".into()),
-            _ => Err(format!("Expected Namespace, found {:?}", self).into()),
+            _ => Err(format!("Expected Namespace, found {self:?}").into()),
         }
     }
 
@@ -562,11 +563,25 @@ impl<'gc> Value<'gc> {
             Value::Object(num) => match num.value_of(mc)? {
                 Value::Number(num) => Ok(num),
                 Value::Integer(num) => Ok(num as f64),
-                _ => Err(format!("Expected Number, int, or uint, found {:?}", self).into()),
+                _ => Err(format!("Expected Number, int, or uint, found {self:?}").into()),
             },
             Value::Number(num) => Ok(*num),
             Value::Integer(num) => Ok(*num as f64),
-            _ => Err(format!("Expected Number, int, or uint, found {:?}", self).into()),
+            _ => Err(format!("Expected Number, int, or uint, found {self:?}").into()),
+        }
+    }
+
+    /// Like `as_number`, but for `i32`
+    pub fn as_integer(&self, mc: MutationContext<'gc, '_>) -> Result<i32, Error<'gc>> {
+        match self {
+            Value::Object(num) => match num.value_of(mc)? {
+                Value::Number(num) => Ok(num as i32),
+                Value::Integer(num) => Ok(num),
+                _ => Err(format!("Expected Number, int, or uint, found {self:?}").into()),
+            },
+            Value::Number(num) => Ok(*num as i32),
+            Value::Integer(num) => Ok(*num),
+            _ => Err(format!("Expected Number, int, or uint, found {self:?}").into()),
         }
     }
 
@@ -609,7 +624,7 @@ impl<'gc> Value<'gc> {
     pub fn coerce_to_primitive(
         &self,
         hint: Option<Hint>,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
         let hint = hint.unwrap_or_else(|| match self {
             Value::Object(o) => o.default_hint(),
@@ -683,7 +698,7 @@ impl<'gc> Value<'gc> {
     /// ToNumber algorithm which appears to match AVM2.
     pub fn coerce_to_number(
         &self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<f64, Error<'gc>> {
         Ok(match self {
             Value::Undefined => f64::NAN,
@@ -709,10 +724,7 @@ impl<'gc> Value<'gc> {
     ///
     /// Numerical conversions occur according to ECMA-262 3rd Edition's
     /// ToUint32 algorithm which appears to match AVM2.
-    pub fn coerce_to_u32(
-        &self,
-        activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Result<u32, Error<'gc>> {
+    pub fn coerce_to_u32(&self, activation: &mut Activation<'_, 'gc>) -> Result<u32, Error<'gc>> {
         Ok(f64_to_wrapping_u32(self.coerce_to_number(activation)?))
     }
 
@@ -723,10 +735,7 @@ impl<'gc> Value<'gc> {
     ///
     /// Numerical conversions occur according to ECMA-262 3rd Edition's
     /// ToInt32 algorithm which appears to match AVM2.
-    pub fn coerce_to_i32(
-        &self,
-        activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Result<i32, Error<'gc>> {
+    pub fn coerce_to_i32(&self, activation: &mut Activation<'_, 'gc>) -> Result<i32, Error<'gc>> {
         Ok(f64_to_wrapping_i32(self.coerce_to_number(activation)?))
     }
 
@@ -761,7 +770,7 @@ impl<'gc> Value<'gc> {
     /// Animate CC 2020 significantly reduces them (towards zero).
     pub fn coerce_to_string<'a>(
         &'a self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<AvmString<'gc>, Error<'gc>> {
         Ok(match self {
             Value::Undefined => "undefined".into(),
@@ -813,11 +822,11 @@ impl<'gc> Value<'gc> {
     /// properties as part of the string.
     pub fn coerce_to_debug_string<'a>(
         &'a self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<AvmString<'gc>, Error<'gc>> {
         Ok(match self {
             Value::String(s) => {
-                AvmString::new_utf8(activation.context.gc_context, format!("\"{}\"", s))
+                AvmString::new_utf8(activation.context.gc_context, format!("\"{s}\""))
             }
             Value::Object(_) => self
                 .coerce_to_primitive(Some(Hint::String), activation)?
@@ -836,7 +845,7 @@ impl<'gc> Value<'gc> {
     /// them here, and this should change type to return `Object<'gc>`.
     pub fn coerce_to_object(
         &self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<Object<'gc>, Error<'gc>> {
         match self {
             Value::Undefined => return Err("TypeError: undefined is not an Object".into()),
@@ -848,27 +857,18 @@ impl<'gc> Value<'gc> {
         PrimitiveObject::from_primitive(*self, activation)
     }
 
-    /// Coerce the value to an object, and report an error relating to object
+    /// Coerce the value to an object, and throw a TypeError relating to object
     /// receivers being null or undefined otherwise.
-    ///
-    /// If the `name` parameter is provided, the error will indicate the object
-    /// property being interacted with.
-    pub fn coerce_to_receiver(
+    /// Note: The error may contain a non-spec info about the way in which it was to be used.
+    pub fn coerce_to_object_or_typeerror(
         &self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         name: Option<&Multiname<'gc>>,
     ) -> Result<Object<'gc>, Error<'gc>> {
-        self.coerce_to_object(activation).map_err(|_| {
-            if let Some(name) = name {
-                format!(
-                    "Cannot access property {} of null or undefined",
-                    name.to_qualified_name(activation.context.gc_context)
-                )
-                .into()
-            } else {
-                "Cannot access properties of null or undefined".into()
-            }
-        })
+        if matches!(self, Value::Null | Value::Undefined) {
+            return Err(error::make_null_or_undefined_error(activation, *self, name));
+        }
+        self.coerce_to_object(activation)
     }
 
     pub fn as_object(&self) -> Option<Object<'gc>> {
@@ -891,7 +891,7 @@ impl<'gc> Value<'gc> {
     /// in the error message, if provided.
     pub fn as_callable(
         &self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         name: Option<&Multiname<'gc>>,
         receiver: Option<Object<'gc>>,
     ) -> Result<Object<'gc>, Error<'gc>> {
@@ -935,7 +935,7 @@ impl<'gc> Value<'gc> {
     /// If the type is not coercible to the given type, an error is thrown.
     pub fn coerce_to_type(
         &self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         class: ClassObject<'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
         if Object::ptr_eq(class, activation.avm2().classes().int) {
@@ -986,7 +986,7 @@ impl<'gc> Value<'gc> {
 
         let name = class.inner_class_definition().read().name();
 
-        Err(format!("Cannot coerce {:?} to an {:?}", self, name).into())
+        Err(format!("Cannot coerce {self:?} to an {name:?}").into())
     }
 
     /// Determine if this value is any kind of number.
@@ -1031,7 +1031,7 @@ impl<'gc> Value<'gc> {
     /// `Number`.
     pub fn is_of_type(
         &self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         type_object: ClassObject<'gc>,
     ) -> bool {
         if Object::ptr_eq(type_object, activation.avm2().classes().number) {
@@ -1059,7 +1059,7 @@ impl<'gc> Value<'gc> {
     pub fn abstract_eq(
         &self,
         other: &Value<'gc>,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<bool, Error<'gc>> {
         match (self, other) {
             (Value::Undefined, Value::Undefined) => Ok(true),
@@ -1133,7 +1133,7 @@ impl<'gc> Value<'gc> {
     pub fn abstract_lt(
         &self,
         other: &Value<'gc>,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
     ) -> Result<Option<bool>, Error<'gc>> {
         let prim_self = self.coerce_to_primitive(Some(Hint::Number), activation)?;
         let prim_other = other.coerce_to_primitive(Some(Hint::Number), activation)?;

@@ -9,7 +9,7 @@ use crate::avm2::object::{
     ArrayObject, ByteArrayObject, ClassObject, FunctionObject, NamespaceObject, ScriptObject,
 };
 use crate::avm2::object::{Object, TObject};
-use crate::avm2::scope::{Scope, ScopeChain, ScopeStack};
+use crate::avm2::scope::{search_scope_stack, Scope, ScopeChain};
 use crate::avm2::script::Script;
 use crate::avm2::value::Value;
 use crate::avm2::Multiname;
@@ -63,14 +63,14 @@ impl<'gc> RegisterSet<'gc> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 enum FrameControl<'gc> {
     Continue,
     Return(Value<'gc>),
 }
 
 /// Represents a single activation of a given AVM2 function or keyframe.
-pub struct Activation<'a, 'gc: 'a, 'gc_context: 'a> {
+pub struct Activation<'a, 'gc: 'a> {
     /// The immutable value of `this`.
     #[allow(dead_code)]
     this: Option<Object<'gc>>,
@@ -99,9 +99,6 @@ pub struct Activation<'a, 'gc: 'a, 'gc_context: 'a> {
     /// executing. Functions that do not return instead return `Undefined`.
     #[allow(dead_code)]
     return_value: Option<Value<'gc>>,
-
-    /// The current scope stack.
-    scope_stack: ScopeStack<'gc>,
 
     /// This represents the outer scope of the method that is executing.
     ///
@@ -140,10 +137,22 @@ pub struct Activation<'a, 'gc: 'a, 'gc_context: 'a> {
     /// and we will not allocate a class for one.
     activation_class: Option<ClassObject<'gc>>,
 
-    pub context: UpdateContext<'a, 'gc, 'gc_context>,
+    /// The index where the stack frame starts.
+    stack_depth: usize,
+
+    /// The index where the scope frame starts.
+    scope_depth: usize,
+
+    /// Maximum size for the stack frame.
+    max_stack_size: usize,
+
+    /// Maximum size for the scope frame.
+    max_scope_size: usize,
+
+    pub context: UpdateContext<'a, 'gc>,
 }
 
-impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
+impl<'a, 'gc> Activation<'a, 'gc> {
     /// Construct an activation that does not represent any particular scope.
     ///
     /// This exists primarily for non-AVM2 related manipulations of the
@@ -152,7 +161,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     ///
     /// It is a logic error to attempt to run AVM2 code in a nothing
     /// `Activation`.
-    pub fn from_nothing(context: UpdateContext<'a, 'gc, 'gc_context>) -> Self {
+    pub fn from_nothing(context: UpdateContext<'a, 'gc>) -> Self {
         let local_registers = RegisterSet::new(0);
 
         Self {
@@ -162,11 +171,14 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             actions_since_timeout_check: 0,
             local_registers,
             return_value: None,
-            scope_stack: ScopeStack::new(),
             outer: ScopeChain::new(context.avm2.globals),
             caller_domain: context.avm2.globals,
             subclass_object: None,
             activation_class: None,
+            stack_depth: context.avm2.stack.len(),
+            scope_depth: context.avm2.scope_stack.len(),
+            max_stack_size: 0,
+            max_scope_size: 0,
             context,
         }
     }
@@ -174,18 +186,22 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     /// Construct an activation for the execution of a particular script's
     /// initializer method.
     pub fn from_script(
-        context: UpdateContext<'a, 'gc, 'gc_context>,
+        context: UpdateContext<'a, 'gc>,
         script: Script<'gc>,
     ) -> Result<Self, Error<'gc>> {
         let (method, global_object, domain) = script.init();
 
-        let num_locals = match method {
-            Method::Native { .. } => 0,
+        let (num_locals, max_stack, max_scope) = match method {
+            Method::Native { .. } => (0, 0, 0),
             Method::Bytecode(bytecode) => {
-                let body: Result<_, Error<'gc>> = bytecode.body().ok_or_else(|| {
-                    "Cannot execute non-native method (for script) without body".into()
-                });
-                body?.num_locals
+                let body = bytecode
+                    .body()
+                    .ok_or("Cannot execute non-native method (for script) without body")?;
+                (
+                    body.num_locals,
+                    body.max_stack,
+                    body.max_scope_depth - body.init_scope_depth,
+                )
             }
         };
         let mut local_registers = RegisterSet::new(num_locals + 1);
@@ -199,11 +215,14 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             actions_since_timeout_check: 0,
             local_registers,
             return_value: None,
-            scope_stack: ScopeStack::new(),
             outer: ScopeChain::new(domain),
             caller_domain: domain,
             subclass_object: None,
             activation_class: None,
+            stack_depth: context.avm2.stack.len(),
+            scope_depth: context.avm2.scope_stack.len(),
+            max_stack_size: max_stack as usize,
+            max_scope_size: max_scope as usize,
             context,
         })
     }
@@ -215,7 +234,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     ) -> Result<Option<Object<'gc>>, Error<'gc>> {
         let outer_scope = self.outer;
 
-        if let Some(obj) = self.scope_stack.find(name, outer_scope.is_empty())? {
+        if let Some(obj) = search_scope_stack(self.scope_frame(), name, outer_scope.is_empty())? {
             Ok(Some(obj))
         } else if let Some(obj) = outer_scope.find(name, self)? {
             Ok(Some(obj))
@@ -231,7 +250,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     ) -> Result<Option<Value<'gc>>, Error<'gc>> {
         let outer_scope = self.outer;
 
-        if let Some(obj) = self.scope_stack.find(name, outer_scope.is_empty())? {
+        if let Some(obj) = search_scope_stack(self.scope_frame(), name, outer_scope.is_empty())? {
             Ok(Some(obj.get_property(name, self)?))
         } else if let Some(result) = outer_scope.resolve(name, self)? {
             Ok(Some(result))
@@ -246,7 +265,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         self.resolve_definition(name)?
             .and_then(|maybe| maybe.as_object())
             .and_then(|o| o.as_class_object())
-            .ok_or_else(|| format!("Attempted to resolve nonexistent type {:?}", name).into())
+            .ok_or_else(|| format!("Attempted to resolve nonexistent type {name:?}").into())
     }
 
     /// Resolve a type name to a class.
@@ -312,8 +331,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             return Ok(Value::Undefined);
         } else {
             return Err(format!(
-                "Param {} (index {}) was missing when calling {}",
-                param_config.param_name, index, method_name
+                "Param {} (index {index}) was missing when calling {method_name}",
+                param_config.param_name
             )
             .into());
         };
@@ -370,7 +389,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     /// Construct an activation for the execution of a particular bytecode
     /// method.
     pub fn from_method(
-        mut context: UpdateContext<'a, 'gc, 'gc_context>,
+        mut context: UpdateContext<'a, 'gc>,
         method: Gc<'gc, BytecodeMethod<'gc>>,
         outer: ScopeChain<'gc>,
         this: Option<Object<'gc>>,
@@ -431,11 +450,14 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             actions_since_timeout_check: 0,
             local_registers,
             return_value: None,
-            scope_stack: ScopeStack::new(),
             outer,
             caller_domain: outer.domain(),
             subclass_object,
             activation_class,
+            stack_depth: context.avm2.stack.len(),
+            scope_depth: context.avm2.scope_stack.len(),
+            max_stack_size: body.max_stack as usize,
+            max_scope_size: (body.max_scope_depth - body.init_scope_depth) as usize,
             context,
         };
 
@@ -458,7 +480,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
                 .flags
                 .contains(AbcMethodFlags::NEED_ARGUMENTS)
             {
-                ArrayStorage::from_args(&arguments_list)
+                // note: resolve_parameters ensures that arguments_list length is >= user_arguments
+                ArrayStorage::from_args(&arguments_list[..user_arguments.len()])
             } else if method.method().flags.contains(AbcMethodFlags::NEED_REST) {
                 if let Some(rest_args) = arguments_list.get(signature.len()..) {
                     ArrayStorage::from_args(rest_args)
@@ -499,7 +522,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     /// function to construct a new activation for the builtin so that it can
     /// properly supercall.
     pub fn from_builtin(
-        context: UpdateContext<'a, 'gc, 'gc_context>,
+        context: UpdateContext<'a, 'gc>,
         this: Option<Object<'gc>>,
         subclass_object: Option<ClassObject<'gc>>,
         outer: ScopeChain<'gc>,
@@ -514,11 +537,14 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             actions_since_timeout_check: 0,
             local_registers,
             return_value: None,
-            scope_stack: ScopeStack::new(),
             outer,
             caller_domain,
             subclass_object,
             activation_class: None,
+            stack_depth: context.avm2.stack.len(),
+            scope_depth: context.avm2.scope_stack.len(),
+            max_stack_size: 0,
+            max_scope_size: 0,
             context,
         })
     }
@@ -564,7 +590,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         self.local_registers
             .get(id)
             .cloned()
-            .ok_or_else(|| format!("Out of bounds register read: {}", id).into())
+            .ok_or_else(|| format!("Out of bounds register read: {id}").into())
     }
 
     /// Set a local register.
@@ -580,7 +606,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
             Ok(())
         } else {
-            Err(format!("Out of bounds register write: {}", id).into())
+            Err(format!("Out of bounds register write: {id}").into())
         }
     }
 
@@ -593,7 +619,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     /// activation's scope stack with the outer scope.
     pub fn create_scopechain(&self) -> ScopeChain<'gc> {
         self.outer
-            .chain(self.context.gc_context, self.scope_stack.scopes())
+            .chain(self.context.gc_context, self.scope_frame())
     }
 
     /// Returns the domain of the original AS3 caller.
@@ -613,7 +639,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let outer_scope = self.outer;
         outer_scope
             .get(0)
-            .or_else(|| self.scope_stack.get(0))
+            .or_else(|| self.scope_frame().first().copied())
             .map(|scope| scope.values())
     }
 
@@ -633,6 +659,63 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     /// this yields `None`.
     pub fn subclass_object(&self) -> Option<ClassObject<'gc>> {
         self.subclass_object
+    }
+
+    pub fn scope_frame(&self) -> &[Scope<'gc>] {
+        &self.context.avm2.scope_stack[self.scope_depth..]
+    }
+
+    /// Pushes a value onto the operand stack.
+    #[inline]
+    pub fn push_stack(&mut self, value: impl Into<Value<'gc>>) {
+        let stack_depth = self.stack_depth;
+        let max_stack_size = self.max_stack_size;
+        self.avm2().push(value.into(), stack_depth, max_stack_size)
+    }
+
+    /// Pops a value off the operand stack.
+    #[inline]
+    #[must_use]
+    pub fn pop_stack(&mut self) -> Value<'gc> {
+        let stack_depth = self.stack_depth;
+        self.avm2().pop(stack_depth)
+    }
+
+    /// Pops multiple values off the operand stack.
+    #[inline]
+    #[must_use]
+    pub fn pop_stack_args(&mut self, arg_count: u32) -> Vec<Value<'gc>> {
+        let stack_depth = self.stack_depth;
+        self.avm2().pop_args(arg_count, stack_depth)
+    }
+
+    /// Pushes a scope onto the scope stack.
+    #[inline]
+    pub fn push_scope(&mut self, scope: Scope<'gc>) {
+        let scope_depth = self.scope_depth;
+        let max_scope_size = self.max_scope_size;
+        self.avm2().push_scope(scope, scope_depth, max_scope_size)
+    }
+
+    /// Pops a scope off of the scope stack.
+    #[inline]
+    pub fn pop_scope(&mut self) -> Option<Scope<'gc>> {
+        let scope_depth = self.scope_depth;
+        self.avm2().pop_scope(scope_depth)
+    }
+
+    /// Clears the operand stack used by this activation.
+    #[inline]
+    pub fn clear_stack(&mut self) {
+        let stack_depth = self.stack_depth;
+        self.avm2().stack.truncate(stack_depth)
+    }
+
+    /// Clears the scope stack used by this activation.
+    #[inline]
+    pub fn clear_scope(&mut self) {
+        let scope_depth = self.scope_depth;
+        self.avm2().scope_stack.truncate(scope_depth)
     }
 
     /// Get the superclass of the class that defined the currently-executing
@@ -789,14 +872,18 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let body = body?;
         let mut reader = Reader::new(&body.code);
 
-        loop {
+        let val = loop {
             let result = self.do_next_opcode(method, &mut reader, &body.code);
             match result {
                 Ok(FrameControl::Return(value)) => break Ok(value),
                 Ok(FrameControl::Continue) => {}
                 Err(e) => break Err(e),
             }
-        }
+        };
+
+        self.clear_stack();
+        self.clear_scope();
+        val
     }
 
     /// If a local exception handler exists for the error, use it to handle
@@ -834,9 +921,10 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
                     }
 
                     if matches {
-                        self.context.avm2.push(error);
+                        self.clear_stack();
+                        self.push_stack(error);
 
-                        self.scope_stack.clear();
+                        self.clear_scope();
                         reader.seek_absolute(full_data, e.target_offset as usize);
                         return Ok(FrameControl::Continue);
                     }
@@ -844,9 +932,9 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             }
         }
 
-        log::error!("AVM2 error: {:?}", error);
+        tracing::error!("AVM2 error: {:?}", error);
         if let Some(err) = error.as_object().and_then(|obj| obj.as_error_object()) {
-            log::error!("{}", err.display_full(self)?);
+            tracing::error!("{}", err.display_full(self)?);
         }
         Err(Error::AvmError(error))
     }
@@ -872,7 +960,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let instruction_start = reader.pos(full_data);
         let op = reader.read_op();
         if let Ok(op) = op {
-            avm_debug!(self.avm2(), "Opcode: {:?}", op);
+            avm_debug!(self.avm2(), "Opcode: {op:?}");
 
             let result = match op {
                 Op::PushByte { value } => self.op_push_byte(value),
@@ -1064,7 +1152,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             }
             result
         } else if let Err(e) = op {
-            log::error!("Parse error: {:?}", e);
+            tracing::error!("Parse error: {:?}", e);
             Err(Error::RustError(Box::new(e)))
         } else {
             unreachable!();
@@ -1072,14 +1160,14 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn unknown_op(&mut self, op: swf::avm2::types::Op) -> Result<FrameControl<'gc>, Error<'gc>> {
-        log::error!("Unknown AVM2 opcode: {:?}", op);
+        tracing::error!("Unknown AVM2 opcode: {:?}", op);
         Err("Unknown op".into())
     }
 
     fn op_push_byte(&mut self, value: u8) -> Result<FrameControl<'gc>, Error<'gc>> {
         //TODO: Adobe Animate CC appears to generate signed byte values, and
         //JPEXS appears to take them.
-        self.context.avm2.push(value as i8 as i32);
+        self.push_stack(value as i8 as i32);
         Ok(FrameControl::Continue)
     }
 
@@ -1088,12 +1176,12 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         method: Gc<'gc, BytecodeMethod<'gc>>,
         value: Index<f64>,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        self.context.avm2.push(self.pool_double(method, value)?);
+        self.push_stack(self.pool_double(method, value)?);
         Ok(FrameControl::Continue)
     }
 
     fn op_push_false(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        self.context.avm2.push(false);
+        self.push_stack(false);
         Ok(FrameControl::Continue)
     }
 
@@ -1102,7 +1190,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         method: Gc<'gc, BytecodeMethod<'gc>>,
         value: Index<i32>,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        self.context.avm2.push(self.pool_int(method, value)?);
+        self.push_stack(self.pool_int(method, value)?);
         Ok(FrameControl::Continue)
     }
 
@@ -1114,22 +1202,22 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let ns = self.pool_namespace(method, value)?;
         let ns_object = NamespaceObject::from_namespace(self, ns)?;
 
-        self.context.avm2.push(ns_object);
+        self.push_stack(ns_object);
         Ok(FrameControl::Continue)
     }
 
     fn op_push_nan(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        self.context.avm2.push(f64::NAN);
+        self.push_stack(f64::NAN);
         Ok(FrameControl::Continue)
     }
 
     fn op_push_null(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        self.context.avm2.push(Value::Null);
+        self.push_stack(Value::Null);
         Ok(FrameControl::Continue)
     }
 
     fn op_push_short(&mut self, value: i16) -> Result<FrameControl<'gc>, Error<'gc>> {
-        self.context.avm2.push(value);
+        self.push_stack(value);
         Ok(FrameControl::Continue)
     }
 
@@ -1138,12 +1226,12 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         method: Gc<'gc, BytecodeMethod<'gc>>,
         value: Index<String>,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        self.context.avm2.push(self.pool_string(&method, value)?);
+        self.push_stack(self.pool_string(&method, value)?);
         Ok(FrameControl::Continue)
     }
 
     fn op_push_true(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        self.context.avm2.push(true);
+        self.push_stack(true);
         Ok(FrameControl::Continue)
     }
 
@@ -1152,23 +1240,23 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         method: Gc<'gc, BytecodeMethod<'gc>>,
         value: Index<u32>,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        self.context.avm2.push(self.pool_uint(method, value)?);
+        self.push_stack(self.pool_uint(method, value)?);
         Ok(FrameControl::Continue)
     }
 
     fn op_push_undefined(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        self.context.avm2.push(Value::Undefined);
+        self.push_stack(Value::Undefined);
         Ok(FrameControl::Continue)
     }
 
     fn op_pop(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        self.context.avm2.pop();
+        let _ = self.pop_stack();
 
         Ok(FrameControl::Continue)
     }
 
     fn op_dup(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        self.context.avm2.push(
+        self.push_stack(
             self.context
                 .avm2
                 .stack
@@ -1181,12 +1269,12 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn op_get_local(&mut self, register_index: u32) -> Result<FrameControl<'gc>, Error<'gc>> {
-        self.context.avm2.push(self.local_register(register_index)?);
+        self.push_stack(self.local_register(register_index)?);
         Ok(FrameControl::Continue)
     }
 
     fn op_set_local(&mut self, register_index: u32) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value = self.context.avm2.pop();
+        let value = self.pop_stack();
 
         self.set_local_register(register_index, value)?;
 
@@ -1200,12 +1288,12 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn op_call(&mut self, arg_count: u32) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let args = self.context.avm2.pop_args(arg_count);
-        let receiver = self.context.avm2.pop().as_object();
-        let function = self.context.avm2.pop().as_callable(self, None, receiver)?;
+        let args = self.pop_stack_args(arg_count);
+        let receiver = self.pop_stack().as_object();
+        let function = self.pop_stack().as_callable(self, None, receiver)?;
         let value = function.call(receiver, &args, self)?;
 
-        self.context.avm2.push(value);
+        self.push_stack(value);
 
         Ok(FrameControl::Continue)
     }
@@ -1226,12 +1314,12 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
         #[allow(unreachable_code)]
         {
-            let args = self.context.avm2.pop_args(arg_count);
-            let receiver = self.context.avm2.pop().as_callable(self, None, None)?;
+            let args = self.pop_stack_args(arg_count);
+            let receiver = self.pop_stack().as_callable(self, None, None)?;
 
             let value = receiver.call_method(index.0, &args, self)?;
 
-            self.context.avm2.push(value);
+            self.push_stack(value);
 
             Ok(FrameControl::Continue)
         }
@@ -1243,17 +1331,15 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         index: Index<AbcMultiname>,
         arg_count: u32,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let args = self.context.avm2.pop_args(arg_count);
+        let args = self.pop_stack_args(arg_count);
         let multiname = self.pool_multiname_and_initialize(method, index)?;
         let receiver = self
-            .context
-            .avm2
-            .pop()
-            .coerce_to_receiver(self, Some(&multiname))?;
+            .pop_stack()
+            .coerce_to_object_or_typeerror(self, Some(&multiname))?;
 
         let value = receiver.call_property(&multiname, &args, self)?;
 
-        self.context.avm2.push(value);
+        self.push_stack(value);
 
         Ok(FrameControl::Continue)
     }
@@ -1264,13 +1350,11 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         index: Index<AbcMultiname>,
         arg_count: u32,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let args = self.context.avm2.pop_args(arg_count);
+        let args = self.pop_stack_args(arg_count);
         let multiname = self.pool_multiname_and_initialize(method, index)?;
         let receiver = self
-            .context
-            .avm2
-            .pop()
-            .coerce_to_receiver(self, Some(&multiname))?;
+            .pop_stack()
+            .coerce_to_object_or_typeerror(self, Some(&multiname))?;
         let function = receiver.get_property(&multiname, self)?.as_callable(
             self,
             Some(&multiname),
@@ -1278,7 +1362,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         )?;
         let value = function.call(None, &args, self)?;
 
-        self.context.avm2.push(value);
+        self.push_stack(value);
 
         Ok(FrameControl::Continue)
     }
@@ -1289,13 +1373,11 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         index: Index<AbcMultiname>,
         arg_count: u32,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let args = self.context.avm2.pop_args(arg_count);
+        let args = self.pop_stack_args(arg_count);
         let multiname = self.pool_multiname_and_initialize(method, index)?;
         let receiver = self
-            .context
-            .avm2
-            .pop()
-            .coerce_to_receiver(self, Some(&multiname))?;
+            .pop_stack()
+            .coerce_to_object_or_typeerror(self, Some(&multiname))?;
 
         receiver.call_property(&multiname, &args, self)?;
 
@@ -1308,15 +1390,15 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         index: Index<AbcMethod>,
         arg_count: u32,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let args = self.context.avm2.pop_args(arg_count);
-        let receiver = self.context.avm2.pop().as_object();
+        let args = self.pop_stack_args(arg_count);
+        let receiver = self.pop_stack().as_object();
         let method = self.table_method(method, index, false)?;
         // TODO: What scope should the function be executed with?
         let scope = self.create_scopechain();
         let function = FunctionObject::from_method(self, method, scope, None, None);
         let value = function.call(receiver, &args, self)?;
 
-        self.context.avm2.push(value);
+        self.push_stack(value);
 
         Ok(FrameControl::Continue)
     }
@@ -1327,19 +1409,17 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         index: Index<AbcMultiname>,
         arg_count: u32,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let args = self.context.avm2.pop_args(arg_count);
+        let args = self.pop_stack_args(arg_count);
         let multiname = self.pool_multiname_and_initialize(method, index)?;
         let receiver = self
-            .context
-            .avm2
-            .pop()
-            .coerce_to_receiver(self, Some(&multiname))?;
+            .pop_stack()
+            .coerce_to_object_or_typeerror(self, Some(&multiname))?;
 
         let superclass_object = self.superclass_object(&multiname)?;
 
         let value = superclass_object.call_super(&multiname, receiver, &args, self)?;
 
-        self.context.avm2.push(value);
+        self.push_stack(value);
 
         Ok(FrameControl::Continue)
     }
@@ -1350,13 +1430,11 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         index: Index<AbcMultiname>,
         arg_count: u32,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let args = self.context.avm2.pop_args(arg_count);
+        let args = self.pop_stack_args(arg_count);
         let multiname = self.pool_multiname_and_initialize(method, index)?;
         let receiver = self
-            .context
-            .avm2
-            .pop()
-            .coerce_to_receiver(self, Some(&multiname))?;
+            .pop_stack()
+            .coerce_to_object_or_typeerror(self, Some(&multiname))?;
 
         let superclass_object = self.superclass_object(&multiname)?;
 
@@ -1366,7 +1444,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn op_return_value(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let return_value = self.context.avm2.pop();
+        let return_value = self.pop_stack();
 
         Ok(FrameControl::Return(return_value))
     }
@@ -1384,10 +1462,10 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
         // default path for static names
         if !multiname.has_lazy_component() {
-            let object = self.context.avm2.pop();
-            let object = object.coerce_to_receiver(self, Some(&multiname))?;
+            let object = self.pop_stack();
+            let object = object.coerce_to_object_or_typeerror(self, Some(&multiname))?;
             let value = object.get_property(&multiname, self)?;
-            self.context.avm2.push(value);
+            self.push_stack(value);
             return Ok(FrameControl::Continue);
         }
 
@@ -1400,12 +1478,12 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             let name_value = self.context.avm2.peek(0);
             let object = self.context.avm2.peek(1);
             if !name_value.is_primitive() {
-                let object = object.coerce_to_receiver(self, None)?;
+                let object = object.coerce_to_object_or_typeerror(self, None)?;
                 if let Some(dictionary) = object.as_dictionary_object() {
-                    let _ = self.context.avm2.pop();
-                    let _ = self.context.avm2.pop();
+                    let _ = self.pop_stack();
+                    let _ = self.pop_stack();
                     let value = dictionary.get_property_by_object(name_value.as_object().unwrap());
-                    self.context.avm2.push(value);
+                    self.push_stack(value);
 
                     return Ok(FrameControl::Continue);
                 }
@@ -1414,10 +1492,10 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
         // main path for dynamic names
         let multiname = multiname.fill_with_runtime_params(self)?;
-        let object = self.context.avm2.pop();
-        let object = object.coerce_to_receiver(self, Some(&multiname))?;
+        let object = self.pop_stack();
+        let object = object.coerce_to_object_or_typeerror(self, Some(&multiname))?;
         let value = object.get_property(&multiname, self)?;
-        self.context.avm2.push(value);
+        self.push_stack(value);
 
         Ok(FrameControl::Continue)
     }
@@ -1427,13 +1505,13 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         method: Gc<'gc, BytecodeMethod<'gc>>,
         index: Index<AbcMultiname>,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value = self.context.avm2.pop();
+        let value = self.pop_stack();
         let multiname = self.pool_maybe_uninitialized_multiname(method, index)?;
 
         // default path for static names
         if !multiname.has_lazy_component() {
-            let object = self.context.avm2.pop();
-            let mut object = object.coerce_to_receiver(self, Some(&multiname))?;
+            let object = self.pop_stack();
+            let mut object = object.coerce_to_object_or_typeerror(self, Some(&multiname))?;
             object.set_property(&multiname, value, self)?;
             return Ok(FrameControl::Continue);
         }
@@ -1447,10 +1525,10 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             let name_value = self.context.avm2.peek(0);
             let object = self.context.avm2.peek(1);
             if !name_value.is_primitive() {
-                let object = object.coerce_to_receiver(self, None)?;
+                let object = object.coerce_to_object_or_typeerror(self, None)?;
                 if let Some(dictionary) = object.as_dictionary_object() {
-                    let _ = self.context.avm2.pop();
-                    let _ = self.context.avm2.pop();
+                    let _ = self.pop_stack();
+                    let _ = self.pop_stack();
                     dictionary.set_property_by_object(
                         name_value.as_object().unwrap(),
                         value,
@@ -1464,8 +1542,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
         // main path for dynamic names
         let multiname = multiname.fill_with_runtime_params(self)?;
-        let object = self.context.avm2.pop();
-        let mut object = object.coerce_to_receiver(self, Some(&multiname))?;
+        let object = self.pop_stack();
+        let mut object = object.coerce_to_object_or_typeerror(self, Some(&multiname))?;
         object.set_property(&multiname, value, self)?;
 
         Ok(FrameControl::Continue)
@@ -1476,13 +1554,11 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         method: Gc<'gc, BytecodeMethod<'gc>>,
         index: Index<AbcMultiname>,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value = self.context.avm2.pop();
+        let value = self.pop_stack();
         let multiname = self.pool_multiname_and_initialize(method, index)?;
         let mut object = self
-            .context
-            .avm2
-            .pop()
-            .coerce_to_receiver(self, Some(&multiname))?;
+            .pop_stack()
+            .coerce_to_object_or_typeerror(self, Some(&multiname))?;
 
         object.init_property(&multiname, value, self)?;
 
@@ -1498,10 +1574,10 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
         // default path for static names
         if !multiname.has_lazy_component() {
-            let object = self.context.avm2.pop();
-            let object = object.coerce_to_receiver(self, Some(&multiname))?;
+            let object = self.pop_stack();
+            let object = object.coerce_to_object_or_typeerror(self, Some(&multiname))?;
             let did_delete = object.delete_property(self, &multiname)?;
-            self.context.avm2.push(did_delete);
+            self.push_stack(did_delete);
             return Ok(FrameControl::Continue);
         }
 
@@ -1514,16 +1590,16 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             let name_value = self.context.avm2.peek(0);
             let object = self.context.avm2.peek(1);
             if !name_value.is_primitive() {
-                let object = object.coerce_to_receiver(self, None)?;
+                let object = object.coerce_to_object_or_typeerror(self, None)?;
                 if let Some(dictionary) = object.as_dictionary_object() {
-                    let _ = self.context.avm2.pop();
-                    let _ = self.context.avm2.pop();
+                    let _ = self.pop_stack();
+                    let _ = self.pop_stack();
                     dictionary.delete_property_by_object(
                         name_value.as_object().unwrap(),
                         self.context.gc_context,
                     );
 
-                    self.context.avm2.push(true);
+                    self.push_stack(true);
                     return Ok(FrameControl::Continue);
                 }
             }
@@ -1531,11 +1607,11 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
         // main path for dynamic names
         let multiname = multiname.fill_with_runtime_params(self)?;
-        let object = self.context.avm2.pop();
-        let object = object.coerce_to_receiver(self, Some(&multiname))?;
+        let object = self.pop_stack();
+        let object = object.coerce_to_object_or_typeerror(self, Some(&multiname))?;
         let did_delete = object.delete_property(self, &multiname)?;
 
-        self.context.avm2.push(did_delete);
+        self.push_stack(did_delete);
 
         Ok(FrameControl::Continue)
     }
@@ -1547,16 +1623,14 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
         let multiname = self.pool_multiname_and_initialize(method, index)?;
         let object = self
-            .context
-            .avm2
-            .pop()
-            .coerce_to_receiver(self, Some(&multiname))?;
+            .pop_stack()
+            .coerce_to_object_or_typeerror(self, Some(&multiname))?;
 
         let superclass_object = self.superclass_object(&multiname)?;
 
         let value = superclass_object.get_super(&multiname, object, self)?;
 
-        self.context.avm2.push(value);
+        self.push_stack(value);
 
         Ok(FrameControl::Continue)
     }
@@ -1566,13 +1640,11 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         method: Gc<'gc, BytecodeMethod<'gc>>,
         index: Index<AbcMultiname>,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value = self.context.avm2.pop();
+        let value = self.pop_stack();
         let multiname = self.pool_multiname_and_initialize(method, index)?;
         let object = self
-            .context
-            .avm2
-            .pop()
-            .coerce_to_receiver(self, Some(&multiname))?;
+            .pop_stack()
+            .coerce_to_object_or_typeerror(self, Some(&multiname))?;
 
         let superclass_object = self.superclass_object(&multiname)?;
 
@@ -1582,15 +1654,13 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn op_in(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let obj = self.context.avm2.pop().coerce_to_object(self)?;
-        let name_value = self.context.avm2.pop();
+        let obj = self.pop_stack().coerce_to_object(self)?;
+        let name_value = self.pop_stack();
 
         if let Some(dictionary) = obj.as_dictionary_object() {
             if !name_value.is_primitive() {
                 let obj_key = name_value.as_object().unwrap();
-                self.context
-                    .avm2
-                    .push(dictionary.has_property_by_object(obj_key));
+                self.push_stack(dictionary.has_property_by_object(obj_key));
 
                 return Ok(FrameControl::Continue);
             }
@@ -1600,7 +1670,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let multiname = Multiname::public(name);
         let has_prop = obj.has_property_via_in(self, &multiname)?;
 
-        self.context.avm2.push(has_prop);
+        self.push_stack(has_prop);
 
         Ok(FrameControl::Continue)
     }
@@ -1619,28 +1689,28 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
                 self.context.gc_context,
             )?;
             let so = ScriptObject::catch_scope(self.context.gc_context, &qname);
-            self.context.avm2.push(so);
+            self.push_stack(so);
         }
 
         Ok(FrameControl::Continue)
     }
 
     fn op_push_scope(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let object = self.context.avm2.pop().coerce_to_object(self)?;
-        self.scope_stack.push(Scope::new(object));
+        let object = self.pop_stack().coerce_to_object(self)?;
+        self.push_scope(Scope::new(object));
 
         Ok(FrameControl::Continue)
     }
 
     fn op_push_with(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let object = self.context.avm2.pop().coerce_to_object(self)?;
-        self.scope_stack.push(Scope::new_with(object));
+        let object = self.pop_stack().coerce_to_object(self)?;
+        self.push_scope(Scope::new_with(object));
 
         Ok(FrameControl::Continue)
     }
 
     fn op_pop_scope(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        self.scope_stack.pop();
+        self.pop_scope();
 
         Ok(FrameControl::Continue)
     }
@@ -1649,28 +1719,28 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let scope = self.outer.get(index as usize);
 
         if let Some(scope) = scope {
-            self.context.avm2.push(scope.values());
+            self.push_stack(scope.values());
         } else {
-            self.context.avm2.push(Value::Undefined);
+            self.push_stack(Value::Undefined);
         };
 
         Ok(FrameControl::Continue)
     }
 
     fn op_get_scope_object(&mut self, index: u8) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let scope = self.scope_stack.get(index as usize);
+        let scope = self.scope_frame().get(index as usize).copied();
 
         if let Some(scope) = scope {
-            self.context.avm2.push(scope.values());
+            self.push_stack(scope.values());
         } else {
-            self.context.avm2.push(Value::Undefined);
+            self.push_stack(Value::Undefined);
         };
 
         Ok(FrameControl::Continue)
     }
 
     fn op_get_global_scope(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        self.context.avm2.push(
+        self.push_stack(
             self.global_scope()
                 .map(|gs| gs.into())
                 .unwrap_or(Value::Null),
@@ -1690,9 +1760,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             .find_definition(&multiname)?
             .or_else(|| self.global_scope());
 
-        self.context
-            .avm2
-            .push(result.map(|o| o.into()).unwrap_or(Value::Undefined));
+        self.push_stack(result.map(|o| o.into()).unwrap_or(Value::Undefined));
 
         Ok(FrameControl::Continue)
     }
@@ -1709,7 +1777,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             .ok_or_else(|| format!("Property does not exist: {:?}", *multiname).into());
         let result: Value<'gc> = found?.into();
 
-        self.context.avm2.push(result);
+        self.push_stack(result);
 
         Ok(FrameControl::Continue)
     }
@@ -1725,23 +1793,23 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             .resolve_definition(&multiname)?
             .ok_or_else(|| format!("Property does not exist: {:?}", *multiname).into());
 
-        self.context.avm2.push(found?);
+        self.push_stack(found?);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_get_slot(&mut self, index: u32) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let object = self.context.avm2.pop().coerce_to_receiver(self, None)?;
+        let object = self.pop_stack().coerce_to_object_or_typeerror(self, None)?;
         let value = object.get_slot(index)?;
 
-        self.context.avm2.push(value);
+        self.push_stack(value);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_set_slot(&mut self, index: u32) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value = self.context.avm2.pop();
-        let object = self.context.avm2.pop().coerce_to_receiver(self, None)?;
+        let value = self.pop_stack();
+        let object = self.pop_stack().coerce_to_object_or_typeerror(self, None)?;
 
         object.set_slot(index, value, self.context.gc_context)?;
 
@@ -1755,13 +1823,13 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             .transpose()?
             .unwrap_or(Value::Undefined);
 
-        self.context.avm2.push(value);
+        self.push_stack(value);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_set_global_slot(&mut self, index: u32) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value = self.context.avm2.pop();
+        let value = self.pop_stack();
 
         self.global_scope()
             .map(|global| global.set_slot(index, value, self.context.gc_context))
@@ -1771,12 +1839,12 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn op_construct(&mut self, arg_count: u32) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let args = self.context.avm2.pop_args(arg_count);
-        let ctor = self.context.avm2.pop().as_callable(self, None, None)?;
+        let args = self.pop_stack_args(arg_count);
+        let ctor = self.pop_stack().as_callable(self, None, None)?;
 
         let object = ctor.construct(self, &args)?;
 
-        self.context.avm2.push(object);
+        self.push_stack(object);
 
         Ok(FrameControl::Continue)
     }
@@ -1787,24 +1855,22 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         index: Index<AbcMultiname>,
         arg_count: u32,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let args = self.context.avm2.pop_args(arg_count);
+        let args = self.pop_stack_args(arg_count);
         let multiname = self.pool_multiname_and_initialize(method, index)?;
         let source = self
-            .context
-            .avm2
-            .pop()
-            .coerce_to_receiver(self, Some(&multiname))?;
+            .pop_stack()
+            .coerce_to_object_or_typeerror(self, Some(&multiname))?;
 
         let object = source.construct_prop(&multiname, &args, self)?;
 
-        self.context.avm2.push(object);
+        self.push_stack(object);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_construct_super(&mut self, arg_count: u32) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let args = self.context.avm2.pop_args(arg_count);
-        let receiver = self.context.avm2.pop().coerce_to_receiver(self, None)?;
+        let args = self.pop_stack_args(arg_count);
+        let receiver = self.pop_stack().coerce_to_object_or_typeerror(self, None)?;
 
         self.super_init(receiver, &args)?;
 
@@ -1819,7 +1885,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             ScriptObject::custom_object(self.context.gc_context, None, None)
         };
 
-        self.context.avm2.push(instance);
+        self.push_stack(instance);
 
         Ok(FrameControl::Continue)
     }
@@ -1828,8 +1894,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let mut object = self.context.avm2.classes().object.construct(self, &[])?;
 
         for _ in 0..num_args {
-            let value = self.context.avm2.pop();
-            let name = self.context.avm2.pop();
+            let value = self.pop_stack();
+            let name = self.pop_stack();
 
             object.set_property(
                 &Multiname::public(name.coerce_to_string(self)?),
@@ -1838,7 +1904,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             )?;
         }
 
-        self.context.avm2.push(object);
+        self.push_stack(object);
 
         Ok(FrameControl::Continue)
     }
@@ -1853,7 +1919,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
         let new_fn = FunctionObject::from_function(self, method_entry, scope)?;
 
-        self.context.avm2.push(new_fn);
+        self.push_stack(new_fn);
 
         Ok(FrameControl::Continue)
     }
@@ -1863,7 +1929,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         method: Gc<'gc, BytecodeMethod<'gc>>,
         index: Index<AbcClass>,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let base_value = self.context.avm2.pop();
+        let base_value = self.pop_stack();
         let base_class = match base_value {
             Value::Object(o) => match o.as_class_object() {
                 Some(cls) => Some(cls),
@@ -1877,17 +1943,15 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
         let new_class = ClassObject::from_class(self, class_entry, base_class)?;
 
-        self.context.avm2.push(new_class);
+        self.push_stack(new_class);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_apply_type(&mut self, num_types: u32) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let args = self.context.avm2.pop_args(num_types);
+        let args = self.pop_stack_args(num_types);
         let base = self
-            .context
-            .avm2
-            .pop()
+            .pop_stack()
             .as_object()
             .ok_or("Cannot specialize null or undefined")?;
 
@@ -1900,17 +1964,17 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         }
 
         let applied = base.apply(self, &args[..])?;
-        self.context.avm2.push(applied);
+        self.push_stack(applied);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_new_array(&mut self, num_args: u32) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let args = self.context.avm2.pop_args(num_args);
+        let args = self.pop_stack_args(num_args);
         let array = ArrayStorage::from_args(&args[..]);
         let array_obj = ArrayObject::from_storage(self, array)?;
 
-        self.context.avm2.push(array_obj);
+        self.push_stack(array_obj);
 
         Ok(FrameControl::Continue)
     }
@@ -1920,59 +1984,59 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn op_coerce_b(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value = self.context.avm2.pop().coerce_to_boolean();
+        let value = self.pop_stack().coerce_to_boolean();
 
-        self.context.avm2.push(value);
+        self.push_stack(value);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_coerce_d(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value = self.context.avm2.pop().coerce_to_number(self)?;
+        let value = self.pop_stack().coerce_to_number(self)?;
 
-        self.context.avm2.push(value);
+        self.push_stack(value);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_coerce_i(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value = self.context.avm2.pop().coerce_to_i32(self)?;
+        let value = self.pop_stack().coerce_to_i32(self)?;
 
-        self.context.avm2.push(value);
+        self.push_stack(value);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_coerce_o(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value = self.context.avm2.pop();
+        let value = self.pop_stack();
 
         let coerced = match value {
             Value::Undefined | Value::Null => Value::Null,
             _ => value.coerce_to_object(self)?.into(),
         };
 
-        self.context.avm2.push(coerced);
+        self.push_stack(coerced);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_coerce_s(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value = self.context.avm2.pop();
+        let value = self.pop_stack();
 
         let coerced = match value {
             Value::Undefined | Value::Null => Value::Null,
             _ => value.coerce_to_string(self)?.into(),
         };
 
-        self.context.avm2.push(coerced);
+        self.push_stack(coerced);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_coerce_u(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value = self.context.avm2.pop().coerce_to_u32(self)?;
+        let value = self.pop_stack().coerce_to_u32(self)?;
 
-        self.context.avm2.push(value);
+        self.push_stack(value);
 
         Ok(FrameControl::Continue)
     }
@@ -1991,13 +2055,11 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
     fn op_convert_o(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
         let value = self
-            .context
-            .avm2
-            .pop()
+            .pop_stack()
             .coerce_to_object(self)
             .map_err(|_| "Cannot convert null or undefined to object")?;
 
-        self.context.avm2.push(value);
+        self.push_stack(value);
 
         Ok(FrameControl::Continue)
     }
@@ -2007,9 +2069,9 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn op_convert_s(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value = self.context.avm2.pop().coerce_to_string(self)?;
+        let value = self.pop_stack().coerce_to_string(self)?;
 
-        self.context.avm2.push(value);
+        self.push_stack(value);
 
         Ok(FrameControl::Continue)
     }
@@ -2017,10 +2079,10 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     fn op_check_filter(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
         let xml = self.avm2().classes().xml;
         let xml_list = self.avm2().classes().xml_list;
-        let value = self.context.avm2.pop().coerce_to_object(self)?;
+        let value = self.pop_stack().coerce_to_object(self)?;
 
         if value.is_of_type(xml, self) || value.is_of_type(xml_list, self) {
-            self.context.avm2.push(value);
+            self.push_stack(value);
         } else {
             return Err(Error::AvmError(type_error(
                 self,
@@ -2035,8 +2097,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn op_add(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop();
-        let value1 = self.context.avm2.pop();
+        let value2 = self.pop_stack();
+        let value1 = self.pop_stack();
 
         // TODO: Special handling required for `Date` and ECMA-357/E4X `XML`
         let sum_value = match (value1, value2) {
@@ -2075,51 +2137,51 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             }
         };
 
-        self.context.avm2.push(sum_value);
+        self.push_stack(sum_value);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_add_i(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop().coerce_to_i32(self)?;
-        let value1 = self.context.avm2.pop().coerce_to_i32(self)?;
+        let value2 = self.pop_stack().coerce_to_i32(self)?;
+        let value1 = self.pop_stack().coerce_to_i32(self)?;
 
-        self.context.avm2.push(value1 + value2);
+        self.push_stack(value1 + value2);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_bitand(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop().coerce_to_i32(self)?;
-        let value1 = self.context.avm2.pop().coerce_to_i32(self)?;
+        let value2 = self.pop_stack().coerce_to_i32(self)?;
+        let value1 = self.pop_stack().coerce_to_i32(self)?;
 
-        self.context.avm2.push(value1 & value2);
+        self.push_stack(value1 & value2);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_bitnot(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value1 = self.context.avm2.pop().coerce_to_i32(self)?;
+        let value1 = self.pop_stack().coerce_to_i32(self)?;
 
-        self.context.avm2.push(!value1);
+        self.push_stack(!value1);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_bitor(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop().coerce_to_i32(self)?;
-        let value1 = self.context.avm2.pop().coerce_to_i32(self)?;
+        let value2 = self.pop_stack().coerce_to_i32(self)?;
+        let value1 = self.pop_stack().coerce_to_i32(self)?;
 
-        self.context.avm2.push(value1 | value2);
+        self.push_stack(value1 | value2);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_bitxor(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop().coerce_to_i32(self)?;
-        let value1 = self.context.avm2.pop().coerce_to_i32(self)?;
+        let value2 = self.pop_stack().coerce_to_i32(self)?;
+        let value1 = self.pop_stack().coerce_to_i32(self)?;
 
-        self.context.avm2.push(value1 ^ value2);
+        self.push_stack(value1 ^ value2);
 
         Ok(FrameControl::Continue)
     }
@@ -2141,26 +2203,26 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn op_decrement(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value = self.context.avm2.pop().coerce_to_number(self)?;
+        let value = self.pop_stack().coerce_to_number(self)?;
 
-        self.context.avm2.push(value - 1.0);
+        self.push_stack(value - 1.0);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_decrement_i(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value = self.context.avm2.pop().coerce_to_i32(self)?;
+        let value = self.pop_stack().coerce_to_i32(self)?;
 
-        self.context.avm2.push(value - 1);
+        self.push_stack(value - 1);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_divide(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop().coerce_to_number(self)?;
-        let value1 = self.context.avm2.pop().coerce_to_number(self)?;
+        let value2 = self.pop_stack().coerce_to_number(self)?;
+        let value1 = self.pop_stack().coerce_to_number(self)?;
 
-        self.context.avm2.push(value1 / value2);
+        self.push_stack(value1 / value2);
 
         Ok(FrameControl::Continue)
     }
@@ -2182,85 +2244,85 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn op_increment(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value = self.context.avm2.pop().coerce_to_number(self)?;
+        let value = self.pop_stack().coerce_to_number(self)?;
 
-        self.context.avm2.push(value + 1.0);
+        self.push_stack(value + 1.0);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_increment_i(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value = self.context.avm2.pop().coerce_to_i32(self)?;
+        let value = self.pop_stack().coerce_to_i32(self)?;
 
-        self.context.avm2.push(value + 1);
+        self.push_stack(value + 1);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_lshift(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop().coerce_to_u32(self)?;
-        let value1 = self.context.avm2.pop().coerce_to_i32(self)?;
+        let value2 = self.pop_stack().coerce_to_u32(self)?;
+        let value1 = self.pop_stack().coerce_to_i32(self)?;
 
-        self.context.avm2.push(value1 << (value2 & 0x1F));
+        self.push_stack(value1 << (value2 & 0x1F));
 
         Ok(FrameControl::Continue)
     }
 
     fn op_modulo(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop().coerce_to_number(self)?;
-        let value1 = self.context.avm2.pop().coerce_to_number(self)?;
+        let value2 = self.pop_stack().coerce_to_number(self)?;
+        let value1 = self.pop_stack().coerce_to_number(self)?;
 
-        self.context.avm2.push(value1 % value2);
+        self.push_stack(value1 % value2);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_multiply(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop().coerce_to_number(self)?;
-        let value1 = self.context.avm2.pop().coerce_to_number(self)?;
+        let value2 = self.pop_stack().coerce_to_number(self)?;
+        let value1 = self.pop_stack().coerce_to_number(self)?;
 
-        self.context.avm2.push(value1 * value2);
+        self.push_stack(value1 * value2);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_multiply_i(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop().coerce_to_i32(self)?;
-        let value1 = self.context.avm2.pop().coerce_to_i32(self)?;
+        let value2 = self.pop_stack().coerce_to_i32(self)?;
+        let value1 = self.pop_stack().coerce_to_i32(self)?;
 
-        self.context.avm2.push(value1 * value2);
+        self.push_stack(value1 * value2);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_negate(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value1 = self.context.avm2.pop().coerce_to_number(self)?;
+        let value1 = self.pop_stack().coerce_to_number(self)?;
 
-        self.context.avm2.push(-value1);
+        self.push_stack(-value1);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_negate_i(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value1 = self.context.avm2.pop().coerce_to_i32(self)?;
+        let value1 = self.pop_stack().coerce_to_i32(self)?;
 
-        self.context.avm2.push(-value1);
+        self.push_stack(-value1);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_rshift(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop().coerce_to_u32(self)?;
-        let value1 = self.context.avm2.pop().coerce_to_i32(self)?;
+        let value2 = self.pop_stack().coerce_to_u32(self)?;
+        let value1 = self.pop_stack().coerce_to_i32(self)?;
 
-        self.context.avm2.push(value1 >> (value2 & 0x1F));
+        self.push_stack(value1 >> (value2 & 0x1F));
 
         Ok(FrameControl::Continue)
     }
 
     fn op_subtract(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop();
-        let value1 = self.context.avm2.pop();
+        let value2 = self.pop_stack();
+        let value1 = self.pop_stack();
 
         let sub_value: Value<'gc> = match (value1, value2) {
             // note: with not-yet-guaranteed assumption that Integer < 1<<28, this won't underflow.
@@ -2273,35 +2335,35 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             }
         };
 
-        self.context.avm2.push(sub_value);
+        self.push_stack(sub_value);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_subtract_i(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop().coerce_to_i32(self)?;
-        let value1 = self.context.avm2.pop().coerce_to_i32(self)?;
+        let value2 = self.pop_stack().coerce_to_i32(self)?;
+        let value1 = self.pop_stack().coerce_to_i32(self)?;
 
-        self.context.avm2.push(value1 - value2);
+        self.push_stack(value1 - value2);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_swap(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop();
-        let value1 = self.context.avm2.pop();
+        let value2 = self.pop_stack();
+        let value1 = self.pop_stack();
 
-        self.context.avm2.push(value2);
-        self.context.avm2.push(value1);
+        self.push_stack(value2);
+        self.push_stack(value1);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_urshift(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop().coerce_to_u32(self)?;
-        let value1 = self.context.avm2.pop().coerce_to_u32(self)?;
+        let value2 = self.pop_stack().coerce_to_u32(self)?;
+        let value1 = self.pop_stack().coerce_to_u32(self)?;
 
-        self.context.avm2.push(value1 >> (value2 & 0x1F));
+        self.push_stack(value1 >> (value2 & 0x1F));
 
         Ok(FrameControl::Continue)
     }
@@ -2323,7 +2385,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         reader: &mut Reader<'b>,
         full_data: &'b [u8],
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value = self.context.avm2.pop().coerce_to_boolean();
+        let value = self.pop_stack().coerce_to_boolean();
 
         if value {
             reader.seek(full_data, offset);
@@ -2338,7 +2400,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         reader: &mut Reader<'b>,
         full_data: &'b [u8],
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value = self.context.avm2.pop().coerce_to_boolean();
+        let value = self.pop_stack().coerce_to_boolean();
 
         if !value {
             reader.seek(full_data, offset);
@@ -2353,8 +2415,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         reader: &mut Reader<'b>,
         full_data: &'b [u8],
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop();
-        let value1 = self.context.avm2.pop();
+        let value2 = self.pop_stack();
+        let value1 = self.pop_stack();
 
         if value1 == value2 {
             reader.seek(full_data, offset);
@@ -2369,8 +2431,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         reader: &mut Reader<'b>,
         full_data: &'b [u8],
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop();
-        let value1 = self.context.avm2.pop();
+        let value2 = self.pop_stack();
+        let value1 = self.pop_stack();
 
         if value1 != value2 {
             reader.seek(full_data, offset);
@@ -2385,8 +2447,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         reader: &mut Reader<'b>,
         full_data: &'b [u8],
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop();
-        let value1 = self.context.avm2.pop();
+        let value2 = self.pop_stack();
+        let value1 = self.pop_stack();
 
         if value1.abstract_eq(&value2, self)? {
             reader.seek(full_data, offset);
@@ -2401,8 +2463,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         reader: &mut Reader<'b>,
         full_data: &'b [u8],
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop();
-        let value1 = self.context.avm2.pop();
+        let value2 = self.pop_stack();
+        let value1 = self.pop_stack();
 
         if !value1.abstract_eq(&value2, self)? {
             reader.seek(full_data, offset);
@@ -2417,8 +2479,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         reader: &mut Reader<'b>,
         full_data: &'b [u8],
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop();
-        let value1 = self.context.avm2.pop();
+        let value2 = self.pop_stack();
+        let value1 = self.pop_stack();
 
         if value1.abstract_lt(&value2, self)? == Some(false) {
             reader.seek(full_data, offset);
@@ -2433,8 +2495,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         reader: &mut Reader<'b>,
         full_data: &'b [u8],
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop();
-        let value1 = self.context.avm2.pop();
+        let value2 = self.pop_stack();
+        let value1 = self.pop_stack();
 
         if value2.abstract_lt(&value1, self)? == Some(true) {
             reader.seek(full_data, offset);
@@ -2449,8 +2511,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         reader: &mut Reader<'b>,
         full_data: &'b [u8],
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop();
-        let value1 = self.context.avm2.pop();
+        let value2 = self.pop_stack();
+        let value1 = self.pop_stack();
 
         if value2.abstract_lt(&value1, self)? == Some(false) {
             reader.seek(full_data, offset);
@@ -2465,8 +2527,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         reader: &mut Reader<'b>,
         full_data: &'b [u8],
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop();
-        let value1 = self.context.avm2.pop();
+        let value2 = self.pop_stack();
+        let value1 = self.pop_stack();
 
         if value1.abstract_lt(&value2, self)? == Some(true) {
             reader.seek(full_data, offset);
@@ -2481,8 +2543,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         reader: &mut Reader<'b>,
         full_data: &'b [u8],
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop();
-        let value1 = self.context.avm2.pop();
+        let value2 = self.pop_stack();
+        let value1 = self.pop_stack();
 
         if value1.abstract_lt(&value2, self)?.unwrap_or(true) {
             reader.seek(full_data, offset);
@@ -2497,8 +2559,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         reader: &mut Reader<'b>,
         full_data: &'b [u8],
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop();
-        let value1 = self.context.avm2.pop();
+        let value2 = self.pop_stack();
+        let value1 = self.pop_stack();
 
         if !value2.abstract_lt(&value1, self)?.unwrap_or(false) {
             reader.seek(full_data, offset);
@@ -2513,8 +2575,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         reader: &mut Reader<'b>,
         full_data: &'b [u8],
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop();
-        let value1 = self.context.avm2.pop();
+        let value2 = self.pop_stack();
+        let value1 = self.pop_stack();
 
         if value2.abstract_lt(&value1, self)?.unwrap_or(true) {
             reader.seek(full_data, offset);
@@ -2529,8 +2591,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         reader: &mut Reader<'b>,
         full_data: &'b [u8],
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop();
-        let value1 = self.context.avm2.pop();
+        let value2 = self.pop_stack();
+        let value1 = self.pop_stack();
 
         if !value1.abstract_lt(&value2, self)?.unwrap_or(false) {
             reader.seek(full_data, offset);
@@ -2540,65 +2602,65 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn op_strict_equals(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop();
-        let value1 = self.context.avm2.pop();
+        let value2 = self.pop_stack();
+        let value1 = self.pop_stack();
 
-        self.context.avm2.push(value1 == value2);
+        self.push_stack(value1 == value2);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_equals(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop();
-        let value1 = self.context.avm2.pop();
+        let value2 = self.pop_stack();
+        let value1 = self.pop_stack();
 
         let result = value1.abstract_eq(&value2, self)?;
 
-        self.context.avm2.push(result);
+        self.push_stack(result);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_greater_equals(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop();
-        let value1 = self.context.avm2.pop();
+        let value2 = self.pop_stack();
+        let value1 = self.pop_stack();
 
         let result = !value1.abstract_lt(&value2, self)?.unwrap_or(true);
 
-        self.context.avm2.push(result);
+        self.push_stack(result);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_greater_than(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop();
-        let value1 = self.context.avm2.pop();
+        let value2 = self.pop_stack();
+        let value1 = self.pop_stack();
 
         let result = value2.abstract_lt(&value1, self)?.unwrap_or(false);
 
-        self.context.avm2.push(result);
+        self.push_stack(result);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_less_equals(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop();
-        let value1 = self.context.avm2.pop();
+        let value2 = self.pop_stack();
+        let value1 = self.pop_stack();
 
         let result = !value2.abstract_lt(&value1, self)?.unwrap_or(true);
 
-        self.context.avm2.push(result);
+        self.push_stack(result);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_less_than(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value2 = self.context.avm2.pop();
-        let value1 = self.context.avm2.pop();
+        let value2 = self.pop_stack();
+        let value1 = self.pop_stack();
 
         let result = value1.abstract_lt(&value2, self)?.unwrap_or(false);
 
-        self.context.avm2.push(result);
+        self.push_stack(result);
 
         Ok(FrameControl::Continue)
     }
@@ -2608,31 +2670,30 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn op_not(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value = self.context.avm2.pop().coerce_to_boolean();
+        let value = self.pop_stack().coerce_to_boolean();
 
-        self.context.avm2.push(!value);
+        self.push_stack(!value);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_has_next(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let cur_index = self.context.avm2.pop().coerce_to_u32(self)?;
+        let cur_index = self.pop_stack().coerce_to_u32(self)?;
 
-        let object = self.context.avm2.pop();
+        let object = self.pop_stack();
         if matches!(object, Value::Undefined | Value::Null) {
-            self.context.avm2.push(0.0);
+            self.push_stack(0.0);
         } else {
             let object = object.coerce_to_object(self)?;
             if let Some(next_index) = object.get_next_enumerant(cur_index, self)? {
-                self.context.avm2.push(next_index);
+                self.push_stack(next_index);
             } else {
-                self.context.avm2.push(0.0);
+                self.push_stack(0.0);
             }
         }
 
         Ok(FrameControl::Continue)
     }
-
     fn op_has_next_2(
         &mut self,
         object_register: u32,
@@ -2662,7 +2723,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             cur_index = 0;
         }
 
-        self.context.avm2.push(cur_index != 0);
+        self.push_stack(cur_index != 0);
         self.set_local_register(index_register, cur_index)?;
         self.set_local_register(
             object_register,
@@ -2673,23 +2734,23 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn op_next_name(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let cur_index = self.context.avm2.pop().coerce_to_number(self)?;
-        let object = self.context.avm2.pop().coerce_to_receiver(self, None)?;
+        let cur_index = self.pop_stack().coerce_to_number(self)?;
+        let object = self.pop_stack().coerce_to_object_or_typeerror(self, None)?;
 
         let name = object.get_enumerant_name(cur_index as u32, self)?;
 
-        self.context.avm2.push(name);
+        self.push_stack(name);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_next_value(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let cur_index = self.context.avm2.pop().coerce_to_number(self)?;
-        let object = self.context.avm2.pop().coerce_to_receiver(self, None)?;
+        let cur_index = self.pop_stack().coerce_to_number(self)?;
+        let object = self.pop_stack().coerce_to_object_or_typeerror(self, None)?;
 
         let value = object.get_enumerant_value(cur_index as u32, self)?;
 
-        self.context.avm2.push(value);
+        self.push_stack(value);
 
         Ok(FrameControl::Continue)
     }
@@ -2699,29 +2760,27 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         method: Gc<'gc, BytecodeMethod<'gc>>,
         type_name_index: Index<AbcMultiname>,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value = self.context.avm2.pop();
+        let value = self.pop_stack();
 
         let multiname = self.pool_multiname_static(method, type_name_index)?;
         let type_object = self.resolve_class(&multiname)?;
 
         let is_instance_of = value.is_of_type(self, type_object);
-        self.context.avm2.push(is_instance_of);
+        self.push_stack(is_instance_of);
 
         Ok(FrameControl::Continue)
     }
 
     fn op_is_type_late(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
         let type_object = self
-            .context
-            .avm2
-            .pop()
+            .pop_stack()
             .as_object()
             .and_then(|o| o.as_class_object())
             .ok_or("Cannot check if value is of a type that is null, undefined, or not a class")?;
-        let value = self.context.avm2.pop();
+        let value = self.pop_stack();
 
         let is_instance_of = value.is_of_type(self, type_object);
-        self.context.avm2.push(is_instance_of);
+        self.push_stack(is_instance_of);
 
         Ok(FrameControl::Continue)
     }
@@ -2731,15 +2790,15 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         method: Gc<'gc, BytecodeMethod<'gc>>,
         type_name_index: Index<AbcMultiname>,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value = self.context.avm2.pop();
+        let value = self.pop_stack();
 
         let multiname = self.pool_multiname_static(method, type_name_index)?;
         let class = self.resolve_class(&multiname)?;
 
         if value.is_of_type(self, class) {
-            self.context.avm2.push(value);
+            self.push_stack(value);
         } else {
-            self.context.avm2.push(Value::Null);
+            self.push_stack(Value::Null);
         }
 
         Ok(FrameControl::Continue)
@@ -2747,43 +2806,41 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
     fn op_as_type_late(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
         let class = self
-            .context
-            .avm2
-            .pop()
+            .pop_stack()
             .as_object()
             .and_then(|c| c.as_class_object())
             .ok_or("Cannot coerce a value to a type that is null, undefined, or not a class")?;
-        let value = self.context.avm2.pop();
+        let value = self.pop_stack();
 
         if value.is_of_type(self, class) {
-            self.context.avm2.push(value);
+            self.push_stack(value);
         } else {
-            self.context.avm2.push(Value::Null);
+            self.push_stack(Value::Null);
         }
 
         Ok(FrameControl::Continue)
     }
 
     fn op_instance_of(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let type_object =
-            self.context.avm2.pop().as_object().ok_or(
-                "Cannot check if value is of a type that is null, undefined, or not a class",
-            )?;
-        let value = self.context.avm2.pop().coerce_to_object(self).ok();
+        let type_object = self
+            .pop_stack()
+            .as_object()
+            .ok_or("Cannot check if value is of a type that is null, undefined, or not a class")?;
+        let value = self.pop_stack().coerce_to_object(self).ok();
 
         if let Some(value) = value {
             let is_instance_of = value.is_instance_of(self, type_object)?;
 
-            self.context.avm2.push(is_instance_of);
+            self.push_stack(is_instance_of);
         } else {
-            self.context.avm2.push(false);
+            self.push_stack(false);
         }
 
         Ok(FrameControl::Continue)
     }
 
     fn op_type_of(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let value = self.context.avm2.pop();
+        let value = self.pop_stack();
 
         let type_name = match value {
             Value::Undefined => "undefined",
@@ -2818,14 +2875,14 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             Value::String(_) => "string",
         };
 
-        self.context.avm2.push(Value::String(type_name.into()));
+        self.push_stack(Value::String(type_name.into()));
 
         Ok(FrameControl::Continue)
     }
 
     /// Implements `Op::EscXAttr`
     fn op_esc_xattr(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let s = self.context.avm2.pop().coerce_to_string(self)?;
+        let s = self.pop_stack().coerce_to_string(self)?;
 
         // Implementation of `EscapeAttributeValue` from ECMA-357(10.2.1.2)
         let mut r = WString::with_capacity(s.len(), s.is_wide());
@@ -2845,16 +2902,14 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
             r.push_str(WStr::from_units(escape));
         }
-        self.context
-            .avm2
-            .push(AvmString::new(self.context.gc_context, r));
+        self.push_stack(AvmString::new(self.context.gc_context, r));
 
         Ok(FrameControl::Continue)
     }
 
     /// Implements `Op::EscXElem`
     fn op_esc_elem(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let s = self.context.avm2.pop().coerce_to_string(self)?;
+        let s = self.pop_stack().coerce_to_string(self)?;
 
         // contrary to the avmplus documentation, this escapes the value on the top of the stack using EscapeElementValue from ECMA-357 *NOT* EscapeAttributeValue.
         // Implementation of `EscapeElementValue` from ECMA-357(10.2.1.1)
@@ -2872,9 +2927,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
             r.push_str(WStr::from_units(escape));
         }
-        self.context
-            .avm2
-            .push(AvmString::new(self.context.gc_context, r));
+        self.push_stack(AvmString::new(self.context.gc_context, r));
 
         Ok(FrameControl::Continue)
     }
@@ -2888,7 +2941,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         reader: &mut Reader<'b>,
         full_data: &'b [u8],
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let index = self.context.avm2.pop().coerce_to_i32(self)?;
+        let index = self.pop_stack().coerce_to_i32(self)?;
 
         let offset = case_offsets
             .get(index as usize)
@@ -2907,7 +2960,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         method: Gc<'gc, BytecodeMethod<'gc>>,
         index: Index<AbcMultiname>,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let val = self.context.avm2.pop();
+        let val = self.pop_stack();
         let type_name = self.pool_multiname_static_any(method, index)?;
         let param_type = self.resolve_type(&type_name)?;
 
@@ -2917,7 +2970,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             val
         };
 
-        self.context.avm2.push(x);
+        self.push_stack(x);
         Ok(FrameControl::Continue)
     }
 
@@ -2931,8 +2984,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
     /// Implements `Op::Si8`
     fn op_si8(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let address = self.context.avm2.pop().coerce_to_i32(self)?;
-        let val = self.context.avm2.pop().coerce_to_i32(self)?;
+        let address = self.pop_stack().coerce_to_i32(self)?;
+        let val = self.pop_stack().coerce_to_i32(self)?;
 
         let dm = self.domain_memory();
         let mut dm = dm
@@ -2948,8 +3001,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
     /// Implements `Op::Si16`
     fn op_si16(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let address = self.context.avm2.pop().coerce_to_i32(self)?;
-        let val = self.context.avm2.pop().coerce_to_i32(self)?;
+        let address = self.pop_stack().coerce_to_i32(self)?;
+        let val = self.pop_stack().coerce_to_i32(self)?;
 
         let dm = self.domain_memory();
         let mut dm = dm
@@ -2965,8 +3018,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
     /// Implements `Op::Si32`
     fn op_si32(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let address = self.context.avm2.pop().coerce_to_i32(self)?;
-        let val = self.context.avm2.pop().coerce_to_i32(self)?;
+        let address = self.pop_stack().coerce_to_i32(self)?;
+        let val = self.pop_stack().coerce_to_i32(self)?;
 
         let dm = self.domain_memory();
         let mut dm = dm
@@ -2982,8 +3035,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
     /// Implements `Op::Sf32`
     fn op_sf32(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let address = self.context.avm2.pop().coerce_to_i32(self)?;
-        let val = self.context.avm2.pop().coerce_to_number(self)? as f32;
+        let address = self.pop_stack().coerce_to_i32(self)?;
+        let val = self.pop_stack().coerce_to_number(self)? as f32;
 
         let dm = self.domain_memory();
         let mut dm = dm
@@ -2999,8 +3052,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
     /// Implements `Op::Sf64`
     fn op_sf64(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let address = self.context.avm2.pop().coerce_to_i32(self)?;
-        let val = self.context.avm2.pop().coerce_to_number(self)?;
+        let address = self.pop_stack().coerce_to_i32(self)?;
+        let val = self.pop_stack().coerce_to_number(self)?;
 
         let dm = self.domain_memory();
         let mut dm = dm
@@ -3016,7 +3069,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
     /// Implements `Op::Li8`
     fn op_li8(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let address = self.context.avm2.pop().coerce_to_u32(self)? as usize;
+        let address = self.pop_stack().coerce_to_u32(self)? as usize;
 
         let dm = self.domain_memory();
         let dm = dm
@@ -3025,7 +3078,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let val = dm.get(address);
 
         if let Some(val) = val {
-            self.context.avm2.push(val);
+            self.push_stack(val);
         } else {
             return Err("RangeError: The specified range is invalid".into());
         }
@@ -3035,95 +3088,87 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
     /// Implements `Op::Li16`
     fn op_li16(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let address = self.context.avm2.pop().coerce_to_u32(self)? as usize;
+        let address = self.pop_stack().coerce_to_u32(self)? as usize;
 
         let dm = self.domain_memory();
         let dm = dm
             .as_bytearray()
             .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
-        let val = dm.read_at(2, address)?;
-        self.context
-            .avm2
-            .push(u16::from_le_bytes(val.try_into().unwrap()));
+        let val = dm.read_at(2, address).map_err(|e| e.to_avm(self))?;
+        self.push_stack(u16::from_le_bytes(val.try_into().unwrap()));
 
         Ok(FrameControl::Continue)
     }
 
     /// Implements `Op::Li32`
     fn op_li32(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let address = self.context.avm2.pop().coerce_to_u32(self)? as usize;
+        let address = self.pop_stack().coerce_to_u32(self)? as usize;
 
         let dm = self.domain_memory();
         let dm = dm
             .as_bytearray()
             .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
-        let val = dm.read_at(4, address)?;
-        self.context
-            .avm2
-            .push(i32::from_le_bytes(val.try_into().unwrap()));
+        let val = dm.read_at(4, address).map_err(|e| e.to_avm(self))?;
+        self.push_stack(i32::from_le_bytes(val.try_into().unwrap()));
         Ok(FrameControl::Continue)
     }
 
     /// Implements `Op::Lf32`
     fn op_lf32(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let address = self.context.avm2.pop().coerce_to_u32(self)? as usize;
+        let address = self.pop_stack().coerce_to_u32(self)? as usize;
 
         let dm = self.domain_memory();
         let dm = dm
             .as_bytearray()
             .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
-        let val = dm.read_at(4, address)?;
-        self.context
-            .avm2
-            .push(f32::from_le_bytes(val.try_into().unwrap()));
+        let val = dm.read_at(4, address).map_err(|e| e.to_avm(self))?;
+        self.push_stack(f32::from_le_bytes(val.try_into().unwrap()));
 
         Ok(FrameControl::Continue)
     }
 
     /// Implements `Op::Lf64`
     fn op_lf64(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let address = self.context.avm2.pop().coerce_to_u32(self)? as usize;
+        let address = self.pop_stack().coerce_to_u32(self)? as usize;
 
         let dm = self.domain_memory();
         let dm = dm
             .as_bytearray()
             .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
-        let val = dm.read_at(8, address)?;
-        self.context
-            .avm2
-            .push(f64::from_le_bytes(val.try_into().unwrap()));
+        let val = dm.read_at(8, address).map_err(|e| e.to_avm(self))?;
+        self.push_stack(f64::from_le_bytes(val.try_into().unwrap()));
         Ok(FrameControl::Continue)
     }
 
     /// Implements `Op::Sxi1`
     fn op_sxi1(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let val = self.context.avm2.pop().coerce_to_i32(self)?;
+        let val = self.pop_stack().coerce_to_i32(self)?;
 
         let val = val.wrapping_shl(31).wrapping_shr(31);
 
-        self.context.avm2.push(Value::Integer(val));
+        self.push_stack(Value::Integer(val));
 
         Ok(FrameControl::Continue)
     }
 
     /// Implements `Op::Sxi8`
     fn op_sxi8(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let val = self.context.avm2.pop().coerce_to_i32(self)?;
+        let val = self.pop_stack().coerce_to_i32(self)?;
 
         let val = (val.wrapping_shl(23).wrapping_shr(23) & 0xFF) as i8 as i32;
 
-        self.context.avm2.push(Value::Integer(val));
+        self.push_stack(Value::Integer(val));
 
         Ok(FrameControl::Continue)
     }
 
     /// Implements `Op::Sxi16`
     fn op_sxi16(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let val = self.context.avm2.pop().coerce_to_i32(self)?;
+        let val = self.pop_stack().coerce_to_i32(self)?;
 
         let val = (val.wrapping_shl(15).wrapping_shr(15) & 0xFFFF) as i16 as i32;
 
-        self.context.avm2.push(Value::Integer(val));
+        self.push_stack(Value::Integer(val));
 
         Ok(FrameControl::Continue)
     }
@@ -3141,13 +3186,11 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             if (register as usize) < self.local_registers.0.len() {
                 let value = self.local_register(register as u32)?;
 
-                avm_debug!(self.avm2(), "Debug: {} = {:?}", register_name, value);
+                avm_debug!(self.avm2(), "Debug: {register_name} = {value:?}");
             } else {
                 avm_debug!(
                     self.avm2(),
-                    "Debug: {} = <out-of-bounds register #{}>",
-                    register_name,
-                    register
+                    "Debug: {register_name} = <out-of-bounds register #{register}>",
                 );
             }
         } else {
@@ -3176,7 +3219,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
         let file_name = self.pool_string(&method, file_name)?;
 
-        avm_debug!(self.avm2(), "File: {}", file_name);
+        avm_debug!(self.avm2(), "File: {file_name}");
 
         Ok(FrameControl::Continue)
     }
@@ -3191,7 +3234,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn op_debug_line(&mut self, line_num: u32) -> Result<FrameControl<'gc>, Error<'gc>> {
-        avm_debug!(self.avm2(), "Line: {}", line_num);
+        avm_debug!(self.avm2(), "Line: {line_num}");
 
         Ok(FrameControl::Continue)
     }
@@ -3212,7 +3255,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn op_throw(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let error_val = self.context.avm2.pop();
+        let error_val = self.pop_stack();
         Err(Error::AvmError(error_val))
     }
 }

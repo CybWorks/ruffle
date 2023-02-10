@@ -283,6 +283,16 @@ export interface BaseLoadOptions {
      * @default WindowMode.Window
      */
     wmode?: WindowMode;
+
+    /**
+     * The emulated version of the player.
+     *
+     * This controls the version that is reported to the movie.
+     * null means latest version.
+     *
+     * @default null
+     */
+    playerVersion?: number | null;
 }
 
 /**
@@ -306,4 +316,11 @@ export interface DataLoadOptions extends BaseLoadOptions {
      * The data to load a movie from.
      */
     data: Iterable<number>;
+
+    /**
+     * The filename of the SWF movie to provide to ActionScript.
+     *
+     * @default "movie.swf"
+     */
+    swfFileName?: string;
 }

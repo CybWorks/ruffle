@@ -26,7 +26,7 @@ const OBJECT_DECLS: &[Declaration] = declare_properties! {
 
 /// `Number` constructor
 pub fn number<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -46,7 +46,7 @@ pub fn number<'gc>(
 
 /// `Number` function
 pub fn number_function<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -72,7 +72,7 @@ pub fn create_number_object<'gc>(
         fn_proto,
         number_proto,
     );
-    let object = number.as_script_object().unwrap();
+    let object = number.raw_script_object();
     define_properties_on(OBJECT_DECLS, gc_context, object, fn_proto);
     number
 }
@@ -84,13 +84,13 @@ pub fn create_proto<'gc>(
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
     let number_proto = ValueObject::empty_box(gc_context, proto);
-    let object = number_proto.as_script_object().unwrap();
+    let object = number_proto.raw_script_object();
     define_properties_on(PROTO_DECLS, gc_context, object, fn_proto);
     number_proto
 }
 
 fn to_string<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -167,7 +167,7 @@ fn to_string<'gc>(
 }
 
 fn value_of<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {

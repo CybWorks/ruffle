@@ -12,9 +12,10 @@ use crate::prelude::*;
 use crate::string::AvmString;
 use crate::tag_utils::SwfSlice;
 use crate::{avm1, avm_debug};
-use gc_arena::{Collect, GcCell, MutationContext};
+use gc_arena::{Collect, Gc, GcCell, MutationContext};
 use std::borrow::Cow;
 use swf::avm1::read::Reader;
+use tracing::instrument;
 
 #[derive(Collect)]
 #[collect(no_drop)]
@@ -24,10 +25,10 @@ pub struct Avm1<'gc> {
 
     /// The constant pool to use for new activations from code sources that
     /// don't close over the constant pool they were defined with.
-    constant_pool: GcCell<'gc, Vec<Value<'gc>>>,
+    constant_pool: Gc<'gc, Vec<Value<'gc>>>,
 
-    /// The global object.
-    globals: Object<'gc>,
+    /// The global scope (pre-allocated so that it can be reused by fresh `Activation`s).
+    global_scope: Gc<'gc, Scope<'gc>>,
 
     /// System built-ins that we use internally to construct new objects.
     prototypes: avm1::globals::SystemPrototypes<'gc>,
@@ -77,8 +78,8 @@ impl<'gc> Avm1<'gc> {
 
         Self {
             player_version,
-            constant_pool: GcCell::allocate(gc_context, vec![]),
-            globals,
+            constant_pool: Gc::allocate(gc_context, vec![]),
+            global_scope: Gc::allocate(gc_context, Scope::from_global_object(globals)),
             prototypes,
             broadcaster_functions,
             display_properties: stage_object::DisplayPropertyMap::new(gc_context),
@@ -108,28 +109,26 @@ impl<'gc> Avm1<'gc> {
         active_clip: DisplayObject<'gc>,
         name: S,
         code: SwfSlice,
-        context: &mut UpdateContext<'_, 'gc, '_>,
+        context: &mut UpdateContext<'_, 'gc>,
     ) {
         if context.avm1.halted {
             // We've been told to ignore all future execution.
             return;
         }
 
-        let globals = context.avm1.global_object_cell();
         let mut parent_activation = Activation::from_nothing(
             context.reborrow(),
             ActivationIdentifier::root("[Actions Parent]"),
-            globals,
             active_clip,
         );
 
         let clip_obj = active_clip
             .object()
             .coerce_to_object(&mut parent_activation);
-        let child_scope = GcCell::allocate(
+        let child_scope = Gc::allocate(
             parent_activation.context.gc_context,
             Scope::new(
-                parent_activation.scope_cell(),
+                parent_activation.scope(),
                 scope::ScopeClass::Target,
                 clip_obj,
             ),
@@ -156,23 +155,23 @@ impl<'gc> Avm1<'gc> {
     /// This creates a new frame stack.
     pub fn run_with_stack_frame_for_display_object<'a, F, R>(
         active_clip: DisplayObject<'gc>,
-        action_context: &mut UpdateContext<'_, 'gc, '_>,
+        action_context: &mut UpdateContext<'_, 'gc>,
         function: F,
     ) -> R
     where
-        for<'b> F: FnOnce(&mut Activation<'b, 'gc, '_>) -> R,
+        for<'b> F: FnOnce(&mut Activation<'b, 'gc>) -> R,
     {
         let clip_obj = match active_clip.object() {
             Value::Object(o) => o,
             _ => panic!("No script object for display object"),
         };
-        let global_scope = GcCell::allocate(
+        let child_scope = Gc::allocate(
             action_context.gc_context,
-            Scope::from_global_object(action_context.avm1.global_object_cell()),
-        );
-        let child_scope = GcCell::allocate(
-            action_context.gc_context,
-            Scope::new(global_scope, scope::ScopeClass::Target, clip_obj),
+            Scope::new(
+                action_context.avm1.global_scope,
+                scope::ScopeClass::Target,
+                clip_obj,
+            ),
         );
         let constant_pool = action_context.avm1.constant_pool;
         let mut activation = Activation::from_action(
@@ -194,28 +193,26 @@ impl<'gc> Avm1<'gc> {
     pub fn run_stack_frame_for_init_action(
         active_clip: DisplayObject<'gc>,
         code: SwfSlice,
-        context: &mut UpdateContext<'_, 'gc, '_>,
+        context: &mut UpdateContext<'_, 'gc>,
     ) {
         if context.avm1.halted {
             // We've been told to ignore all future execution.
             return;
         }
 
-        let globals = context.avm1.global_object_cell();
         let mut parent_activation = Activation::from_nothing(
             context.reborrow(),
             ActivationIdentifier::root("[Init Parent]"),
-            globals,
             active_clip,
         );
 
         let clip_obj = active_clip
             .object()
             .coerce_to_object(&mut parent_activation);
-        let child_scope = GcCell::allocate(
+        let child_scope = Gc::allocate(
             parent_activation.context.gc_context,
             Scope::new(
-                parent_activation.scope_cell(),
+                parent_activation.scope(),
                 scope::ScopeClass::Target,
                 clip_obj,
             ),
@@ -245,7 +242,7 @@ impl<'gc> Avm1<'gc> {
     pub fn run_stack_frame_for_method<'a, 'b>(
         active_clip: DisplayObject<'gc>,
         obj: Object<'gc>,
-        context: &'a mut UpdateContext<'b, 'gc, '_>,
+        context: &'a mut UpdateContext<'b, 'gc>,
         name: AvmString<'gc>,
         args: &[Value<'gc>],
     ) {
@@ -254,11 +251,9 @@ impl<'gc> Avm1<'gc> {
             return;
         }
 
-        let globals = context.avm1.global_object_cell();
         let mut activation = Activation::from_nothing(
             context.reborrow(),
             ActivationIdentifier::root(name.to_string()),
-            globals,
             active_clip,
         );
 
@@ -267,21 +262,21 @@ impl<'gc> Avm1<'gc> {
 
     pub fn notify_system_listeners(
         active_clip: DisplayObject<'gc>,
-        context: &mut UpdateContext<'_, 'gc, '_>,
+        context: &mut UpdateContext<'_, 'gc>,
         broadcaster_name: AvmString<'gc>,
         method: AvmString<'gc>,
         args: &[Value<'gc>],
     ) {
-        let global = context.avm1.global_object_cell();
-
         let mut activation = Activation::from_nothing(
             context.reborrow(),
             ActivationIdentifier::root("[System Listeners]"),
-            global,
             active_clip,
         );
 
-        let broadcaster = global
+        let broadcaster = activation
+            .context
+            .avm1
+            .global_object()
             .get(broadcaster_name, &mut activation)
             .unwrap()
             .coerce_to_object(&mut activation);
@@ -311,7 +306,7 @@ impl<'gc> Avm1<'gc> {
     pub fn halt(&mut self) {
         if !self.halted {
             self.halted = true;
-            log::error!("No more actions will be executed in this movie.")
+            tracing::error!("No more actions will be executed in this movie.")
         }
     }
 
@@ -319,31 +314,35 @@ impl<'gc> Avm1<'gc> {
         self.stack.len()
     }
 
+    pub fn clear_stack(&mut self) {
+        self.stack.clear()
+    }
+
     pub fn push(&mut self, value: Value<'gc>) {
-        avm_debug!(self, "Stack push {}: {:?}", self.stack.len(), value);
+        avm_debug!(self, "Stack push {}: {value:?}", self.stack.len());
         self.stack.push(value);
     }
 
     #[allow(clippy::let_and_return)]
     pub fn pop(&mut self) -> Value<'gc> {
         let value = self.stack.pop().unwrap_or_else(|| {
-            log::warn!("Avm1::pop: Stack underflow");
+            tracing::warn!("Avm1::pop: Stack underflow");
             Value::Undefined
         });
 
-        avm_debug!(self, "Stack pop {}: {:?}", self.stack.len(), value);
+        avm_debug!(self, "Stack pop {}: {value:?}", self.stack.len());
 
         value
     }
 
-    /// Obtain the value of `_global`.
-    pub fn global_object(&self) -> Value<'gc> {
-        Value::Object(self.globals)
+    /// Obtain a reference to `_global`.
+    pub fn global_object(&self) -> Object<'gc> {
+        self.global_scope.locals_cell()
     }
 
-    /// Obtain a reference to `_global`.
-    pub fn global_object_cell(&self) -> Object<'gc> {
-        self.globals
+    /// Obtain a reference to the global scope.
+    pub fn global_scope(&self) -> Gc<'gc, Scope<'gc>> {
+        self.global_scope
     }
 
     /// Obtain system built-in prototypes for this instance.
@@ -353,13 +352,13 @@ impl<'gc> Avm1<'gc> {
 
     /// Obtains the constant pool to use for new activations from code sources that
     /// don't close over the constant pool they were defined with.
-    pub fn constant_pool(&self) -> GcCell<'gc, Vec<Value<'gc>>> {
+    pub fn constant_pool(&self) -> Gc<'gc, Vec<Value<'gc>>> {
         self.constant_pool
     }
 
     /// Sets the constant pool to use for new activations from code sources that
     /// don't close over the constant pool they were defined with.
-    pub fn set_constant_pool(&mut self, constant_pool: GcCell<'gc, Vec<Value<'gc>>>) {
+    pub fn set_constant_pool(&mut self, constant_pool: Gc<'gc, Vec<Value<'gc>>>) {
         self.constant_pool = constant_pool;
     }
 
@@ -393,8 +392,58 @@ impl<'gc> Avm1<'gc> {
         self.registers.get_mut(id)
     }
 
+    /// Find all display objects with negative depth recurisvely
+    ///
+    /// If an object is pending removal due to being removed by a removeObject tag on the previous frame,
+    /// while it had an unload event listener attached, avm1 requires that the object is kept around for one extra frame.
+    ///
+    /// This will be called at the start of each frame, to gather the objects for removal
+    fn find_display_objects_pending_removal(
+        obj: DisplayObject<'gc>,
+        out: &mut Vec<DisplayObject<'gc>>,
+    ) {
+        if let Some(parent) = obj.as_container() {
+            for child in parent.iter_render_list() {
+                if child.pending_removal() {
+                    out.push(child);
+                }
+
+                Self::find_display_objects_pending_removal(child, out);
+            }
+        }
+    }
+
+    /// Remove all display objects pending removal
+    /// See [`find_display_objects_pending_removal`] for details
+    fn remove_pending(context: &mut UpdateContext<'_, 'gc>) {
+        // Storage for objects to remove
+        // Have to do this in two passes to avoid borrow-mut while already borrowed
+        let mut out = Vec::new();
+
+        // Find objects to remove
+        Self::find_display_objects_pending_removal(context.stage.root_clip(), &mut out);
+
+        for child in out {
+            // Get the parent of this object
+            let parent = child.parent().unwrap();
+            let parent_container = parent.as_container().unwrap();
+
+            // Remove it
+            parent_container.remove_child_directly(context, child);
+
+            // Update pending removal state
+            parent_container
+                .raw_container_mut(context.gc_context)
+                .update_pending_removals();
+        }
+    }
+
     // Run a single frame.
-    pub fn run_frame(context: &mut UpdateContext<'_, 'gc, '_>) {
+    #[instrument(level = "debug", skip_all)]
+    pub fn run_frame(context: &mut UpdateContext<'_, 'gc>) {
+        // Remove pending objects
+        Self::remove_pending(context);
+
         // In AVM1, we only ever execute the update phase, and all the work that
         // would ordinarily be phased is instead run all at once in whatever order
         // the SWF requests it.
@@ -501,12 +550,12 @@ impl<'gc> Avm1<'gc> {
 pub fn skip_actions(reader: &mut Reader<'_>, num_actions_to_skip: u8) {
     for _ in 0..num_actions_to_skip {
         if let Err(e) = reader.read_action() {
-            log::warn!("Couldn't skip action: {}", e);
+            tracing::warn!("Couldn't skip action: {}", e);
         }
     }
 }
 
-pub fn root_error_handler<'gc>(activation: &mut Activation<'_, 'gc, '_>, error: Error<'gc>) {
+pub fn root_error_handler<'gc>(activation: &mut Activation<'_, 'gc>, error: Error<'gc>) {
     match &error {
         Error::ThrownValue(value) => {
             let message = value
@@ -517,10 +566,10 @@ pub fn root_error_handler<'gc>(activation: &mut Activation<'_, 'gc, '_>, error: 
             return;
         }
         Error::InvalidSwf(swf_error) => {
-            log::error!("{}: {}", error, swf_error);
+            tracing::error!("{}: {}", error, swf_error);
         }
         _ => {
-            log::error!("{}", error);
+            tracing::error!("{}", error);
         }
     }
     activation.context.avm1.halt();

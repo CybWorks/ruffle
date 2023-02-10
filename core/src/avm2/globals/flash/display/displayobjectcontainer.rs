@@ -5,18 +5,19 @@ use crate::avm2::class::Class;
 use crate::avm2::method::{Method, NativeMethodImpl};
 use crate::avm2::object::{Object, TObject};
 use crate::avm2::value::Value;
-use crate::avm2::Error;
 use crate::avm2::Multiname;
 use crate::avm2::Namespace;
 use crate::avm2::QName;
+use crate::avm2::{ArrayObject, ArrayStorage, Error};
 use crate::context::UpdateContext;
-use crate::display_object::{DisplayObject, Lists, TDisplayObject, TDisplayObjectContainer};
+use crate::display_object::{DisplayObject, TDisplayObject, TDisplayObjectContainer};
+use crate::{avm2_stub_getter, avm2_stub_method, avm2_stub_setter};
 use gc_arena::{GcCell, MutationContext};
 use std::cmp::min;
 
 /// Implements `flash.display.DisplayObjectContainer`'s instance constructor.
 pub fn instance_init<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -25,7 +26,7 @@ pub fn instance_init<'gc>(
 
 /// Implements `flash.display.DisplayObjectContainer`'s native instance constructor.
 pub fn native_instance_init<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -38,7 +39,7 @@ pub fn native_instance_init<'gc>(
 
 /// Implements `flash.display.DisplayObjectContainer`'s class constructor.
 pub fn class_init<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -104,19 +105,19 @@ fn validate_remove_operation<'gc>(
 
 /// Remove an element from it's parent display list.
 fn remove_child_from_displaylist<'gc>(
-    context: &mut UpdateContext<'_, 'gc, '_>,
+    context: &mut UpdateContext<'_, 'gc>,
     child: DisplayObject<'gc>,
 ) {
     if let Some(parent) = child.parent() {
         if let Some(mut ctr) = parent.as_container() {
-            ctr.remove_child(context, child, Lists::all());
+            ctr.remove_child(context, child);
         }
     }
 }
 
 /// Add the `child` to `parent`'s display list.
 pub(super) fn add_child_to_displaylist<'gc>(
-    context: &mut UpdateContext<'_, 'gc, '_>,
+    context: &mut UpdateContext<'_, 'gc>,
     parent: DisplayObject<'gc>,
     child: DisplayObject<'gc>,
     index: usize,
@@ -129,7 +130,7 @@ pub(super) fn add_child_to_displaylist<'gc>(
 
 /// Implements `DisplayObjectContainer.getChildAt`
 pub fn get_child_at<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -143,10 +144,7 @@ pub fn get_child_at<'gc>(
             .unwrap_or(Value::Undefined)
             .coerce_to_i32(activation)?;
         let child = dobj.child_by_index(index as usize).ok_or_else(|| {
-            format!(
-                "RangeError: Display object container has no child with id {}",
-                index
-            )
+            format!("RangeError: Display object container has no child with id {index}")
         })?;
 
         return Ok(child.object2());
@@ -157,7 +155,7 @@ pub fn get_child_at<'gc>(
 
 /// Implements `DisplayObjectContainer.getChildByName`
 pub fn get_child_by_name<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -173,7 +171,7 @@ pub fn get_child_by_name<'gc>(
         if let Some(child) = dobj.child_by_name(&name, false) {
             return Ok(child.object2());
         } else {
-            log::warn!("Display object container has no child with name {}", name);
+            tracing::warn!("Display object container has no child with name {}", name);
             return Ok(Value::Null);
         }
     }
@@ -183,7 +181,7 @@ pub fn get_child_by_name<'gc>(
 
 /// Implements `DisplayObjectContainer.addChild`
 pub fn add_child<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -210,7 +208,7 @@ pub fn add_child<'gc>(
 
 /// Implements `DisplayObjectContainer.addChildAt`
 pub fn add_child_at<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -239,7 +237,7 @@ pub fn add_child_at<'gc>(
 
 /// Implements `DisplayObjectContainer.removeChild`
 pub fn remove_child<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -263,7 +261,7 @@ pub fn remove_child<'gc>(
 
 /// Implements `DisplayObjectContainer.numChildren`
 pub fn num_children<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -279,7 +277,7 @@ pub fn num_children<'gc>(
 
 /// Implements `DisplayObjectContainer.contains`
 pub fn contains<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -309,7 +307,7 @@ pub fn contains<'gc>(
 
 /// Implements `DisplayObjectContainer.getChildIndex`
 pub fn get_child_index<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -337,7 +335,7 @@ pub fn get_child_index<'gc>(
 
 /// Implements `DisplayObjectContainer.removeChildAt`
 pub fn remove_child_at<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -360,7 +358,7 @@ pub fn remove_child_at<'gc>(
 
             let child = ctr.child_by_index(target_child as usize).unwrap();
 
-            ctr.remove_child(&mut activation.context, child, Lists::all());
+            ctr.remove_child(&mut activation.context, child);
 
             return Ok(child.object2());
         }
@@ -371,7 +369,7 @@ pub fn remove_child_at<'gc>(
 
 /// Implements `DisplayObjectContainer.removeChildren`
 pub fn remove_children<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -407,7 +405,7 @@ pub fn remove_children<'gc>(
             }
 
             if from > to {
-                return Err(format!("RangeError: Range {} to {} is invalid", from, to).into());
+                return Err(format!("RangeError: Range {from} to {to} is invalid").into());
             }
 
             ctr.remove_range(
@@ -422,7 +420,7 @@ pub fn remove_children<'gc>(
 
 /// Implements `DisplayObjectContainer.setChildIndex`
 pub fn set_child_index<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -456,7 +454,7 @@ pub fn set_child_index<'gc>(
 
 /// Implements `DisplayObjectContainer.swapChildrenAt`
 pub fn swap_children_at<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -475,11 +473,11 @@ pub fn swap_children_at<'gc>(
             let bounds = ctr.num_children();
 
             if index0 < 0 || index0 as usize >= bounds {
-                return Err(format!("RangeError: Index {} is out of bounds", index0).into());
+                return Err(format!("RangeError: Index {index0} is out of bounds").into());
             }
 
             if index1 < 0 || index1 as usize >= bounds {
-                return Err(format!("RangeError: Index {} is out of bounds", index1).into());
+                return Err(format!("RangeError: Index {index1} is out of bounds").into());
             }
 
             let child0 = ctr.child_by_index(index0 as usize).unwrap();
@@ -497,7 +495,7 @@ pub fn swap_children_at<'gc>(
 
 /// Implements `DisplayObjectContainer.swapChildren`
 pub fn swap_children<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -539,7 +537,7 @@ pub fn swap_children<'gc>(
 
 /// Implements `DisplayObjectContainer.stopAllMovieClips`
 pub fn stop_all_movie_clips<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -561,51 +559,84 @@ pub fn stop_all_movie_clips<'gc>(
     Ok(Value::Undefined)
 }
 
-/// Stubs `DisplayObjectContainer.getObjectsUnderPoint`
 pub fn get_objects_under_point<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    Err("DisplayObjectContainer.getObjectsUnderPoint not yet implemented".into())
+    avm2_stub_method!(
+        activation,
+        "flash.display.DisplayObjectContainer",
+        "getObjectsUnderPoint"
+    );
+    Ok(ArrayObject::from_storage(activation, ArrayStorage::new(0))?.into())
 }
 
-/// Stubs `DisplayObjectContainer.areInaccessibleObjectsUnderPoint`
 pub fn are_inaccessible_objects_under_point<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    Err("DisplayObjectContainer.areInaccessibleObjectsUnderPoint not yet implemented".into())
+    avm2_stub_method!(
+        activation,
+        "flash.display.DisplayObjectContainer",
+        "areInaccessibleObjectsUnderPoint"
+    );
+    Ok(false.into())
 }
 
 pub fn mouse_children<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    log::warn!("DisplayObjectContainer.mouseChildren getter: not yet implemented");
+    avm2_stub_setter!(
+        activation,
+        "flash.display.DisplayObjectContainer",
+        "mouseChildren"
+    );
     Ok(Value::Undefined)
 }
 
 pub fn set_mouse_children<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    log::warn!("DisplayObjectContainer.mouseChildren setter: not yet implemented");
+    avm2_stub_setter!(
+        activation,
+        "flash.display.DisplayObjectContainer",
+        "mouseChildren"
+    );
     Ok(Value::Undefined)
 }
 
-/// Stub getter & setter for `tabChildren`.
 pub fn tab_children<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    log::warn!("DisplayObjectContainer.tabChildren is a stub");
+    avm2_stub_getter!(
+        activation,
+        "flash.display.DisplayObjectContainer",
+        "tabChildren"
+    );
 
     Ok(true.into())
+}
+
+pub fn set_tab_children<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    _this: Option<Object<'gc>>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    avm2_stub_setter!(
+        activation,
+        "flash.display.DisplayObjectContainer",
+        "tabChildren"
+    );
+
+    Ok(Value::Undefined)
 }
 
 /// Construct `DisplayObjectContainer`'s class.
@@ -647,7 +678,7 @@ pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>
             Some(mouse_children),
             Some(set_mouse_children),
         ),
-        ("tabChildren", Some(tab_children), Some(tab_children)),
+        ("tabChildren", Some(tab_children), Some(set_tab_children)),
     ];
     write.define_public_builtin_instance_properties(mc, PUBLIC_INSTANCE_PROPERTIES);
 

@@ -20,7 +20,7 @@ use swf::Twips;
 
 /// Implements `flash.display.Sprite`'s instance constructor.
 pub fn instance_init<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -44,16 +44,33 @@ pub fn instance_init<'gc>(
 
 /// Implements `flash.display.Sprite`'s class constructor.
 pub fn class_init<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     Ok(Value::Undefined)
 }
 
+/// Implements `dropTarget`'s getter
+pub fn drop_target<'gc>(
+    _activation: &mut Activation<'_, 'gc>,
+    this: Option<Object<'gc>>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    if let Some(mc) = this
+        .and_then(|o| o.as_display_object())
+        .and_then(|o| o.as_movie_clip())
+        .and_then(|o| o.drop_target())
+    {
+        return Ok(mc.object2());
+    }
+
+    Ok(Value::Null)
+}
+
 /// Implements `graphics`.
 pub fn graphics<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -84,7 +101,7 @@ pub fn graphics<'gc>(
 
 /// Implements `soundTransform`'s getter
 pub fn sound_transform<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -99,7 +116,7 @@ pub fn sound_transform<'gc>(
 
 /// Implements `soundTransform`'s setter
 pub fn set_sound_transform<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -119,7 +136,7 @@ pub fn set_sound_transform<'gc>(
 
 /// Implements `buttonMode`'s getter
 pub fn button_mode<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -135,7 +152,7 @@ pub fn button_mode<'gc>(
 
 /// Implements `buttonMode`'s setter
 pub fn set_button_mode<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -158,7 +175,7 @@ pub fn set_button_mode<'gc>(
 /// Starts dragging this display object, making it follow the cursor.
 /// Runs via the `startDrag` method or `StartDrag` AVM1 action.
 pub fn start_drag<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -194,12 +211,24 @@ pub fn start_drag<'gc>(
                 .get_property(&Multiname::public("height"), activation)?
                 .coerce_to_number(activation)?;
 
+            // Normalize the bounds.
+            let mut x_min = Twips::from_pixels(x);
+            let mut y_min = Twips::from_pixels(y);
+            let mut x_max = Twips::from_pixels(x + width);
+            let mut y_max = Twips::from_pixels(y + height);
+            if x_max.get() < x_min.get() {
+                std::mem::swap(&mut x_min, &mut x_max);
+            }
+            if y_max.get() < y_min.get() {
+                std::mem::swap(&mut y_min, &mut y_max);
+            }
+
             BoundingBox {
                 valid: true,
-                x_min: Twips::from_pixels(x),
-                y_min: Twips::from_pixels(y),
-                x_max: Twips::from_pixels(x + width),
-                y_max: Twips::from_pixels(y + height),
+                x_min,
+                y_min,
+                x_max,
+                y_max,
             }
         } else {
             // No constraints.
@@ -217,7 +246,7 @@ pub fn start_drag<'gc>(
 }
 
 fn stop_drag<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -234,7 +263,7 @@ fn stop_drag<'gc>(
 
 /// Implements `useHandCursor`'s getter
 pub fn use_hand_cursor<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -250,7 +279,7 @@ pub fn use_hand_cursor<'gc>(
 
 /// Implements `useHandCursor`'s setter
 pub fn set_use_hand_cursor<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -293,6 +322,7 @@ pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>
         Option<NativeMethodImpl>,
     )] = &[
         ("graphics", Some(graphics), None),
+        ("dropTarget", Some(drop_target), None),
         (
             "soundTransform",
             Some(sound_transform),

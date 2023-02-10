@@ -135,10 +135,10 @@ impl TextFormat {
     ///
     /// This requires an `UpdateContext` as we will need to retrieve some font
     /// information from the actually-referenced font.
-    pub fn from_swf_tag<'gc>(
+    pub fn from_swf_tag(
         et: swf::EditText<'_>,
         swf_movie: Arc<SwfMovie>,
-        context: &mut UpdateContext<'_, 'gc, '_>,
+        context: &mut UpdateContext<'_, '_>,
     ) -> Self {
         let encoding = swf_movie.encoding();
         let movie_library = context.library.library_for_movie_mut(swf_movie);
@@ -618,7 +618,7 @@ impl FormatSpans {
                     let attributes = match attributes {
                         Ok(attributes) => attributes,
                         Err(e) => {
-                            log::warn!("Error while parsing HTML: {}", e);
+                            tracing::warn!("Error while parsing HTML: {}", e);
                             return Default::default();
                         }
                     };
@@ -799,7 +799,7 @@ impl FormatSpans {
                 }
                 Ok(Event::Eof) => break,
                 Err(e) => {
-                    log::warn!("Error while parsing HTML: {}", e);
+                    tracing::warn!("Error while parsing HTML: {}", e);
                     break;
                 }
                 _ => {}
@@ -854,6 +854,15 @@ impl FormatSpans {
     /// `iter_spans` method will yield the string and span data directly.
     pub fn span(&self, index: usize) -> Option<&TextSpan> {
         self.spans.get(index)
+    }
+
+    /// Retrieve the last text span.
+    ///
+    /// Text span indices are ephemeral and can change arbitrarily any time the
+    /// `FormatSpans` are mutated. You should not use this method directly; the
+    /// `iter_spans` method will yield the string and span data directly.
+    pub fn last_span(&self) -> Option<&TextSpan> {
+        self.spans.last()
     }
 
     /// Find the index of the span that covers a given search position.
@@ -1414,7 +1423,17 @@ impl<'a> FormatState<'a> {
             }
             let encoded = text.to_utf8_lossy();
             let escaped = escape(encoded.as_bytes());
-            self.result.push_str(WStr::from_units(&*escaped));
+
+            if let Cow::Borrowed(_) = &encoded {
+                // Optimization: if the utf8 conversion was a no-op, we know the text is ASCII;
+                // escaping special characters cannot insert new non-ASCII characters, so we can
+                // simply append the bytes directly without converting from UTF8.
+                self.result.push_str(WStr::from_units(&*escaped));
+            } else {
+                // TODO: updating our quick_xml fork to upstream will allow removing this UTF8 check.
+                let escaped = std::str::from_utf8(&escaped).expect("escaped text should be utf8");
+                self.result.push_utf8(escaped);
+            }
         }
     }
 }

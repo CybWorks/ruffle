@@ -5,20 +5,21 @@ use crate::transform::Transform;
 use swf::{BlendMode, Color};
 
 pub trait CommandHandler {
-    fn render_bitmap(&mut self, bitmap: BitmapHandle, transform: &Transform, smoothing: bool);
-    fn render_shape(&mut self, shape: ShapeHandle, transform: &Transform);
-    fn draw_rect(&mut self, color: Color, matrix: &Matrix);
+    fn render_bitmap(&mut self, bitmap: BitmapHandle, transform: Transform, smoothing: bool);
+    fn render_shape(&mut self, shape: ShapeHandle, transform: Transform);
+    fn draw_rect(&mut self, color: Color, matrix: Matrix);
     fn push_mask(&mut self);
     fn activate_mask(&mut self);
     fn deactivate_mask(&mut self);
     fn pop_mask(&mut self);
 
-    fn push_blend_mode(&mut self, blend: BlendMode);
-    fn pop_blend_mode(&mut self);
+    fn blend(&mut self, commands: CommandList, blend_mode: BlendMode);
 }
 
-#[derive(Debug, Default)]
-pub struct CommandList(Vec<Command>);
+#[derive(Debug, Default, Clone)]
+pub struct CommandList {
+    pub commands: Vec<Command>,
+}
 
 impl CommandList {
     pub fn new() -> Self {
@@ -26,77 +27,65 @@ impl CommandList {
     }
 
     pub fn execute(self, handler: &mut impl CommandHandler) {
-        for command in self.0 {
+        for command in self.commands {
             match command {
                 Command::RenderBitmap {
                     bitmap,
                     transform,
                     smoothing,
-                } => handler.render_bitmap(bitmap, &transform, smoothing),
-                Command::RenderShape { shape, transform } => {
-                    handler.render_shape(shape, &transform)
-                }
-                Command::DrawRect { color, matrix } => handler.draw_rect(color, &matrix),
+                } => handler.render_bitmap(bitmap, transform, smoothing),
+                Command::RenderShape { shape, transform } => handler.render_shape(shape, transform),
+                Command::DrawRect { color, matrix } => handler.draw_rect(color, matrix),
                 Command::PushMask => handler.push_mask(),
                 Command::ActivateMask => handler.activate_mask(),
                 Command::DeactivateMask => handler.deactivate_mask(),
                 Command::PopMask => handler.pop_mask(),
-                Command::PushBlendMode(blend) => handler.push_blend_mode(blend),
-                Command::PopBlendMode => handler.pop_blend_mode(),
+                Command::Blend(commands, blend_mode) => handler.blend(commands, blend_mode),
             }
         }
     }
 }
 
 impl CommandHandler for CommandList {
-    fn render_bitmap(&mut self, bitmap: BitmapHandle, transform: &Transform, smoothing: bool) {
-        self.0.push(Command::RenderBitmap {
+    fn render_bitmap(&mut self, bitmap: BitmapHandle, transform: Transform, smoothing: bool) {
+        self.commands.push(Command::RenderBitmap {
             bitmap,
-            transform: transform.clone(),
+            transform,
             smoothing,
         });
     }
 
-    fn render_shape(&mut self, shape: ShapeHandle, transform: &Transform) {
-        self.0.push(Command::RenderShape {
-            shape,
-            transform: transform.clone(),
-        });
+    fn render_shape(&mut self, shape: ShapeHandle, transform: Transform) {
+        self.commands
+            .push(Command::RenderShape { shape, transform });
     }
 
-    fn draw_rect(&mut self, color: Color, matrix: &Matrix) {
-        self.0.push(Command::DrawRect {
-            color,
-            matrix: *matrix,
-        });
+    fn draw_rect(&mut self, color: Color, matrix: Matrix) {
+        self.commands.push(Command::DrawRect { color, matrix });
     }
 
     fn push_mask(&mut self) {
-        self.0.push(Command::PushMask);
+        self.commands.push(Command::PushMask);
     }
 
     fn activate_mask(&mut self) {
-        self.0.push(Command::ActivateMask);
+        self.commands.push(Command::ActivateMask);
     }
 
     fn deactivate_mask(&mut self) {
-        self.0.push(Command::DeactivateMask);
+        self.commands.push(Command::DeactivateMask);
     }
 
     fn pop_mask(&mut self) {
-        self.0.push(Command::PopMask);
+        self.commands.push(Command::PopMask);
     }
 
-    fn push_blend_mode(&mut self, blend: BlendMode) {
-        self.0.push(Command::PushBlendMode(blend));
-    }
-
-    fn pop_blend_mode(&mut self) {
-        self.0.push(Command::PopBlendMode);
+    fn blend(&mut self, commands: CommandList, blend_mode: BlendMode) {
+        self.commands.push(Command::Blend(commands, blend_mode));
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Command {
     RenderBitmap {
         bitmap: BitmapHandle,
@@ -115,6 +104,5 @@ pub enum Command {
     ActivateMask,
     DeactivateMask,
     PopMask,
-    PushBlendMode(BlendMode),
-    PopBlendMode,
+    Blend(CommandList, BlendMode),
 }

@@ -3,49 +3,50 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::value::Value;
 use crate::avm2::{Error, Object};
+use crate::avm2_stub_getter;
 use crate::string::AvmString;
 
 pub fn get_caps_lock<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    log::warn!("Keyboard.capsLock: not yet implemented");
+    avm2_stub_getter!(activation, "flash.ui.Keyboard", "capsLock");
     Ok(false.into())
 }
 
 pub fn get_has_virtual_keyboard<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    log::warn!("Keyboard.hasVirtualKeyboard: not yet implemented");
+    avm2_stub_getter!(activation, "flash.ui.Keyboard", "hasVirtualKeyboard");
     Ok(false.into())
 }
 
 pub fn get_num_lock<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    log::warn!("Keyboard.numLock: not yet implemented");
+    avm2_stub_getter!(activation, "flash.ui.Keyboard", "numLock");
     Ok(false.into())
 }
 
 pub fn get_physical_keyboard_type<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    log::warn!("Keyboard.physicalKeyboardType: not yet implemented");
+    avm2_stub_getter!(activation, "flash.ui.Keyboard", "physicalKeyboardType");
     Ok(AvmString::new_utf8(activation.context.gc_context, "alphanumeric").into())
 }
 
 pub fn is_accessible<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    log::warn!("Keyboard.isAccessible: not yet implemented");
+    avm2_stub_getter!(activation, "flash.ui.Keyboard", "isAccessible");
     Ok(true.into())
 }

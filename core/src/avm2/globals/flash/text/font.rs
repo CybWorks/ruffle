@@ -5,17 +5,18 @@ use crate::avm2::class::{Class, ClassAttributes};
 use crate::avm2::method::{Method, NativeMethodImpl};
 use crate::avm2::object::{Object, TObject};
 use crate::avm2::value::Value;
-use crate::avm2::Error;
 use crate::avm2::Multiname;
 use crate::avm2::Namespace;
 use crate::avm2::QName;
+use crate::avm2::{ArrayObject, ArrayStorage, Error};
+use crate::avm2_stub_getter;
 use crate::character::Character;
 use crate::string::AvmString;
 use gc_arena::{GcCell, MutationContext};
 
 /// Implements `flash.text.Font`'s instance constructor.
 pub fn instance_init<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -28,7 +29,7 @@ pub fn instance_init<'gc>(
 
 /// Implements `flash.text.Font`'s class constructor.
 pub fn class_init<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -37,7 +38,7 @@ pub fn class_init<'gc>(
 
 /// Implements `Font.fontName`
 pub fn font_name<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -67,7 +68,7 @@ pub fn font_name<'gc>(
 
 /// Implements `Font.fontStyle`
 pub fn font_style<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -98,7 +99,7 @@ pub fn font_style<'gc>(
 
 /// Implements `Font.fontType`
 pub fn font_type<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -125,7 +126,7 @@ pub fn font_type<'gc>(
 
 /// Implements `Font.hasGlyphs`
 pub fn has_glyphs<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -155,22 +156,24 @@ pub fn has_glyphs<'gc>(
     Ok(Value::Undefined)
 }
 
-/// Stub `Font.enumerateFonts`
+/// `Font.enumerateFonts`
 pub fn enumerate_fonts<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    Err("Font.enumerateFonts is a stub".into())
+    avm2_stub_getter!(activation, "flash.text.Font", "enumerateFonts");
+    Ok(ArrayObject::from_storage(activation, ArrayStorage::new(0))?.into())
 }
 
-/// Stub `Font.registerFont`
+/// `Font.registerFont`
 pub fn register_font<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    Err("Font.registerFont is a stub".into())
+    avm2_stub_getter!(activation, "flash.text.Font", "registerFont");
+    Ok(Value::Undefined)
 }
 
 /// Construct `Font`'s class.

@@ -6,6 +6,7 @@ package flash.display {
 		import flash.system.LoaderContext;
 		import flash.utils.ByteArray;
 		import flash.net.URLRequest;
+   		import __ruffle__.stub_method;
 
 		private var _contentLoaderInfo: LoaderInfo;
 
@@ -29,6 +30,13 @@ package flash.display {
 		public native function load(request: URLRequest, context: LoaderContext = null):void;
 
 		public native function loadBytes(data: ByteArray, context: LoaderContext = null):void;
+		
+		public function unload():void {
+			stub_method("flash.display.Loader", "unload");
+			// Content seems to prefer an error here, over an empty implementation.
+			// https://github.com/ruffle-rs/ruffle/pull/8909
+			throw new Error("flash.display.Loader.unload - not yet implemented");
+		}
 
 		override public function addChild(child:DisplayObject):DisplayObject {
 			throw new IllegalOperationError("Error #2069: The Loader class does not implement this method.", 2069);

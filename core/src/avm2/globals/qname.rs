@@ -1,7 +1,7 @@
 //! `QName` impl
 
 use crate::avm2::activation::Activation;
-use crate::avm2::class::Class;
+use crate::avm2::class::{Class, ClassAttributes};
 use crate::avm2::method::{Method, NativeMethodImpl};
 use crate::avm2::object::{qname_allocator, FunctionObject, Object, TObject};
 use crate::avm2::value::Value;
@@ -13,7 +13,7 @@ use gc_arena::{GcCell, MutationContext};
 
 /// Implements `QName`'s instance initializer.
 pub fn instance_init<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -61,7 +61,7 @@ pub fn instance_init<'gc>(
 
 /// Implements `QName`'s class initializer.
 pub fn class_init<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -112,7 +112,7 @@ pub fn class_init<'gc>(
 
 /// Implements `QName.localName`'s getter
 pub fn local_name<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -127,7 +127,7 @@ pub fn local_name<'gc>(
 
 /// Implements `QName.uri`'s getter
 pub fn uri<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -145,7 +145,7 @@ pub fn uri<'gc>(
 
 /// Implements `QName.AS3::toString` and `QName.prototype.toString`
 pub fn to_string<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -160,7 +160,7 @@ pub fn to_string<'gc>(
 
 /// Implements `QName.AS3::valueOf` and `QName.prototype.valueOf`
 pub fn value_of<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -182,6 +182,7 @@ pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>
     );
 
     let mut write = class.write(mc);
+    write.set_attributes(ClassAttributes::FINAL | ClassAttributes::SEALED);
     write.set_instance_allocator(qname_allocator);
 
     const PUBLIC_INSTANCE_PROPERTIES: &[(

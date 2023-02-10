@@ -37,7 +37,7 @@ impl<'gc> ValueObject<'gc> {
     /// selects the correct prototype for it from the system prototypes list.
     ///
     /// Prefer using `coerce_to_object` instead of calling this function directly.
-    pub fn boxed(activation: &mut Activation<'_, 'gc, '_>, value: Value<'gc>) -> Object<'gc> {
+    pub fn boxed(activation: &mut Activation<'_, 'gc>, value: Value<'gc>) -> Object<'gc> {
         if let Value::Object(ob) = value {
             ob
         } else {
@@ -105,8 +105,8 @@ impl fmt::Debug for ValueObject<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let this = self.0.read();
         f.debug_struct("ValueObject")
-            .field("base", &this.base)
             .field("value", &this.value)
+            .field("ptr", &self.0.as_ptr())
             .finish()
     }
 }
