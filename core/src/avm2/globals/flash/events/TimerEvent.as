@@ -1,19 +1,21 @@
 package flash.events {
-	public class TimerEvent extends Event{
-		public static const TIMER:String = "timer";
-		public static const TIMER_COMPLETE:String = "timerComplete";
+    public class TimerEvent extends Event {
+        public static const TIMER:String = "timer";
+        public static const TIMER_COMPLETE:String = "timerComplete";
 
-		public function TimerEvent(type:String, bubbles:Boolean = false, cancelable:Boolean= false) {
-			super(type, bubbles, cancelable);
-		}
-		
-		override public function clone() : Event {
-			return new TimerEvent(this.type,this.bubbles,this.cancelable);
-		}
+        public function TimerEvent(type:String, bubbles:Boolean = false, cancelable:Boolean = false) {
+            super(type, bubbles, cancelable);
+        }
 
-		public function updateAfterEvent():void {
-			// TODO - determine when we should actually force a frame to be rendered.
-			stub_method("flash.events.TimerEvent", "updateAfterEvent");
-		}
-	}
+        override public function clone():Event {
+            return new TimerEvent(this.type, this.bubbles, this.cancelable);
+        }
+
+        // Returns a string that contains all the properties of the TimerEvent object.
+        override public function toString():String {
+            return this.formatToString("TimerEvent", "type", "bubbles", "cancelable", "eventPhase");
+        }
+
+        public native function updateAfterEvent():void;
+    }
 }

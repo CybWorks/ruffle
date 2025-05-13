@@ -5,7 +5,8 @@ use crate::avm2::Multiname;
 use crate::avm2::Namespace;
 use crate::avm2::QName;
 use fnv::FnvBuildHasher;
-use gc_arena::{Collect, CollectionContext};
+use gc_arena::collect::Trace;
+use gc_arena::Collect;
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::mem::swap;
@@ -29,23 +30,20 @@ pub struct PropertyMap<'gc, V>(
     HashMap<AvmString<'gc>, SmallVec<[(Namespace<'gc>, V); 2]>, FnvBuildHasher>,
 );
 
-unsafe impl<'gc, V> Collect for PropertyMap<'gc, V>
-where
-    V: Collect,
-{
+unsafe impl<'gc, V: Collect<'gc>> Collect<'gc> for PropertyMap<'gc, V> {
     #[inline]
-    fn trace(&self, cc: CollectionContext) {
+    fn trace<C: Trace<'gc>>(&self, cc: &mut C) {
         for (key, value) in self.0.iter() {
-            key.trace(cc);
+            cc.trace(key);
             for (ns, v) in value.iter() {
-                ns.trace(cc);
-                v.trace(cc);
+                cc.trace(ns);
+                cc.trace(v);
             }
         }
     }
 }
 
-impl<'gc, V> Default for PropertyMap<'gc, V> {
+impl<V> Default for PropertyMap<'_, V> {
     fn default() -> Self {
         Self::new()
     }
@@ -59,7 +57,7 @@ impl<'gc, V> PropertyMap<'gc, V> {
     pub fn get(&self, name: QName<'gc>) -> Option<&V> {
         self.0.get(&name.local_name()).iter().find_map(|v| {
             v.iter()
-                .filter(|(n, _)| *n == name.namespace())
+                .filter(|(n, _)| n.matches_ns(name.namespace()))
                 .map(|(_, v)| v)
                 .next()
         })
@@ -72,7 +70,7 @@ impl<'gc, V> PropertyMap<'gc, V> {
         if let Some(local_name) = name.local_name() {
             self.0.get(&local_name).iter().find_map(|v| {
                 v.iter()
-                    .filter(|(n, _)| name.namespace_set().iter().any(|ns| *ns == *n))
+                    .filter(|(n, _)| name.namespace_set().iter().any(|ns| n.matches_ns(*ns)))
                     .map(|(_, v)| v)
                     .next()
             })
@@ -88,7 +86,7 @@ impl<'gc, V> PropertyMap<'gc, V> {
         if let Some(local_name) = name.local_name() {
             self.0.get(&local_name).iter().find_map(|v| {
                 v.iter()
-                    .filter(|(n, _)| name.namespace_set().iter().any(|ns| *ns == *n))
+                    .filter(|(n, _)| name.namespace_set().iter().any(|ns| n.matches_ns(*ns)))
                     .map(|(ns, v)| (*ns, v))
                     .next()
             })
@@ -99,7 +97,10 @@ impl<'gc, V> PropertyMap<'gc, V> {
 
     pub fn get_mut(&mut self, name: QName<'gc>) -> Option<&mut V> {
         if let Some(bucket) = self.0.get_mut(&name.local_name()) {
-            if let Some((_, old_value)) = bucket.iter_mut().find(|(n, _)| *n == name.namespace()) {
+            if let Some((_, old_value)) = bucket
+                .iter_mut()
+                .find(|(n, _)| n.matches_ns(name.namespace()))
+            {
                 return Some(old_value);
             }
         }
@@ -111,7 +112,7 @@ impl<'gc, V> PropertyMap<'gc, V> {
         self.0
             .get(&name.local_name())
             .iter()
-            .any(|v| v.iter().any(|(n, _)| *n == name.namespace()))
+            .any(|v| v.iter().any(|(n, _)| n.matches_ns(name.namespace())))
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (AvmString<'gc>, Namespace<'gc>, &V)> {
@@ -123,7 +124,10 @@ impl<'gc, V> PropertyMap<'gc, V> {
     pub fn insert(&mut self, name: QName<'gc>, mut value: V) -> Option<V> {
         let bucket = self.0.entry(name.local_name()).or_default();
 
-        if let Some((_, old_value)) = bucket.iter_mut().find(|(n, _)| *n == name.namespace()) {
+        if let Some((_, old_value)) = bucket
+            .iter_mut()
+            .find(|(n, _)| n.matches_ns(name.namespace()))
+        {
             swap(old_value, &mut value);
 
             Some(value)
@@ -142,7 +146,7 @@ impl<'gc, V> PropertyMap<'gc, V> {
     ) -> Option<V> {
         let bucket = self.0.entry(name).or_default();
 
-        if let Some((_, old_value)) = bucket.iter_mut().find(|(n, _)| *n == ns) {
+        if let Some((_, old_value)) = bucket.iter_mut().find(|(n, _)| n.matches_ns(ns)) {
             swap(old_value, &mut value);
 
             Some(value)
@@ -161,7 +165,7 @@ impl<'gc, V> PropertyMap<'gc, V> {
             let position = bucket
                 .iter_mut()
                 .enumerate()
-                .find(|(_, (n, _))| *n == name.namespace());
+                .find(|(_, (n, _))| n.matches_ns(name.namespace()));
             if let Some((position, _)) = position {
                 return Some(bucket.remove(position).1);
             }

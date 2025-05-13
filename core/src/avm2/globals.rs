@@ -1,48 +1,60 @@
 use crate::avm2::activation::Activation;
+use crate::avm2::api_version::ApiVersion;
 use crate::avm2::class::Class;
 use crate::avm2::domain::Domain;
-use crate::avm2::method::{Method, NativeMethodImpl};
-use crate::avm2::object::{ClassObject, FunctionObject, Object, ScriptObject, TObject};
+use crate::avm2::object::{ClassObject, ScriptObject, TObject};
 use crate::avm2::scope::{Scope, ScopeChain};
-use crate::avm2::script::Script;
-use crate::avm2::Avm2;
-use crate::avm2::Error;
-use crate::avm2::Multiname;
-use crate::avm2::Namespace;
-use crate::avm2::QName;
-use crate::string::AvmString;
+use crate::avm2::script::TranslationUnit;
+use crate::avm2::{Avm2, Error, Multiname, Namespace, QName};
+use crate::string::WStr;
 use crate::tag_utils::{self, ControlFlow, SwfMovie, SwfSlice, SwfStream};
-use gc_arena::{Collect, GcCell, MutationContext};
+use gc_arena::Collect;
 use std::sync::Arc;
 use swf::TagCode;
 
+mod __ruffle__;
 mod array;
+mod avmplus;
 mod boolean;
 mod class;
 mod date;
 mod error;
 pub mod flash;
 mod function;
-mod global_scope;
+pub mod global_scope;
 mod int;
 mod json;
 mod math;
 mod namespace;
+mod null;
 mod number;
 mod object;
-mod qname;
-mod regexp;
+mod q_name;
+mod reg_exp;
 mod string;
 mod toplevel;
 mod r#uint;
 mod vector;
+mod vector_double;
+mod vector_int;
+mod vector_object;
+mod vector_uint;
+mod void;
 mod xml;
 mod xml_list;
 
-pub(crate) const NS_RUFFLE_INTERNAL: &str = "https://ruffle.rs/AS3/impl/";
-pub(crate) const NS_VECTOR: &str = "__AS3__.vec";
-
-pub use flash::utils::NS_FLASH_PROXY;
+pub use toplevel::decode_uri;
+pub use toplevel::decode_uri_component;
+pub use toplevel::encode_uri;
+pub use toplevel::encode_uri_component;
+pub use toplevel::escape;
+pub use toplevel::is_finite;
+pub use toplevel::is_na_n;
+pub use toplevel::is_xml_name;
+pub use toplevel::parse_float;
+pub use toplevel::parse_int;
+pub use toplevel::trace;
+pub use toplevel::unescape;
 
 /// This structure represents all system builtin classes.
 #[derive(Clone, Collect)]
@@ -51,7 +63,6 @@ pub struct SystemClasses<'gc> {
     pub object: ClassObject<'gc>,
     pub function: ClassObject<'gc>,
     pub class: ClassObject<'gc>,
-    pub global: ClassObject<'gc>,
     pub string: ClassObject<'gc>,
     pub boolean: ClassObject<'gc>,
     pub number: ClassObject<'gc>,
@@ -73,13 +84,17 @@ pub struct SystemClasses<'gc> {
     pub textfield: ClassObject<'gc>,
     pub textformat: ClassObject<'gc>,
     pub graphics: ClassObject<'gc>,
+    pub loader: ClassObject<'gc>,
     pub loaderinfo: ClassObject<'gc>,
     pub bytearray: ClassObject<'gc>,
     pub stage: ClassObject<'gc>,
     pub sprite: ClassObject<'gc>,
     pub simplebutton: ClassObject<'gc>,
     pub regexp: ClassObject<'gc>,
-    pub vector: ClassObject<'gc>,
+    // the generic Vector class, useless until you .apply() type arg onto it
+    pub generic_vector: ClassObject<'gc>,
+    // Vector.<*>, NOT Vector.<Object>. Used as base class for new Vector<T>.
+    pub object_vector: ClassObject<'gc>,
     pub soundtransform: ClassObject<'gc>,
     pub soundchannel: ClassObject<'gc>,
     pub bitmap: ClassObject<'gc>,
@@ -88,6 +103,7 @@ pub struct SystemClasses<'gc> {
     pub qname: ClassObject<'gc>,
     pub mouseevent: ClassObject<'gc>,
     pub progressevent: ClassObject<'gc>,
+    pub httpstatusevent: ClassObject<'gc>,
     pub textevent: ClassObject<'gc>,
     pub errorevent: ClassObject<'gc>,
     pub ioerrorevent: ClassObject<'gc>,
@@ -95,18 +111,25 @@ pub struct SystemClasses<'gc> {
     pub transform: ClassObject<'gc>,
     pub colortransform: ClassObject<'gc>,
     pub matrix: ClassObject<'gc>,
+    pub matrix3d: ClassObject<'gc>,
+    pub perspectiveprojection: ClassObject<'gc>,
     pub illegaloperationerror: ClassObject<'gc>,
     pub eventdispatcher: ClassObject<'gc>,
     pub rectangle: ClassObject<'gc>,
     pub keyboardevent: ClassObject<'gc>,
     pub point: ClassObject<'gc>,
+    pub evalerror: ClassObject<'gc>,
     pub rangeerror: ClassObject<'gc>,
     pub referenceerror: ClassObject<'gc>,
     pub argumenterror: ClassObject<'gc>,
+    pub syntaxerror: ClassObject<'gc>,
     pub typeerror: ClassObject<'gc>,
     pub verifyerror: ClassObject<'gc>,
     pub ioerror: ClassObject<'gc>,
     pub eoferror: ClassObject<'gc>,
+    pub urierror: ClassObject<'gc>,
+    pub securityerror: ClassObject<'gc>,
+    pub error: ClassObject<'gc>,
     pub uncaughterrorevents: ClassObject<'gc>,
     pub statictext: ClassObject<'gc>,
     pub textlinemetrics: ClassObject<'gc>,
@@ -115,28 +138,96 @@ pub struct SystemClasses<'gc> {
     pub indexbuffer3d: ClassObject<'gc>,
     pub vertexbuffer3d: ClassObject<'gc>,
     pub program3d: ClassObject<'gc>,
+    pub urlvariables: ClassObject<'gc>,
+    pub bevelfilter: ClassObject<'gc>,
+    pub bitmapfilter: ClassObject<'gc>,
+    pub blurfilter: ClassObject<'gc>,
+    pub colormatrixfilter: ClassObject<'gc>,
+    pub convolutionfilter: ClassObject<'gc>,
+    pub displacementmapfilter: ClassObject<'gc>,
+    pub dropshadowfilter: ClassObject<'gc>,
+    pub glowfilter: ClassObject<'gc>,
+    pub gradientbevelfilter: ClassObject<'gc>,
+    pub gradientglowfilter: ClassObject<'gc>,
+    pub texture: ClassObject<'gc>,
+    pub cubetexture: ClassObject<'gc>,
+    pub rectangletexture: ClassObject<'gc>,
+    pub morphshape: ClassObject<'gc>,
+    pub shader: ClassObject<'gc>,
+    pub shaderinput: ClassObject<'gc>,
+    pub shaderparameter: ClassObject<'gc>,
+    pub netstatusevent: ClassObject<'gc>,
+    pub shaderfilter: ClassObject<'gc>,
+    pub statusevent: ClassObject<'gc>,
+    pub asyncerrorevent: ClassObject<'gc>,
+    pub contextmenuevent: ClassObject<'gc>,
+    pub filereference: ClassObject<'gc>,
+    pub filefilter: ClassObject<'gc>,
+    pub font: ClassObject<'gc>,
+    pub textline: ClassObject<'gc>,
+    pub sampledataevent: ClassObject<'gc>,
+    pub avm1movie: ClassObject<'gc>,
+    pub focusevent: ClassObject<'gc>,
+    pub dictionary: ClassObject<'gc>,
+    pub id3info: ClassObject<'gc>,
+    pub textrun: ClassObject<'gc>,
+    pub sharedobject: ClassObject<'gc>,
+}
+
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
+pub struct SystemClassDefs<'gc> {
+    pub object: Class<'gc>,
+    pub class: Class<'gc>,
+    pub function: Class<'gc>,
+    pub null: Class<'gc>,
+    pub void: Class<'gc>,
+
+    pub array: Class<'gc>,
+    pub boolean: Class<'gc>,
+    pub int: Class<'gc>,
+    pub generic_vector: Class<'gc>,
+    pub namespace: Class<'gc>,
+    pub number: Class<'gc>,
+    pub string: Class<'gc>,
+    pub uint: Class<'gc>,
+    pub xml: Class<'gc>,
+    pub xml_list: Class<'gc>,
+
+    pub bitmap: Class<'gc>,
+    pub bitmapdata: Class<'gc>,
+    pub igraphicsdata: Class<'gc>,
+    pub graphicsbitmapfill: Class<'gc>,
+    pub graphicsendfill: Class<'gc>,
+    pub graphicsgradientfill: Class<'gc>,
+    pub graphicspath: Class<'gc>,
+    pub graphicstrianglepath: Class<'gc>,
+    pub graphicssolidfill: Class<'gc>,
+    pub graphicsshaderfill: Class<'gc>,
+    pub graphicsstroke: Class<'gc>,
+    pub cubetexture: Class<'gc>,
+    pub rectangletexture: Class<'gc>,
+    pub display_object: Class<'gc>,
+    pub sprite: Class<'gc>,
+    pub urlrequestheader: Class<'gc>,
+    pub contextmenuitem: Class<'gc>,
 }
 
 impl<'gc> SystemClasses<'gc> {
     /// Construct a minimal set of system classes necessary for bootstrapping
     /// player globals.
     ///
-    /// All other system classes aside from the three given here will be set to
+    /// All other system classes aside from the two given here will be set to
     /// the empty object also handed to this function. It is the caller's
     /// responsibility to instantiate each class and replace the empty object
     /// with that.
-    fn new(
-        object: ClassObject<'gc>,
-        function: ClassObject<'gc>,
-        class: ClassObject<'gc>,
-        global: ClassObject<'gc>,
-    ) -> Self {
+    fn new(object: ClassObject<'gc>, class: ClassObject<'gc>) -> Self {
         SystemClasses {
             object,
-            function,
             class,
-            global,
+
             // temporary initialization
+            function: object,
             string: object,
             boolean: object,
             number: object,
@@ -158,13 +249,15 @@ impl<'gc> SystemClasses<'gc> {
             textfield: object,
             textformat: object,
             graphics: object,
+            loader: object,
             loaderinfo: object,
             bytearray: object,
             stage: object,
             sprite: object,
             simplebutton: object,
             regexp: object,
-            vector: object,
+            generic_vector: object,
+            object_vector: object,
             soundtransform: object,
             soundchannel: object,
             bitmap: object,
@@ -173,6 +266,7 @@ impl<'gc> SystemClasses<'gc> {
             qname: object,
             mouseevent: object,
             progressevent: object,
+            httpstatusevent: object,
             textevent: object,
             errorevent: object,
             ioerrorevent: object,
@@ -180,18 +274,25 @@ impl<'gc> SystemClasses<'gc> {
             transform: object,
             colortransform: object,
             matrix: object,
+            matrix3d: object,
+            perspectiveprojection: object,
             illegaloperationerror: object,
             eventdispatcher: object,
             rectangle: object,
             keyboardevent: object,
             point: object,
+            evalerror: object,
             rangeerror: object,
             referenceerror: object,
             argumenterror: object,
+            syntaxerror: object,
             typeerror: object,
             verifyerror: object,
             ioerror: object,
             eoferror: object,
+            urierror: object,
+            securityerror: object,
+            error: object,
             uncaughterrorevents: object,
             statictext: object,
             textlinemetrics: object,
@@ -200,410 +301,209 @@ impl<'gc> SystemClasses<'gc> {
             indexbuffer3d: object,
             vertexbuffer3d: object,
             program3d: object,
+            urlvariables: object,
+            bevelfilter: object,
+            bitmapfilter: object,
+            blurfilter: object,
+            colormatrixfilter: object,
+            convolutionfilter: object,
+            displacementmapfilter: object,
+            dropshadowfilter: object,
+            glowfilter: object,
+            gradientbevelfilter: object,
+            gradientglowfilter: object,
+            texture: object,
+            cubetexture: object,
+            rectangletexture: object,
+            morphshape: object,
+            shader: object,
+            shaderinput: object,
+            shaderparameter: object,
+            netstatusevent: object,
+            shaderfilter: object,
+            statusevent: object,
+            asyncerrorevent: object,
+            contextmenuevent: object,
+            filereference: object,
+            filefilter: object,
+            font: object,
+            textline: object,
+            sampledataevent: object,
+            avm1movie: object,
+            focusevent: object,
+            dictionary: object,
+            id3info: object,
+            textrun: object,
+            sharedobject: object,
         }
     }
 }
 
-/// Add a free-function builtin to the global scope.
-fn function<'gc>(
+impl<'gc> SystemClassDefs<'gc> {
+    fn new(object: Class<'gc>, class: Class<'gc>, null: Class<'gc>, void: Class<'gc>) -> Self {
+        SystemClassDefs {
+            object,
+            class,
+            null,
+            void,
+
+            // temporary initialization
+            array: object,
+            boolean: object,
+            int: object,
+            function: object,
+            generic_vector: object,
+            namespace: object,
+            number: object,
+            string: object,
+            uint: object,
+            xml: object,
+            xml_list: object,
+
+            bitmap: object,
+            bitmapdata: object,
+            igraphicsdata: object,
+            graphicsbitmapfill: object,
+            graphicsendfill: object,
+            graphicsgradientfill: object,
+            graphicspath: object,
+            graphicstrianglepath: object,
+            graphicssolidfill: object,
+            graphicsshaderfill: object,
+            graphicsstroke: object,
+            cubetexture: object,
+            rectangletexture: object,
+            display_object: object,
+            sprite: object,
+            urlrequestheader: object,
+            contextmenuitem: object,
+        }
+    }
+}
+
+/// Setup the `Object`, `Class`, and `void` classes, which are special "early
+/// classes". This step of VM initialization must be done before everything else,
+/// including the construction of the first `Script` and loading of any other classes.
+pub fn init_early_classes<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    package: impl Into<AvmString<'gc>>,
-    name: &'static str,
-    nf: NativeMethodImpl,
-    script: Script<'gc>,
+    tunit: TranslationUnit<'gc>,
 ) -> Result<(), Error<'gc>> {
-    let (_, mut global, mut domain) = script.init();
-    let mc = activation.context.gc_context;
-    let scope = activation.create_scopechain();
-    let qname = QName::new(Namespace::package(package), name);
-    let method = Method::from_builtin(nf, name, mc);
-    let as3fn = FunctionObject::from_method(activation, method, scope, None, None).into();
-    domain.export_definition(qname, script, mc)?;
-    global.install_const_late(mc, qname, as3fn, activation.avm2().classes().function);
+    // We know that Object is class #0 and Class is class #1 in the builtin ABC
+    const OBJECT_IDX: u32 = 0;
+    const CLASS_IDX: u32 = 1;
 
-    Ok(())
-}
+    let mc = activation.gc();
 
-/// Add a fully-formed class object builtin to the global scope.
-///
-/// This allows the caller to pre-populate the class's prototype with dynamic
-/// properties, if necessary.
-fn dynamic_class<'gc>(
-    mc: MutationContext<'gc, '_>,
-    class_object: ClassObject<'gc>,
-    script: Script<'gc>,
-    // The `ClassObject` of the `Class` class
-    class_class: ClassObject<'gc>,
-) -> Result<(), Error<'gc>> {
-    let (_, mut global, mut domain) = script.init();
-    let class = class_object.inner_class_definition();
-    let name = class.read().name();
+    // We need to load `Object`'s `i_class` before we do anything else, even
+    // initialize the script.
+    // Object's i_class has no superclass, so we load it first.
+    let object_i_class = Class::instance_from_abc_index(tunit, OBJECT_IDX, activation)?;
+    object_i_class.load_instance_traits(activation, tunit, OBJECT_IDX)?;
+    object_i_class.init_vtable(activation.context)?;
 
-    global.install_const_late(mc, name, class_object.into(), class_class);
-    domain.export_definition(name, script, mc)
-}
+    // We're going to need the `Object` class registered in the domain for the
+    // `Class` class to load. These will be overwritten when we properly load
+    // the rest of the classes, but it doesn't matter since it'll be overwritten
+    // with the same class anyways.
+    activation
+        .domain()
+        .export_class(object_i_class.name(), object_i_class, mc);
 
-/// Add a class builtin to the global scope.
-///
-/// This function returns the class object and class prototype as a class, which
-/// may be stored in `SystemClasses`
-fn class<'gc>(
-    activation: &mut Activation<'_, 'gc>,
-    class_def: GcCell<'gc, Class<'gc>>,
-    script: Script<'gc>,
-) -> Result<ClassObject<'gc>, Error<'gc>> {
-    let (_, mut global, mut domain) = script.init();
+    // Now we can load `Class`'s `i_class`:
+    let class_i_class = Class::instance_from_abc_index(tunit, CLASS_IDX, activation)?;
+    class_i_class.load_instance_traits(activation, tunit, CLASS_IDX)?;
+    class_i_class.init_vtable(activation.context)?;
 
-    let class_read = class_def.read();
-    let super_class = if let Some(sc_name) = class_read.super_class_name() {
-        let super_class: Result<Object<'gc>, Error<'gc>> = activation
-            .resolve_definition(sc_name)
-            .ok()
-            .and_then(|v| v)
-            .and_then(|v| v.as_object())
-            .ok_or_else(|| {
-                format!(
-                    "Could not resolve superclass {} when defining global class {}",
-                    sc_name.to_qualified_name(activation.context.gc_context),
-                    class_read
-                        .name()
-                        .to_qualified_name(activation.context.gc_context)
-                )
-                .into()
-            });
-        let super_class = super_class?
-            .as_class_object()
-            .ok_or_else(|| Error::from("Base class of a global class is not a class"))?;
+    // Register the `Class` class in the domain
+    activation
+        .domain()
+        .export_class(class_i_class.name(), class_i_class, mc);
 
-        Some(super_class)
-    } else {
-        None
-    };
+    // Now we can load the `c_class`es for `Object` and `Class` safely.
+    let object_c_class = Class::class_from_abc_index(tunit, OBJECT_IDX, class_i_class, activation)?;
+    object_c_class.load_class_traits(activation, tunit, OBJECT_IDX)?;
+    object_c_class.init_vtable(activation.context)?;
 
-    let class_name = class_read.name();
-    drop(class_read);
+    let class_c_class = Class::class_from_abc_index(tunit, CLASS_IDX, class_i_class, activation)?;
+    class_c_class.load_class_traits(activation, tunit, CLASS_IDX)?;
+    class_c_class.init_vtable(activation.context)?;
 
-    let class_object = ClassObject::from_class(activation, class_def, super_class)?;
-    global.install_const_late(
-        activation.context.gc_context,
-        class_name,
-        class_object.into(),
-        activation.avm2().classes().class,
-    );
-    domain.export_definition(class_name, script, activation.context.gc_context)?;
+    // Now we link the i_classes and c_classes with each other:
+    object_i_class.set_c_class(mc, object_c_class);
+    object_c_class.set_i_class(mc, object_i_class);
 
-    Ok(class_object)
-}
+    class_i_class.set_c_class(mc, class_c_class);
+    class_c_class.set_i_class(mc, class_i_class);
 
-macro_rules! avm2_system_class {
-    ($field:ident, $activation:ident, $class:expr, $script:expr) => {
-        let class_object = class($activation, $class, $script)?;
+    // Set the classes on the TranslationUnit to prevent `TranslationUnit::load_class`
+    // from creating duplicate classes for them
+    tunit.set_class(mc, OBJECT_IDX as usize, object_i_class);
+    tunit.set_class(mc, CLASS_IDX as usize, class_i_class);
 
-        let sc = $activation.avm2().system_classes.as_mut().unwrap();
-        sc.$field = class_object;
-    };
-}
+    // Set up the `null` and `void` classes and initialize `SystemClasses`
 
-/// Initialize the player global domain.
-///
-/// This should be called only once, to construct the global scope of the
-/// player. It will return a list of prototypes it has created, which should be
-/// stored on the AVM. All relevant declarations will also be attached to the
-/// given domain.
-pub fn load_player_globals<'gc>(
-    activation: &mut Activation<'_, 'gc>,
-    domain: Domain<'gc>,
-) -> Result<(), Error<'gc>> {
-    let mc = activation.context.gc_context;
+    // This is a weird internal class in avmplus, but it allows for implementing
+    // `describeType(null)` in a cleaner way
+    let null_def = null::create_class(activation);
 
-    let globals = ScriptObject::custom_object(activation.context.gc_context, None, None);
-    let gs = ScopeChain::new(domain).chain(mc, &[Scope::new(globals)]);
-    let script = Script::empty_script(mc, globals, domain);
+    // void doesn't have a ClassObject
+    let void_def = void::create_class(activation);
+    activation
+        .domain()
+        .export_class(void_def.name(), void_def, mc);
 
-    // Set the outer scope of this activation to the global scope.
-    activation.set_outer(gs);
-
-    // public / root package
-    //
-    // This part of global initialization is very complicated, because
-    // everything has to circularly reference everything else:
-    //
-    //  - Object is an instance of itself, as well as it's prototype
-    //  - All other types are instances of Class, which is an instance of
-    //    itself
-    //  - Function's prototype is an instance of itself
-    //  - All methods created by the above-mentioned classes are also instances
-    //    of Function
-    //  - All classes are put on Global's trait list, but Global needs
-    //    to be initialized first, but you can't do that until Object/Class are ready.
-    //
-    // Hence, this ridiculously complicated dance of classdef, type allocation,
-    // and partial initialization.
-    let object_classdef = object::create_class(mc);
-    let object_class = ClassObject::from_class_partial(activation, object_classdef, None)?;
-    let object_proto = ScriptObject::custom_object(mc, Some(object_class), None);
-
-    let fn_classdef = function::create_class(mc);
-    let fn_class = ClassObject::from_class_partial(activation, fn_classdef, Some(object_class))?;
-    let fn_proto = ScriptObject::custom_object(mc, Some(fn_class), Some(object_proto));
-
-    let class_classdef = class::create_class(mc);
-    let class_class =
-        ClassObject::from_class_partial(activation, class_classdef, Some(object_class))?;
-    let class_proto = ScriptObject::custom_object(mc, Some(object_class), Some(object_proto));
-
-    let global_classdef = global_scope::create_class(mc);
-    let global_class =
-        ClassObject::from_class_partial(activation, global_classdef, Some(object_class))?;
-    let global_proto = ScriptObject::custom_object(mc, Some(object_class), Some(object_proto));
-
-    // Now to weave the Gordian knot...
-    object_class.link_prototype(activation, object_proto)?;
-    object_class.link_type(activation, class_proto, class_class);
-
-    fn_class.link_prototype(activation, fn_proto)?;
-    fn_class.link_type(activation, class_proto, class_class);
-
-    class_class.link_prototype(activation, class_proto)?;
-    class_class.link_type(activation, class_proto, class_class);
-
-    global_class.link_prototype(activation, global_proto)?;
-    global_class.link_type(activation, class_proto, class_class);
-
-    // At this point, we need at least a partial set of system classes in
-    // order to continue initializing the player. The rest of the classes
-    // are set to a temporary class until we have a chance to initialize them.
-
-    activation.context.avm2.system_classes = Some(SystemClasses::new(
-        object_class,
-        fn_class,
-        class_class,
-        global_class,
+    activation.avm2().system_class_defs = Some(SystemClassDefs::new(
+        object_i_class,
+        class_i_class,
+        null_def,
+        void_def,
     ));
 
-    // Our activation environment is now functional enough to finish
-    // initializing the core class weave. The order of initialization shouldn't
-    // matter here, as long as all the initialization machinery can see and
-    // link the various system types together correctly.
-    let class_class = class_class.into_finished_class(activation)?;
-    let fn_class = fn_class.into_finished_class(activation)?;
-    let object_class = object_class.into_finished_class(activation)?;
-    let _global_class = global_class.into_finished_class(activation)?;
+    // NOTE: We don't create correct outer ScopeChains for `Object` and `Class`
+    // here. This could cause unexpected behavior in their code, but the current
+    // AS method implementations don't ever use properties from the outer ScopeChain.
+    // However, we do need to ensure that the outer ScopeChain isn't zero-sized.
+    // We will need to replace this ScopeChain once the script is created.
+    let dummy_object =
+        ScriptObject::custom_object(mc, object_i_class, None, object_i_class.vtable());
 
-    globals.set_proto(mc, global_proto);
-    globals.set_instance_of(mc, global_class);
-    globals.fork_vtable(activation.context.gc_context);
+    let empty_scope = ScopeChain::new(tunit.domain());
+    let dummy_scope = empty_scope.chain(mc, &[Scope::new(dummy_object.into())]);
+    activation.set_outer(dummy_scope);
 
-    // From this point, `globals` is safe to be modified
+    // Finally, we can actually create the ClassObjects for `Object` and `Class`.
 
-    dynamic_class(mc, object_class, script, class_class)?;
-    dynamic_class(mc, fn_class, script, class_class)?;
-    dynamic_class(mc, class_class, script, class_class)?;
+    let object_class = ClassObject::from_class_partial(activation, object_i_class, None);
+    let object_proto =
+        ScriptObject::custom_object(mc, object_i_class, None, object_class.instance_vtable());
 
-    // After this point, it is safe to initialize any other classes.
-    // Make sure to initialize superclasses *before* their subclasses!
-
-    avm2_system_class!(string, activation, string::create_class(mc), script);
-    avm2_system_class!(boolean, activation, boolean::create_class(mc), script);
-    avm2_system_class!(number, activation, number::create_class(mc), script);
-    avm2_system_class!(int, activation, int::create_class(mc), script);
-    avm2_system_class!(uint, activation, uint::create_class(mc), script);
-    avm2_system_class!(namespace, activation, namespace::create_class(mc), script);
-    avm2_system_class!(qname, activation, qname::create_class(mc), script);
-    avm2_system_class!(array, activation, array::create_class(mc), script);
-
-    function(activation, "", "trace", toplevel::trace, script)?;
-    function(
-        activation,
-        "__ruffle__",
-        "log_warn",
-        toplevel::log_warn,
-        script,
-    )?;
-    function(
-        activation,
-        "__ruffle__",
-        "stub_method",
-        toplevel::stub_method,
-        script,
-    )?;
-    function(
-        activation,
-        "__ruffle__",
-        "stub_getter",
-        toplevel::stub_getter,
-        script,
-    )?;
-    function(
-        activation,
-        "__ruffle__",
-        "stub_setter",
-        toplevel::stub_setter,
-        script,
-    )?;
-    function(
-        activation,
-        "__ruffle__",
-        "stub_constructor",
-        toplevel::stub_constructor,
-        script,
-    )?;
-    function(activation, "", "isFinite", toplevel::is_finite, script)?;
-    function(activation, "", "isNaN", toplevel::is_nan, script)?;
-    function(activation, "", "parseInt", toplevel::parse_int, script)?;
-    function(activation, "", "parseFloat", toplevel::parse_float, script)?;
-    function(activation, "", "escape", toplevel::escape, script)?;
-
-    avm2_system_class!(regexp, activation, regexp::create_class(mc), script);
-    avm2_system_class!(vector, activation, vector::create_class(mc), script);
-
-    avm2_system_class!(date, activation, date::create_class(mc), script);
-
-    // package `flash.system`
-    avm2_system_class!(
-        application_domain,
-        activation,
-        flash::system::application_domain::create_class(mc),
-        script
+    let class_class =
+        ClassObject::from_class_partial(activation, class_i_class, Some(object_class));
+    let class_proto = ScriptObject::custom_object(
+        mc,
+        object_i_class,
+        Some(object_proto),
+        object_class.instance_vtable(),
     );
 
-    class(
-        activation,
-        flash::events::ieventdispatcher::create_interface(mc),
-        script,
-    )?;
-    avm2_system_class!(
-        eventdispatcher,
-        activation,
-        flash::events::eventdispatcher::create_class(mc),
-        script
-    );
+    // Now to weave the Gordian knot...
+    object_class.link_prototype(activation, object_proto);
+    object_class.link_type(mc, class_proto);
 
-    // package `flash.display`
-    class(
-        activation,
-        flash::display::ibitmapdrawable::create_interface(mc),
-        script,
-    )?;
-    avm2_system_class!(
-        display_object,
-        activation,
-        flash::display::displayobject::create_class(mc),
-        script
-    );
-    avm2_system_class!(
-        shape,
-        activation,
-        flash::display::shape::create_class(mc),
-        script
-    );
-    class(
-        activation,
-        flash::display::interactiveobject::create_class(mc),
-        script,
-    )?;
-    avm2_system_class!(
-        simplebutton,
-        activation,
-        flash::display::simplebutton::create_class(mc),
-        script
-    );
-    class(
-        activation,
-        flash::display::displayobjectcontainer::create_class(mc),
-        script,
-    )?;
-    avm2_system_class!(
-        sprite,
-        activation,
-        flash::display::sprite::create_class(mc),
-        script
-    );
-    avm2_system_class!(
-        movieclip,
-        activation,
-        flash::display::movieclip::create_class(mc),
-        script
-    );
-    avm2_system_class!(
-        graphics,
-        activation,
-        flash::display::graphics::create_class(mc),
-        script
-    );
-    avm2_system_class!(
-        loaderinfo,
-        activation,
-        flash::display::loaderinfo::create_class(mc),
-        script
-    );
-    avm2_system_class!(
-        stage,
-        activation,
-        flash::display::stage::create_class(mc),
-        script
-    );
-    avm2_system_class!(
-        bitmap,
-        activation,
-        flash::display::bitmap::create_class(mc),
-        script
-    );
-    avm2_system_class!(
-        bitmapdata,
-        activation,
-        flash::display::bitmapdata::create_class(mc),
-        script
-    );
+    class_class.link_prototype(activation, class_proto);
+    class_class.link_type(mc, class_proto);
 
-    // package `flash.geom`
+    // At this point, we need both early classes to be available in `SystemClasses`
+    // in order to call `into_finished_class` on both ClassObjects.
 
-    // package `flash.media`
-    avm2_system_class!(
-        video,
-        activation,
-        flash::media::video::create_class(mc),
-        script
-    );
-    class(activation, flash::media::sound::create_class(mc), script)?;
-    avm2_system_class!(
-        soundtransform,
-        activation,
-        flash::media::soundtransform::create_class(mc),
-        script
-    );
-    class(
-        activation,
-        flash::media::soundmixer::create_class(mc),
-        script,
-    )?;
-    avm2_system_class!(
-        soundchannel,
-        activation,
-        flash::media::soundchannel::create_class(mc),
-        script
-    );
+    activation.avm2().system_classes = Some(SystemClasses::new(object_class, class_class));
 
-    // package `flash.text`
-    avm2_system_class!(
-        textfield,
-        activation,
-        flash::text::textfield::create_class(mc),
-        script
-    );
-    avm2_system_class!(
-        textformat,
-        activation,
-        flash::text::textformat::create_class(mc),
-        script
-    );
-    class(activation, flash::text::font::create_class(mc), script)?;
+    // Construct the `ClassObject`s. We will run the class initializers later.
+    class_class.into_finished_class(activation);
+    object_class.into_finished_class(activation);
 
-    // Inside this call, the macro `avm2_system_classes_playerglobal`
-    // triggers classloading. Therefore, we run `load_playerglobal`
-    // relative late, so that it can access classes defined before
-    // this call.
-    load_playerglobal(activation, domain)?;
+    // Reset the Activation's outer scope.
+    activation.set_outer(empty_scope);
 
     Ok(())
 }
@@ -616,68 +516,152 @@ mod native {
     include!(concat!(env!("OUT_DIR"), "/native_table.rs"));
 }
 
-/// Loads classes from our custom 'playerglobal' (which are written in ActionScript)
-/// into the environment. See 'core/src/avm2/globals/README.md' for more information
-fn load_playerglobal<'gc>(
-    activation: &mut Activation<'_, 'gc>,
-    domain: Domain<'gc>,
-) -> Result<(), Error<'gc>> {
-    activation.avm2().native_method_table = native::NATIVE_METHOD_TABLE;
-    activation.avm2().native_instance_allocator_table = native::NATIVE_INSTANCE_ALLOCATOR_TABLE;
-    activation.avm2().native_instance_init_table = native::NATIVE_INSTANCE_INIT_TABLE;
+// Allow accessing slots that are meant to be accessed natively by using
+// avm2::globals::slots::*;
+pub mod slots {
+    pub use super::native::slots::*;
+}
 
-    let movie =
-        SwfMovie::from_data(PLAYERGLOBAL, None, None).expect("playerglobal.swf should be valid");
+// Do the same for methods
+pub mod methods {
+    pub use super::native::methods::*;
+}
 
-    let slice = SwfSlice::from(Arc::new(movie));
+// This acts the same way as 'avm2_system_class', but for classes
+// declared in 'playerglobal'. Classes are declared as ("package", "class", field_name),
+// and are stored in 'avm2().system_classes'
+macro_rules! avm2_system_classes_playerglobal {
+    ($activation:expr, [$(($package:expr, $class_name:expr, $field:ident)),* $(,)?]) => {
+        let activation = $activation;
+        $(
+            // Package and class names are ASCII
+            let package = WStr::from_units($package.as_bytes());
+            let class_name = WStr::from_units($class_name.as_bytes());
 
-    let mut reader = slice.read_from(0);
+            let package = activation.strings().intern_static(package);
+            let class_name = activation.strings().intern_static(class_name);
 
-    let tag_callback = |reader: &mut SwfStream<'_>, tag_code, _tag_len| {
-        if tag_code == TagCode::DoAbc {
-            let do_abc = reader
-                .read_do_abc()
-                .expect("playerglobal.swf should be valid");
-            Avm2::do_abc(&mut activation.context, do_abc, domain)
-                .expect("playerglobal.swf should be valid");
-        } else if tag_code != TagCode::End {
-            panic!("playerglobal should only contain `DoAbc` tag - found tag {tag_code:?}")
-        }
-        Ok(ControlFlow::Continue)
-    };
-
-    let _ = tag_utils::decode_tags(&mut reader, tag_callback);
-    macro_rules! avm2_system_classes_playerglobal {
-        ($activation:expr, $script:expr, [$(($package:expr, $class_name:expr, $field:ident)),* $(,)?]) => {
-            $(
-                let name = Multiname::new(Namespace::package($package), $class_name);
-                let class_object = activation.resolve_class(&name)?;
-                let sc = $activation.avm2().system_classes.as_mut().unwrap();
-                sc.$field = class_object;
-            )*
-        }
+            // Lookup with the highest version, so we we see all defined classes here
+            let ns = Namespace::package(package, ApiVersion::VM_INTERNAL, activation.strings());
+            let name = QName::new(ns, class_name);
+            let class_object = activation.domain().get_defined_value(activation, name).unwrap_or_else(|e| panic!("Failed to lookup {name:?}: {e:?}"));
+            let class_object = class_object.as_object().unwrap().as_class_object().unwrap();
+            let sc = activation.avm2().system_classes.as_mut().unwrap();
+            sc.$field = class_object;
+        )*
     }
+}
 
-    // This acts the same way as 'avm2_system_class', but for classes
-    // declared in 'playerglobal'. Classes are declared as ("package", "class", field_name),
-    // and are stored in 'avm2().system_classes'
+macro_rules! avm2_system_class_defs_playerglobal {
+    ($activation:expr, [$(($package:expr, $class_name:expr, $field:ident)),* $(,)?]) => {
+        let activation = $activation;
+        $(
+            // Package and class names are ASCII
+            let package = WStr::from_units($package.as_bytes());
+            let class_name = WStr::from_units($class_name.as_bytes());
+
+            let package = activation.strings().intern_static(package);
+            let class_name = activation.strings().intern_static(class_name);
+
+            let domain = activation.domain();
+
+            // Lookup with the highest version, so we we see all defined classes here
+            let ns = Namespace::package(package, ApiVersion::VM_INTERNAL, activation.strings());
+            let name = Multiname::new(ns, class_name);
+            let class_def = domain.get_class(activation.context, &name).unwrap_or_else(|| panic!("Failed to lookup {name:?}"));
+            let sc = activation.avm2().system_class_defs.as_mut().unwrap();
+            sc.$field = class_def;
+        )*
+    }
+}
+
+pub fn init_builtin_system_classes(activation: &mut Activation<'_, '_>) {
+    // We don't include `Function` here because it registers itself manually
+    // in its class initializer
     avm2_system_classes_playerglobal!(
-        activation,
-        script,
+        &mut *activation,
         [
             ("", "ArgumentError", argumenterror),
+            ("", "Array", array),
+            ("", "Boolean", boolean),
+            ("", "Error", error),
+            ("", "EvalError", evalerror),
+            ("", "int", int),
+            ("", "Namespace", namespace),
+            ("", "Number", number),
+            ("", "QName", qname),
             ("", "RangeError", rangeerror),
             ("", "ReferenceError", referenceerror),
+            ("", "SecurityError", securityerror),
+            ("", "String", string),
+            ("", "SyntaxError", syntaxerror),
             ("", "TypeError", typeerror),
+            ("", "uint", uint),
+            ("", "URIError", urierror),
             ("", "VerifyError", verifyerror),
             ("", "XML", xml),
             ("", "XMLList", xml_list),
+            ("__AS3__.vec", "Vector", generic_vector),
+        ]
+    );
+
+    crate::avm2::globals::vector::init_vector_class_objects(activation);
+}
+
+pub fn init_builtin_system_class_defs(activation: &mut Activation<'_, '_>) {
+    avm2_system_class_defs_playerglobal!(
+        &mut *activation,
+        [
+            ("", "Array", array),
+            ("", "Boolean", boolean),
+            ("", "Function", function),
+            ("", "int", int),
+            ("", "Namespace", namespace),
+            ("", "Number", number),
+            ("", "String", string),
+            ("", "uint", uint),
+            ("", "XML", xml),
+            ("", "XMLList", xml_list),
+            ("__AS3__.vec", "Vector", generic_vector),
+        ]
+    );
+
+    crate::avm2::globals::vector::init_vector_class_defs(activation);
+}
+
+pub fn init_native_system_classes(activation: &mut Activation<'_, '_>) {
+    avm2_system_classes_playerglobal!(
+        &mut *activation,
+        [
+            ("", "Date", date),
+            ("", "RegExp", regexp),
+            ("flash.display", "AVM1Movie", avm1movie),
+            ("flash.display", "Bitmap", bitmap),
+            ("flash.display", "BitmapData", bitmapdata),
             ("flash.display", "Scene", scene),
             ("flash.display", "FrameLabel", framelabel),
+            ("flash.display", "Graphics", graphics),
+            ("flash.display", "Loader", loader),
+            ("flash.display", "LoaderInfo", loaderinfo),
+            ("flash.display", "MorphShape", morphshape),
+            ("flash.display", "MovieClip", movieclip),
+            ("flash.display", "ShaderInput", shaderinput),
+            ("flash.display", "ShaderParameter", shaderparameter),
+            ("flash.display", "Shape", shape),
+            ("flash.display", "SimpleButton", simplebutton),
+            ("flash.display", "Sprite", sprite),
+            ("flash.display", "Stage", stage),
             ("flash.display", "Stage3D", stage3d),
             ("flash.display3D", "Context3D", context3d),
             ("flash.display3D", "IndexBuffer3D", indexbuffer3d),
             ("flash.display3D", "Program3D", program3d),
+            ("flash.display3D.textures", "CubeTexture", cubetexture),
+            ("flash.display3D.textures", "Texture", texture),
+            (
+                "flash.display3D.textures",
+                "RectangleTexture",
+                rectangletexture
+            ),
             ("flash.display3D", "VertexBuffer3D", vertexbuffer3d),
             (
                 "flash.errors",
@@ -687,27 +671,140 @@ fn load_playerglobal<'gc>(
             ("flash.errors", "IOError", ioerror),
             ("flash.errors", "EOFError", eoferror),
             ("flash.events", "Event", event),
+            ("flash.events", "EventDispatcher", eventdispatcher),
             ("flash.events", "TextEvent", textevent),
             ("flash.events", "ErrorEvent", errorevent),
             ("flash.events", "KeyboardEvent", keyboardevent),
             ("flash.events", "ProgressEvent", progressevent),
+            ("flash.events", "HTTPStatusEvent", httpstatusevent),
             ("flash.events", "SecurityErrorEvent", securityerrorevent),
             ("flash.events", "IOErrorEvent", ioerrorevent),
             ("flash.events", "MouseEvent", mouseevent),
             ("flash.events", "FullScreenEvent", fullscreenevent),
             ("flash.events", "UncaughtErrorEvents", uncaughterrorevents),
+            ("flash.events", "NetStatusEvent", netstatusevent),
+            ("flash.events", "StatusEvent", statusevent),
+            ("flash.events", "AsyncErrorEvent", asyncerrorevent),
+            ("flash.events", "ContextMenuEvent", contextmenuevent),
+            ("flash.events", "FocusEvent", focusevent),
             ("flash.geom", "Matrix", matrix),
+            ("flash.geom", "Matrix3D", matrix3d),
+            ("flash.geom", "PerspectiveProjection", perspectiveprojection),
             ("flash.geom", "Point", point),
             ("flash.geom", "Rectangle", rectangle),
             ("flash.geom", "Transform", transform),
             ("flash.geom", "ColorTransform", colortransform),
+            ("flash.media", "ID3Info", id3info),
+            ("flash.media", "SoundChannel", soundchannel),
+            ("flash.media", "SoundTransform", soundtransform),
+            ("flash.media", "Video", video),
+            ("flash.net", "URLVariables", urlvariables),
+            ("flash.net", "FileReference", filereference),
+            ("flash.net", "FileFilter", filefilter),
+            ("flash.net", "SharedObject", sharedobject),
             ("flash.utils", "ByteArray", bytearray),
+            ("flash.utils", "Dictionary", dictionary),
+            ("flash.system", "ApplicationDomain", application_domain),
+            ("flash.text", "Font", font),
             ("flash.text", "StaticText", statictext),
+            ("flash.text", "TextFormat", textformat),
+            ("flash.text", "TextField", textfield),
             ("flash.text", "TextLineMetrics", textlinemetrics),
+            ("flash.text", "TextRun", textrun),
+            ("flash.text.engine", "TextLine", textline),
+            ("flash.filters", "BevelFilter", bevelfilter),
+            ("flash.filters", "BitmapFilter", bitmapfilter),
+            ("flash.filters", "BlurFilter", blurfilter),
+            ("flash.filters", "ColorMatrixFilter", colormatrixfilter),
+            ("flash.filters", "ConvolutionFilter", convolutionfilter),
+            (
+                "flash.filters",
+                "DisplacementMapFilter",
+                displacementmapfilter
+            ),
+            ("flash.filters", "DropShadowFilter", dropshadowfilter),
+            ("flash.filters", "GlowFilter", glowfilter),
+            ("flash.filters", "GradientBevelFilter", gradientbevelfilter),
+            ("flash.filters", "GradientGlowFilter", gradientglowfilter),
+            ("flash.filters", "ShaderFilter", shaderfilter),
+            ("flash.events", "SampleDataEvent", sampledataevent),
         ]
     );
 
+    avm2_system_class_defs_playerglobal!(
+        &mut *activation,
+        [
+            ("flash.display", "Bitmap", bitmap),
+            ("flash.display", "BitmapData", bitmapdata),
+            ("flash.display", "DisplayObject", display_object),
+            ("flash.display", "IGraphicsData", igraphicsdata),
+            ("flash.display", "GraphicsBitmapFill", graphicsbitmapfill),
+            ("flash.display", "GraphicsEndFill", graphicsendfill),
+            (
+                "flash.display",
+                "GraphicsGradientFill",
+                graphicsgradientfill
+            ),
+            ("flash.display", "GraphicsPath", graphicspath),
+            (
+                "flash.display",
+                "GraphicsTrianglePath",
+                graphicstrianglepath
+            ),
+            ("flash.display", "GraphicsSolidFill", graphicssolidfill),
+            ("flash.display", "GraphicsStroke", graphicsstroke),
+            ("flash.display", "Sprite", sprite),
+            ("flash.display3D.textures", "CubeTexture", cubetexture),
+            (
+                "flash.display3D.textures",
+                "RectangleTexture",
+                rectangletexture
+            ),
+            ("flash.net", "URLRequestHeader", urlrequestheader),
+            ("flash.ui", "ContextMenuItem", contextmenuitem),
+        ]
+    );
+}
+
+/// Loads classes from our custom 'playerglobal' (which are written in ActionScript)
+/// into the environment. See 'core/src/avm2/globals/README.md' for more information
+pub fn load_playerglobal<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    domain: Domain<'gc>,
+) -> Result<(), Error<'gc>> {
+    activation.avm2().native_method_table = native::NATIVE_METHOD_TABLE;
+    activation.avm2().native_instance_allocator_table = native::NATIVE_INSTANCE_ALLOCATOR_TABLE;
+    activation.avm2().native_call_handler_table = native::NATIVE_CALL_HANDLER_TABLE;
+    activation.avm2().native_custom_constructor_table = native::NATIVE_CUSTOM_CONSTRUCTOR_TABLE;
+
+    let movie = Arc::new(
+        SwfMovie::from_data(PLAYERGLOBAL, "file:///".into(), None)
+            .expect("playerglobal.swf should be valid"),
+    );
+
+    let slice = SwfSlice::from(movie.clone());
+
+    let mut reader = slice.read_from(0);
+
+    let tag_callback = |reader: &mut SwfStream<'_>, tag_code, _tag_len| {
+        if tag_code == TagCode::DoAbc2 {
+            let do_abc = reader
+                .read_do_abc_2()
+                .expect("playerglobal.swf should be valid");
+            Avm2::load_builtin_abc(activation.context, do_abc.data, domain, movie.clone());
+        } else if tag_code != TagCode::End {
+            panic!("playerglobal should only contain `DoAbc2` tag - found tag {tag_code:?}")
+        }
+        Ok(ControlFlow::Continue)
+    };
+
+    let _ = tag_utils::decode_tags(&mut reader, tag_callback);
+
     // Domain memory must be initialized after playerglobals is loaded because it relies on ByteArray.
     domain.init_default_domain_memory(activation)?;
+    activation
+        .avm2()
+        .stage_domain()
+        .init_default_domain_memory(activation)?;
     Ok(())
 }

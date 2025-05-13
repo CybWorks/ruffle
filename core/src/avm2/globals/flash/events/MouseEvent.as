@@ -2,7 +2,6 @@
 package flash.events
 {
     import flash.display.InteractiveObject;
-    import __ruffle__.stub_method;
 
     public class MouseEvent extends Event
     {
@@ -17,26 +16,37 @@ package flash.events
         public static const MOUSE_WHEEL:String = "mouseWheel";
         public static const ROLL_OUT:String = "rollOut";
         public static const ROLL_OVER:String = "rollOver";
+        [API("678")]
         public static const MIDDLE_CLICK:String = "middleClick";
+        [API("678")]
         public static const MIDDLE_MOUSE_DOWN:String = "middleMouseDown";
+        [API("678")]
         public static const MIDDLE_MOUSE_UP:String = "middleMouseUp";
+        [API("678")]
         public static const RIGHT_CLICK:String = "rightClick";
+        [API("678")]
         public static const RIGHT_MOUSE_DOWN:String = "rightMouseDown";
+        [API("678")]
         public static const RIGHT_MOUSE_UP:String = "rightMouseUp";
+        [API("678")]
         public static const CONTEXT_MENU:String = "contextMenu";
 
-        public var relatedObject: InteractiveObject;
-        public var localX: Number;
-        public var localY: Number;
-        public var ctrlKey: Boolean;
-        public var altKey: Boolean;
-        public var shiftKey: Boolean;
-        public var buttonDown: Boolean;
-        public var delta: int;
-        public var isRelatedObjectInaccessible: Boolean;
+        private var _isRelatedObjectInaccessible: Boolean;
+        private var _relatedObject: InteractiveObject;
 
-        public var movementX: Number;
-        public var movementY: Number;
+        [Ruffle(NativeAccessible)]
+        private var _localX: Number;
+
+        [Ruffle(NativeAccessible)]
+        private var _localY: Number;
+
+        private var _delta: int;
+        private var _buttonDown: Boolean;
+        private var _altKey: Boolean;
+        private var _ctrlKey: Boolean;
+        private var _shiftKey: Boolean;
+        private var _movementX: Number;
+        private var _movementY: Number;
 
         public function MouseEvent(type:String, 
                                    bubbles:Boolean = true, 
@@ -59,7 +69,6 @@ package flash.events
             this.shiftKey = shiftKey;
             this.buttonDown = buttonDown;
             this.delta = delta;
-            this.isRelatedObjectInaccessible = false; // unimplemented
 
             this.movementX = 0.0; // unimplemented
             this.movementY = 0.0; // unimplemented
@@ -76,10 +85,99 @@ package flash.events
             return this.formatToString("MouseEvent","type","bubbles","cancelable","eventPhase","localX","localY","stageX","stageY","relatedObject","ctrlKey","altKey","shiftKey","buttonDown","delta");
         }
 
-        public function updateAfterEvent():void {
-            // TODO - determine when we should actually force a frame to be rendered.
-            stub_method("flash.events.MouseEvent", "updateAfterEvent");
+        public function get isRelatedObjectInaccessible():Boolean {
+            return this._isRelatedObjectInaccessible;
         }
+
+        public function set isRelatedObjectInaccessible(value:Boolean):void {
+            this._isRelatedObjectInaccessible = value;
+        }
+
+        public function get relatedObject():InteractiveObject {
+            return this._relatedObject;
+        }
+
+        public function set relatedObject(value:InteractiveObject):void {
+            this._relatedObject = value;
+        }
+
+        public function get localX():Number {
+            return this._localX;
+        }
+
+        public function set localX(value:Number):void {
+            this._localX = value;
+        }
+
+        public function get localY():Number {
+            return this._localY;
+        }
+
+        public function set localY(value:Number):void {
+            this._localY = value;
+        }
+
+        public function get delta():int {
+            return this._delta;
+        }
+
+        public function set delta(value:int):void {
+            this._delta = value;
+        }
+
+        public function get buttonDown():Boolean {
+            return this._buttonDown;
+        }
+
+        public function set buttonDown(value:Boolean):void {
+            this._buttonDown = value;
+        }
+
+        public function get altKey():Boolean {
+            return this._altKey;
+        }
+
+        public function set altKey(value:Boolean):void {
+            this._altKey = value;
+        }
+
+        public function get ctrlKey():Boolean {
+            return this._ctrlKey;
+        }
+
+        public function set ctrlKey(value:Boolean):void {
+            this._ctrlKey = value;
+        }
+
+        public function get shiftKey():Boolean {
+            return this._shiftKey;
+        }
+
+        public function set shiftKey(value:Boolean):void {
+            this._shiftKey = value;
+        }
+
+        [API("678")]
+        public function get movementX():Number {
+            return this._movementX;
+        }
+
+        [API("678")]
+        public function set movementX(value:Number):void {
+            this._movementX = value;
+        }
+
+        [API("678")]
+        public function get movementY():Number {
+            return this._movementY;
+        }
+
+        [API("678")]
+        public function set movementY(value:Number):void {
+            this._movementY = value;
+        }
+
+        public native function updateAfterEvent():void;
 
         public native function get stageX() : Number;
         public native function get stageY() : Number;

@@ -3,15 +3,14 @@
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::globals::as_broadcaster::BroadcasterFunctions;
-use crate::avm1::object::script_object::ScriptObject;
-use crate::avm1::object::TObject;
 use crate::avm1::property::Attribute;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
-use crate::avm1::{ArrayObject, Object, Value};
+use crate::avm1::{ArrayBuilder, Object, Value};
 use crate::backend::navigator::Request;
-use crate::display_object::{TDisplayObject, TDisplayObjectContainer};
-use crate::loader::MovieLoaderEventHandler;
-use gc_arena::MutationContext;
+use crate::display_object::TDisplayObject;
+use crate::loader::MovieLoaderVMData;
+use crate::string::StringContext;
+use ruffle_macros::istr;
 
 const PROTO_DECLS: &[Declaration] = declare_properties! {
     "loadClip" => method(load_clip; DONT_ENUM | DONT_DELETE);
@@ -24,18 +23,14 @@ pub fn constructor<'gc>(
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let listeners = ArrayObject::new(
-        activation.context.gc_context,
-        activation.context.avm1.prototypes().array,
-        [this.into()],
-    );
+    let listeners = ArrayBuilder::new(activation).with([this.into()]);
     this.define_value(
-        activation.context.gc_context,
-        "_listeners",
-        Value::Object(listeners.into()),
+        activation.gc(),
+        istr!("_listeners"),
+        Value::Object(listeners),
         Attribute::DONT_ENUM,
     );
-    Ok(this.into())
+    Ok(Value::Undefined)
 }
 
 fn load_clip<'gc>(
@@ -53,9 +48,10 @@ fn load_clip<'gc>(
                 Value::Number(level_id) => {
                     // Levels are rounded down.
                     // TODO: What happens with negative levels?
-                    Some(activation.resolve_level(*level_id as i32))
+                    Some(activation.get_or_create_level(*level_id as i32))
                 }
                 Value::Object(object) => object.as_display_object(),
+                Value::MovieClip(_) => target.coerce_to_object(activation).as_display_object(),
                 _ => None,
             };
             if let Some(target) = target {
@@ -64,8 +60,9 @@ fn load_clip<'gc>(
                     target,
                     Request::get(url.to_utf8_lossy().into_owned()),
                     None,
-                    Some(MovieLoaderEventHandler::Avm1Broadcast(this)),
-                    None,
+                    MovieLoaderVMData::Avm1 {
+                        broadcaster: Some(this),
+                    },
                 );
                 activation.context.navigator.spawn_future(future);
 
@@ -93,15 +90,20 @@ fn unload_clip<'gc>(
             Value::Number(level_id) => {
                 // Levels are rounded down.
                 // TODO: What happens with negative levels?
-                activation.context.stage.child_by_depth(*level_id as i32)
+                activation.get_level(*level_id as i32)
             }
             Value::Object(object) => object.as_display_object(),
+            Value::MovieClip(_) => target.coerce_to_object(activation).as_display_object(),
             _ => None,
         };
         if let Some(target) = target {
-            target.unload(&mut activation.context);
-            if let Some(mut mc) = target.as_movie_clip() {
-                mc.replace_with_movie(&mut activation.context, None, None);
+            // TODO: Find out what's the correct behaviour. If target isn't a MovieClip,
+            // does Flash also wait a frame to execute avm1_unload? Is avm1_unload_movie
+            // the correct call?
+            if let Some(mc) = target.as_movie_clip() {
+                mc.avm1_unload_movie(activation.context);
+            } else {
+                target.avm1_unload(activation.context);
             }
             return Ok(true.into());
         }
@@ -126,24 +128,25 @@ fn get_progress<'gc>(
             Value::Number(level_id) => {
                 // Levels are rounded down.
                 // TODO: What happens with negative levels?
-                activation.context.stage.child_by_depth(*level_id as i32)
+                activation.get_level(*level_id as i32)
             }
             Value::Object(object) if object.as_display_object().is_some() => {
                 object.as_display_object()
             }
+            Value::MovieClip(_) => target.coerce_to_object(activation).as_display_object(),
             _ => return Ok(Value::Undefined),
         };
-        let result = ScriptObject::new(activation.context.gc_context, None);
+        let result = Object::new(&activation.context.strings, None);
         if let Some(target) = target {
             result.define_value(
-                activation.context.gc_context,
-                "bytesLoaded",
+                activation.gc(),
+                istr!("bytesLoaded"),
                 target.movie().compressed_len().into(),
                 Attribute::empty(),
             );
             result.define_value(
-                activation.context.gc_context,
-                "bytesTotal",
+                activation.gc(),
+                istr!("bytesTotal"),
                 target.movie().compressed_len().into(),
                 Attribute::empty(),
             );
@@ -155,14 +158,14 @@ fn get_progress<'gc>(
 }
 
 pub fn create_proto<'gc>(
-    gc_context: MutationContext<'gc, '_>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
     array_proto: Object<'gc>,
     broadcaster_functions: BroadcasterFunctions<'gc>,
 ) -> Object<'gc> {
-    let mcl_proto = ScriptObject::new(gc_context, Some(proto));
-    broadcaster_functions.initialize(gc_context, mcl_proto.into(), array_proto);
-    define_properties_on(PROTO_DECLS, gc_context, mcl_proto, fn_proto);
-    mcl_proto.into()
+    let mcl_proto = Object::new(context, Some(proto));
+    broadcaster_functions.initialize(context, mcl_proto, array_proto);
+    define_properties_on(PROTO_DECLS, context, mcl_proto, fn_proto);
+    mcl_proto
 }

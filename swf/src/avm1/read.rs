@@ -62,7 +62,7 @@ impl<'a> Reader<'a> {
 
         // Verify that we parsed the correct amount of data.
         let end_pos = (start.as_ptr() as usize + length) as *const u8;
-        if self.input.as_ptr() != end_pos {
+        if !std::ptr::eq(self.input.as_ptr(), end_pos) {
             // We incorrectly parsed this action.
             // Re-sync to the expected end of the action and throw an error.
             self.input = &start[length.min(start.len())..];
@@ -207,7 +207,10 @@ impl<'a> Reader<'a> {
         let count = self.read_u16()?;
         let mut strings = Vec::with_capacity(count as usize);
         for _ in 0..count {
-            strings.push(self.read_str()?);
+            let string = self.read_str();
+            if let Ok(string) = string {
+                strings.push(string);
+            }
         }
         Ok(ConstantPool { strings })
     }
@@ -328,7 +331,7 @@ impl<'a> Reader<'a> {
                     // We follow the lenient behavior in order to support more content (e.g. #8389
                     // doesn't work on newest Flash Player).
                     // TODO: Return an error if we ever add player version emulation.
-                    log::warn!("Invalid value type in ActionPush: {}", type_);
+                    log::warn!("Invalid value type in ActionPush: {type_}");
                     continue;
                 }
             };
@@ -350,6 +353,15 @@ impl<'a> Reader<'a> {
     }
 
     fn read_try(&mut self, length: &mut usize) -> Result<Try<'a>> {
+        // All Try opcodes must be at least 7 bytes long. If it's shorter, it's a bogus opcode; return an empty Try.
+        if *length < 7 {
+            return Ok(Try {
+                try_body: &[],
+                catch_body: None,
+                finally_body: None,
+            });
+        }
+
         let flags = TryFlags::from_bits_truncate(self.read_u8()?);
         let try_size: usize = self.read_u16()?.into();
         let catch_size: usize = self.read_u16()?.into();
@@ -441,7 +453,7 @@ pub mod tests {
     #[test]
     fn read_define_function() {
         // Ensure we read a function properly along with the function data.
-        let action_bytes = vec![
+        let action_bytes = [
             0x9b, 0x08, 0x00, 0x66, 0x6f, 0x6f, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x96, 0x06, 0x00,
             0x00, 0x74, 0x65, 0x73, 0x74, 0x00, 0x26, 0x00,
         ];

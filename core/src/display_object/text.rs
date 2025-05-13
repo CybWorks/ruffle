@@ -2,26 +2,28 @@ use crate::avm2::{
     Activation as Avm2Activation, Object as Avm2Object, StageObject as Avm2StageObject,
 };
 use crate::context::{RenderContext, UpdateContext};
-use crate::display_object::{DisplayObjectBase, DisplayObjectPtr, TDisplayObject};
+use crate::display_object::{DisplayObjectBase, DisplayObjectPtr};
 use crate::font::TextRenderSettings;
 use crate::prelude::*;
 use crate::tag_utils::SwfMovie;
 use crate::vminterface::Instantiator;
 use core::fmt;
-use gc_arena::{Collect, GcCell, MutationContext};
+use gc_arena::barrier::unlock;
+use gc_arena::{Collect, Gc, Lock, Mutation, RefLock};
 use ruffle_render::commands::CommandHandler;
 use ruffle_render::transform::Transform;
-use std::cell::{Ref, RefMut};
+use ruffle_wstr::WString;
+use std::cell::{Ref, RefCell, RefMut};
 use std::sync::Arc;
 
 #[derive(Clone, Collect, Copy)]
 #[collect(no_drop)]
-pub struct Text<'gc>(GcCell<'gc, TextData<'gc>>);
+pub struct Text<'gc>(Gc<'gc, TextData<'gc>>);
 
 impl fmt::Debug for Text<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Text")
-            .field("ptr", &self.0.as_ptr())
+            .field("ptr", &Gc::as_ptr(self.0))
             .finish()
     }
 }
@@ -29,92 +31,121 @@ impl fmt::Debug for Text<'_> {
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct TextData<'gc> {
-    base: DisplayObjectBase<'gc>,
-    static_data: gc_arena::Gc<'gc, TextStatic>,
-    render_settings: TextRenderSettings,
-    avm2_object: Option<Avm2Object<'gc>>,
+    base: RefLock<DisplayObjectBase<'gc>>,
+    shared: Lock<Gc<'gc, TextShared>>,
+    render_settings: RefCell<TextRenderSettings>,
+    avm2_object: Lock<Option<Avm2Object<'gc>>>,
 }
 
 impl<'gc> Text<'gc> {
     pub fn from_swf_tag(
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         swf: Arc<SwfMovie>,
         tag: &swf::Text,
     ) -> Self {
-        Text(GcCell::allocate(
-            context.gc_context,
+        Text(Gc::new(
+            context.gc(),
             TextData {
                 base: Default::default(),
-                static_data: gc_arena::Gc::allocate(
-                    context.gc_context,
-                    TextStatic {
+                shared: Lock::new(Gc::new(
+                    context.gc(),
+                    TextShared {
                         swf,
                         id: tag.id,
-                        bounds: (&tag.bounds).into(),
+                        bounds: tag.bounds,
                         text_transform: tag.matrix.into(),
                         text_blocks: tag.records.clone(),
                     },
-                ),
-                render_settings: Default::default(),
-                avm2_object: None,
+                )),
+                render_settings: RefCell::new(Default::default()),
+                avm2_object: Lock::new(None),
             },
         ))
     }
 
-    pub fn set_render_settings(
-        self,
-        gc_context: MutationContext<'gc, '_>,
-        settings: TextRenderSettings,
-    ) {
-        self.0.write(gc_context).render_settings = settings
+    fn set_shared(&self, context: &mut UpdateContext<'gc>, to: Gc<'gc, TextShared>) {
+        let mc = context.gc();
+        unlock!(Gc::write(mc, self.0), TextData, shared).set(to);
+    }
+
+    pub fn set_render_settings(self, gc_context: &Mutation<'gc>, settings: TextRenderSettings) {
+        *self.0.render_settings.borrow_mut() = settings;
+        self.invalidate_cached_bitmap(gc_context);
+    }
+
+    pub fn text(&self, context: &mut UpdateContext<'gc>) -> WString {
+        let mut ret = WString::new();
+
+        for block in &self.0.shared.get().text_blocks {
+            let font_id = block.font_id.unwrap_or_default();
+            if let Some(font) = context
+                .library
+                .library_for_movie(self.movie())
+                .unwrap()
+                .get_font(font_id)
+            {
+                for glyph in &block.glyphs {
+                    if let Some(g) = font.get_glyph(glyph.index as usize) {
+                        ret.push_char(g.character());
+                    }
+                }
+            }
+        }
+
+        ret
     }
 }
 
 impl<'gc> TDisplayObject<'gc> for Text<'gc> {
     fn base(&self) -> Ref<DisplayObjectBase<'gc>> {
-        Ref::map(self.0.read(), |r| &r.base)
+        self.0.base.borrow()
     }
 
-    fn base_mut<'a>(&'a self, mc: MutationContext<'gc, '_>) -> RefMut<'a, DisplayObjectBase<'gc>> {
-        RefMut::map(self.0.write(mc), |w| &mut w.base)
+    fn base_mut<'a>(&'a self, mc: &Mutation<'gc>) -> RefMut<'a, DisplayObjectBase<'gc>> {
+        unlock!(Gc::write(mc, self.0), TextData, base).borrow_mut()
     }
 
-    fn instantiate(&self, gc_context: MutationContext<'gc, '_>) -> DisplayObject<'gc> {
-        Self(GcCell::allocate(gc_context, self.0.read().clone())).into()
+    fn instantiate(&self, gc_context: &Mutation<'gc>) -> DisplayObject<'gc> {
+        Self(Gc::new(gc_context, self.0.as_ref().clone())).into()
+    }
+
+    fn as_text(&self) -> Option<Text<'gc>> {
+        Some(*self)
     }
 
     fn as_ptr(&self) -> *const DisplayObjectPtr {
-        self.0.as_ptr() as *const DisplayObjectPtr
+        Gc::as_ptr(self.0) as *const DisplayObjectPtr
     }
 
     fn id(&self) -> CharacterId {
-        self.0.read().static_data.id
+        self.0.shared.get().id
     }
 
     fn movie(&self) -> Arc<SwfMovie> {
-        self.0.read().static_data.swf.clone()
+        self.0.shared.get().swf.clone()
     }
 
-    fn replace_with(&self, context: &mut UpdateContext<'_, 'gc>, id: CharacterId) {
+    fn replace_with(&self, context: &mut UpdateContext<'gc>, id: CharacterId) {
         if let Some(new_text) = context
             .library
             .library_for_movie_mut(self.movie())
             .get_text(id)
         {
-            self.0.write(context.gc_context).static_data = new_text.0.read().static_data;
+            self.set_shared(context, new_text.0.shared.get());
         } else {
             tracing::warn!("PlaceObject: expected text at character ID {}", id);
         }
+        self.invalidate_cached_bitmap(context.gc());
     }
 
-    fn run_frame(&self, _context: &mut UpdateContext) {
+    fn run_frame_avm1(&self, _context: &mut UpdateContext) {
         // Noop
     }
 
     fn render_self(&self, context: &mut RenderContext) {
-        let tf = self.0.read();
+        let shared = self.0.shared.get();
         context.transform_stack.push(&Transform {
-            matrix: tf.static_data.text_transform,
+            matrix: shared.text_transform,
             ..Default::default()
         });
 
@@ -127,14 +158,14 @@ impl<'gc> TDisplayObject<'gc> for Text<'gc> {
         let mut font_id = 0;
         let mut height = Twips::ZERO;
         let mut transform: Transform = Default::default();
-        for block in &tf.static_data.text_blocks {
+        for block in &shared.text_blocks {
             if let Some(x) = block.x_offset {
                 transform.matrix.tx = x;
             }
             if let Some(y) = block.y_offset {
                 transform.matrix.ty = y;
             }
-            color = block.color.as_ref().unwrap_or(&color).clone();
+            color = block.color.unwrap_or(color);
             font_id = block.font_id.unwrap_or(font_id);
             height = block.height.unwrap_or(height);
             if let Some(font) = context
@@ -149,12 +180,15 @@ impl<'gc> TDisplayObject<'gc> for Text<'gc> {
                 transform.color_transform.set_mult_color(&color);
                 for c in &block.glyphs {
                     if let Some(glyph) = font.get_glyph(c.index as usize) {
-                        context.transform_stack.push(&transform);
-                        let glyph_shape_handle = glyph.shape_handle(context.renderer);
-                        context
-                            .commands
-                            .render_shape(glyph_shape_handle, context.transform_stack.transform());
-                        context.transform_stack.pop();
+                        if let Some(glyph_shape_handle) = glyph.shape_handle(context.renderer) {
+                            context.transform_stack.push(&transform);
+                            context.commands.render_shape(
+                                glyph_shape_handle,
+                                context.transform_stack.transform(),
+                            );
+                            context.transform_stack.pop();
+                        }
+
                         transform.matrix.tx += Twips::new(c.advance);
                     }
                 }
@@ -163,33 +197,39 @@ impl<'gc> TDisplayObject<'gc> for Text<'gc> {
         context.transform_stack.pop();
     }
 
-    fn self_bounds(&self) -> BoundingBox {
-        self.0.read().static_data.bounds.clone()
+    fn self_bounds(&self) -> Rectangle<Twips> {
+        self.0.shared.get().bounds
     }
 
     fn hit_test_shape(
         &self,
-        context: &mut UpdateContext<'_, 'gc>,
-        mut point: (Twips, Twips),
-        _options: HitTestOptions,
+        context: &mut UpdateContext<'gc>,
+        mut point: Point<Twips>,
+        options: HitTestOptions,
     ) -> bool {
-        if self.world_bounds().contains(point) {
+        if (!options.contains(HitTestOptions::SKIP_INVISIBLE) || self.visible())
+            && self.world_bounds().contains(point)
+        {
             // Texts using the "Advanced text rendering" always hit test using their bounding box.
-            if self.0.read().render_settings.is_advanced() {
+            if self.0.render_settings.borrow().is_advanced() {
                 return true;
             }
 
+            let shared = self.0.shared.get();
+
             // Transform the point into the text's local space.
-            let local_matrix = self.global_to_local_matrix();
-            let tf = self.0.read();
-            let mut text_matrix = tf.static_data.text_transform;
-            text_matrix.invert();
+            let Some(local_matrix) = self.global_to_local_matrix() else {
+                return false;
+            };
+            let Some(text_matrix) = shared.text_transform.inverse() else {
+                return false;
+            };
             point = text_matrix * local_matrix * point;
 
             let mut font_id = 0;
             let mut height = Twips::ZERO;
             let mut glyph_matrix = Matrix::default();
-            for block in &tf.static_data.text_blocks {
+            for block in &shared.text_blocks {
                 if let Some(x) = block.x_offset {
                     glyph_matrix.tx = x;
                 }
@@ -211,18 +251,11 @@ impl<'gc> TDisplayObject<'gc> for Text<'gc> {
                     for c in &block.glyphs {
                         if let Some(glyph) = font.get_glyph(c.index as usize) {
                             // Transform the point into glyph space and test.
-                            let mut matrix = glyph_matrix;
-                            matrix.invert();
+                            let Some(matrix) = glyph_matrix.inverse() else {
+                                return false;
+                            };
                             let point = matrix * point;
-                            let glyph_shape = glyph.as_shape();
-                            let glyph_bounds: BoundingBox = (&glyph_shape.shape_bounds).into();
-                            if glyph_bounds.contains(point)
-                                && ruffle_render::shape_utils::shape_hit_test(
-                                    &glyph_shape,
-                                    point,
-                                    &local_matrix,
-                                )
-                            {
+                            if glyph.hit_test(point, &local_matrix) {
                                 return true;
                             }
 
@@ -238,22 +271,25 @@ impl<'gc> TDisplayObject<'gc> for Text<'gc> {
 
     fn post_instantiation(
         &self,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         _init_object: Option<crate::avm1::Object<'gc>>,
         _instantiated_by: Instantiator,
         _run_frame: bool,
     ) {
-        if context.is_action_script_3() {
-            let mut activation = Avm2Activation::from_nothing(context.reborrow());
+        if self.movie().is_action_script_3() {
+            let domain = context
+                .library
+                .library_for_movie(self.movie())
+                .unwrap()
+                .avm2_domain();
+            let mut activation = Avm2Activation::from_domain(context, domain);
             let statictext = activation.avm2().classes().statictext;
             match Avm2StageObject::for_display_object_childless(
                 &mut activation,
                 (*self).into(),
                 statictext,
             ) {
-                Ok(object) => {
-                    self.0.write(activation.context.gc_context).avm2_object = Some(object.into())
-                }
+                Ok(object) => self.set_object2(context, object.into()),
                 Err(e) => tracing::error!("Got error when creating AVM2 side of Text: {}", e),
             }
 
@@ -263,25 +299,26 @@ impl<'gc> TDisplayObject<'gc> for Text<'gc> {
 
     fn object2(&self) -> Avm2Value<'gc> {
         self.0
-            .read()
             .avm2_object
+            .get()
             .map(|o| o.into())
             .unwrap_or(Avm2Value::Null)
     }
 
-    fn set_object2(&mut self, mc: MutationContext<'gc, '_>, to: Avm2Object<'gc>) {
-        self.0.write(mc).avm2_object = Some(to);
+    fn set_object2(&self, context: &mut UpdateContext<'gc>, to: Avm2Object<'gc>) {
+        let mc = context.gc();
+        unlock!(Gc::write(mc, self.0), TextData, avm2_object).set(Some(to));
     }
 }
 
-/// Static data shared between all instances of a text object.
+/// Data shared between all instances of a text object.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Collect)]
 #[collect(require_static)]
-struct TextStatic {
+struct TextShared {
     swf: Arc<SwfMovie>,
     id: CharacterId,
-    bounds: BoundingBox,
+    bounds: Rectangle<Twips>,
     text_transform: Matrix,
     text_blocks: Vec<swf::TextRecord>,
 }
