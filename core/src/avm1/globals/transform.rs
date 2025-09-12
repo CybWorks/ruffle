@@ -81,7 +81,7 @@ fn method<'gc>(
     };
 
     Ok(match index {
-        GET_MATRIX => matrix_to_value(clip.base().matrix(), activation)?,
+        GET_MATRIX => matrix_to_value(&clip.base().matrix(), activation)?,
         SET_MATRIX => {
             let matrix_props: &[AvmString<'_>] = &[
                 istr!("a"),
@@ -100,12 +100,12 @@ fn method<'gc>(
                     .all(|p| object.has_own_property(activation, *p));
                 if is_matrix {
                     let matrix = object_to_matrix(object, activation)?;
-                    clip.set_matrix(activation.gc(), matrix);
+                    clip.set_matrix(matrix);
                     clip.set_transformed_by_script(true);
                     if let Some(parent) = clip.parent() {
                         // Self-transform changes are automatically handled,
                         // we only want to inform ancestors to avoid unnecessary invalidations for tx/ty
-                        parent.invalidate_cached_bitmap(activation.gc());
+                        parent.invalidate_cached_bitmap();
                     }
                 }
             }
@@ -120,17 +120,14 @@ fn method<'gc>(
             )?
         }
         GET_COLOR_TRANSFORM => {
-            ColorTransformObject::construct(activation, clip.base().color_transform())?
+            ColorTransformObject::construct(activation, &clip.base().color_transform())?
         }
         SET_COLOR_TRANSFORM => {
             if let [value] = args {
                 // Set only occurs for an object with actual ColorTransform data.
                 if let Some(color_transform) = ColorTransformObject::cast(*value) {
-                    clip.set_color_transform(
-                        activation.gc(),
-                        color_transform.read().clone().into(),
-                    );
-                    clip.invalidate_cached_bitmap(activation.gc());
+                    clip.set_color_transform((*color_transform).clone().into());
+                    clip.invalidate_cached_bitmap();
                     clip.set_transformed_by_script(true);
                 }
             }
@@ -138,10 +135,10 @@ fn method<'gc>(
         }
         GET_CONCATENATED_COLOR_TRANSFORM => {
             // Walk through parents to get combined color transform.
-            let mut color_transform = *clip.base().color_transform();
+            let mut color_transform = clip.base().color_transform();
             let mut node = clip.avm1_parent();
             while let Some(display_object) = node {
-                color_transform = *display_object.base().color_transform() * color_transform;
+                color_transform = display_object.base().color_transform() * color_transform;
                 node = display_object.parent();
             }
             ColorTransformObject::construct(activation, &color_transform)?

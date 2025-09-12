@@ -2,8 +2,9 @@ use crate::avm2::activation::Activation;
 use crate::avm2::api_version::ApiVersion;
 use crate::avm2::e4x::{string_to_multiname, E4XNamespace, E4XNode, E4XNodeKind};
 use crate::avm2::error::make_error_1089;
+use crate::avm2::function::FunctionArgs;
 use crate::avm2::object::script_object::ScriptObjectData;
-use crate::avm2::object::{Object, ObjectPtr, TObject};
+use crate::avm2::object::{Object, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::{Error, Multiname, Namespace};
 use crate::string::AvmString;
@@ -477,14 +478,6 @@ impl<'gc> TObject<'gc> for XmlListObject<'gc> {
         HasPrefixField::as_prefix_gc(self.0)
     }
 
-    fn as_ptr(&self) -> *const ObjectPtr {
-        Gc::as_ptr(self.0) as *const ObjectPtr
-    }
-
-    fn as_xml_list_object(&self) -> Option<Self> {
-        Some(*self)
-    }
-
     fn xml_descendants(
         &self,
         activation: &mut Activation<'_, 'gc>,
@@ -563,7 +556,7 @@ impl<'gc> TObject<'gc> for XmlListObject<'gc> {
     fn call_property_local(
         self,
         multiname: &Multiname<'gc>,
-        arguments: &[Value<'gc>],
+        arguments: FunctionArgs<'_, 'gc>,
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
         let method = Value::from(self.proto().expect("XMLList missing prototype"))

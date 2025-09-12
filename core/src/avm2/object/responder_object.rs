@@ -1,5 +1,6 @@
+use crate::avm2::function::FunctionArgs;
 use crate::avm2::object::script_object::ScriptObjectData;
-use crate::avm2::object::{ClassObject, FunctionObject, Object, ObjectPtr, TObject};
+use crate::avm2::object::{ClassObject, FunctionObject, Object, TObject};
 use crate::avm2::{Activation, Error};
 use crate::context::UpdateContext;
 use crate::net_connection::ResponderCallback;
@@ -39,14 +40,6 @@ impl<'gc> TObject<'gc> for ResponderObject<'gc> {
     fn gc_base(&self) -> Gc<'gc, ScriptObjectData<'gc>> {
         HasPrefixField::as_prefix_gc(self.0)
     }
-
-    fn as_ptr(&self) -> *const ObjectPtr {
-        Gc::as_ptr(self.0) as *const ObjectPtr
-    }
-
-    fn as_responder(self) -> Option<ResponderObject<'gc>> {
-        Some(self)
-    }
 }
 
 impl<'gc> ResponderObject<'gc> {
@@ -83,7 +76,12 @@ impl<'gc> ResponderObject<'gc> {
         if let Some(function) = function {
             let mut activation = Activation::from_nothing(context);
             let value = crate::avm2::amf::deserialize_value(&mut activation, message)?;
-            function.call(&mut activation, (*self).into(), &[value])?;
+            let args = &[value];
+            function.call(
+                &mut activation,
+                (*self).into(),
+                FunctionArgs::from_slice(args),
+            )?;
         }
 
         Ok(())

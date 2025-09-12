@@ -15,7 +15,9 @@ enum Panel {
 }
 
 #[derive(Debug, Default)]
-pub struct MovieListWindow {}
+pub struct MovieListWindow {
+    url_search: String,
+}
 
 impl MovieListWindow {
     pub fn show(
@@ -30,33 +32,56 @@ impl MovieListWindow {
             .open(&mut keep_open)
             .scroll([true, true])
             .show(egui_ctx, |ui| {
-                let movies = context.library.known_movies();
-
-                Grid::new("known_movie_list").num_columns(3).show(ui, |ui| {
-                    ui.strong("Name");
-                    ui.strong("URL");
-                    ui.strong("AVM");
-                    ui.strong("Size");
-                    ui.strong("Save");
-                    ui.end_row();
-
-                    for movie in movies {
-                        open_movie_button(ui, &movie, messages);
-                        ui.label(movie.url());
-                        if movie.is_action_script_3() {
-                            ui.label("AVM 2");
-                        } else {
-                            ui.label("AVM 1");
-                        }
-                        ui.label(movie.uncompressed_len().to_string());
-                        if movie.data().is_empty() {
-                            ui.weak("(Empty)");
-                        } else if ui.button("Save File...").clicked() {
-                            save_swf(&movie, messages);
-                        }
-                        ui.end_row();
+                ui.horizontal(|ui| {
+                    TextEdit::singleline(&mut self.url_search)
+                        .hint_text("Search")
+                        .show(ui);
+                    if ui.small_button("✕").clicked() {
+                        self.url_search.clear();
                     }
                 });
+
+                ui.add_space(6.0);
+
+                let search = self.url_search.to_ascii_lowercase();
+
+                egui::ScrollArea::vertical()
+                    .max_height(400.0)
+                    .show(ui, |ui| {
+                        let movies = context.library.known_movies();
+
+                        Grid::new("known_movie_list").num_columns(5).show(ui, |ui| {
+                            ui.strong("Name");
+                            ui.strong("URL");
+                            ui.strong("AVM");
+                            ui.strong("Size");
+                            ui.strong("Save");
+                            ui.end_row();
+
+                            for movie in movies {
+                                let url_lower = movie.url().to_ascii_lowercase();
+
+                                if !search.is_empty() && !url_lower.contains(&search) {
+                                    continue;
+                                }
+
+                                open_movie_button(ui, &movie, messages);
+                                ui.label(movie.url());
+                                if movie.is_action_script_3() {
+                                    ui.label("AVM 2");
+                                } else {
+                                    ui.label("AVM 1");
+                                }
+                                ui.label(movie.uncompressed_len().to_string());
+                                if movie.data().is_empty() {
+                                    ui.weak("(Empty)");
+                                } else if ui.button("Save File...").clicked() {
+                                    save_swf(&movie, messages);
+                                }
+                                ui.end_row();
+                            }
+                        });
+                    });
             });
         keep_open
     }
@@ -125,7 +150,7 @@ impl MovieWindow {
                 sorted_keys.sort();
 
                 for id in sorted_keys {
-                    let character = characters
+                    let character = *characters
                         .get(&id)
                         .expect("Value must exist as we're iterating known keys");
 
@@ -256,7 +281,7 @@ pub fn open_movie_button(ui: &mut Ui, movie: &Arc<SwfMovie>, messages: &mut Vec<
     }
 }
 
-pub fn open_character_button(ui: &mut Ui, character: &Character) {
+pub fn open_character_button(ui: &mut Ui, character: Character) {
     let name = match character {
         Character::EditText(_) => "EditText",
         Character::Graphic(_) => "Graphic",

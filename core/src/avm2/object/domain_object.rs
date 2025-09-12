@@ -3,7 +3,7 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::domain::Domain;
 use crate::avm2::object::script_object::ScriptObjectData;
-use crate::avm2::object::{ClassObject, Object, ObjectPtr, TObject};
+use crate::avm2::object::{ClassObject, Object, TObject};
 use crate::avm2::Error;
 use crate::utils::HasPrefixField;
 use core::fmt;
@@ -60,45 +60,29 @@ impl<'gc> DomainObject<'gc> {
     ///
     /// This function will call instance initializers. You do not need to do so
     /// yourself.
-    pub fn from_domain(
-        activation: &mut Activation<'_, 'gc>,
-        domain: Domain<'gc>,
-    ) -> Result<Object<'gc>, Error<'gc>> {
+    pub fn from_domain(activation: &mut Activation<'_, 'gc>, domain: Domain<'gc>) -> Self {
         let class = activation.avm2().classes().application_domain;
         let base = ScriptObjectData::new(class);
-        let this: Object<'gc> = DomainObject(Gc::new(
+        DomainObject(Gc::new(
             activation.gc(),
             DomainObjectData {
                 base,
                 domain: Lock::new(domain),
             },
         ))
-        .into();
+    }
 
-        // Note - we do *not* call the normal constructor, since that
-        // creates a new domain using the system domain as a parent.
-        class
-            .superclass_object()
-            .unwrap()
-            .call_init(this.into(), &[], activation)?;
-        Ok(this)
+    pub fn domain(self) -> Domain<'gc> {
+        self.0.domain.get()
+    }
+
+    pub fn init_domain(self, mc: &Mutation<'gc>, domain: Domain<'gc>) {
+        unlock!(Gc::write(mc, self.0), DomainObjectData, domain).set(domain);
     }
 }
 
 impl<'gc> TObject<'gc> for DomainObject<'gc> {
     fn gc_base(&self) -> Gc<'gc, ScriptObjectData<'gc>> {
         HasPrefixField::as_prefix_gc(self.0)
-    }
-
-    fn as_ptr(&self) -> *const ObjectPtr {
-        Gc::as_ptr(self.0) as *const ObjectPtr
-    }
-
-    fn as_application_domain(&self) -> Option<Domain<'gc>> {
-        Some(self.0.domain.get())
-    }
-
-    fn init_application_domain(&self, mc: &Mutation<'gc>, domain: Domain<'gc>) {
-        unlock!(Gc::write(mc, self.0), DomainObjectData, domain).set(domain);
     }
 }

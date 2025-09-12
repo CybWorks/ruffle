@@ -6,10 +6,8 @@ use crate::avm1::Attribute;
 use crate::avm1::Avm1;
 use crate::avm1::{Object as Avm1Object, Value as Avm1Value};
 use crate::avm2::api_version::ApiVersion;
-use crate::avm2::object::LoaderInfoObject;
 use crate::avm2::Activation as Avm2Activation;
-use crate::avm2::TObject as _;
-use crate::avm2::{Avm2, Object as Avm2Object, SoundChannelObject};
+use crate::avm2::{Avm2, LoaderInfoObject, Object as Avm2Object, SoundChannelObject};
 use crate::backend::{
     audio::{AudioBackend, AudioManager, SoundHandle, SoundInstanceHandle},
     log::LogBackend,
@@ -28,6 +26,7 @@ use crate::library::Library;
 use crate::loader::LoadManager;
 use crate::local_connection::LocalConnections;
 use crate::net_connection::NetConnections;
+use crate::orphan_manager::OrphanManager;
 use crate::player::PostFrameCallback;
 use crate::player::{MouseData, Player};
 use crate::prelude::*;
@@ -40,6 +39,7 @@ use crate::system_properties::SystemProperties;
 use crate::tag_utils::{SwfMovie, SwfSlice};
 use crate::timer::Timers;
 use crate::vminterface::Instantiator;
+use crate::PlayerMode;
 use async_channel::Sender;
 use core::fmt;
 use gc_arena::{Collect, Mutation};
@@ -84,11 +84,13 @@ pub struct UpdateContext<'gc> {
     /// variables.
     pub player_version: u8,
 
+    pub player_mode: PlayerMode,
+
     /// Requests that the player re-renders after this execution (e.g. due to `updateAfterEvent`).
     pub needs_render: &'gc mut bool,
 
     /// The root SWF file.
-    pub swf: &'gc mut Arc<SwfMovie>,
+    pub root_swf: &'gc mut Arc<SwfMovie>,
 
     /// The audio backend, used by display objects and AVM to play audio.
     pub audio: &'gc mut dyn AudioBackend,
@@ -219,15 +221,20 @@ pub struct UpdateContext<'gc> {
 
     pub local_connections: &'gc mut LocalConnections<'gc>,
 
+    pub orphan_manager: &'gc mut OrphanManager<'gc>,
+
     /// Dynamic root for allowing handles to GC objects to exist outside of the GC.
     pub dynamic_root: gc_arena::DynamicRootSet<'gc>,
 
     /// These functions are run at the end of each frame execution.
     /// Currently, this is just used for handling `Loader.loadBytes`
-    #[allow(clippy::type_complexity)]
     pub post_frame_callbacks: &'gc mut Vec<PostFrameCallback<'gc>>,
 
     pub notification_sender: Option<&'gc Sender<PlayerNotification>>,
+
+    // Movie clips whose frame scripts were registered during frame script phase
+    // requires a seperate clean-up pass when running frame-scripts instead of executing them in place
+    pub frame_script_cleanup_queue: VecDeque<MovieClip<'gc>>,
 }
 
 impl<'gc> HasStringContext<'gc> for UpdateContext<'gc> {
@@ -331,8 +338,8 @@ impl<'gc> UpdateContext<'gc> {
 
     /// Change the root movie.
     ///
-    /// This should only be called once, as it makes no attempt at removing
-    /// previous stage contents. If you need to load a new root movie, you
+    /// This should only be called once, as it makes no attempt at proper clean-up
+    /// of previous stage contents. If you need to load a new root movie, you
     /// should use `replace_root_movie`.
     pub fn set_root_movie(&mut self, movie: SwfMovie) {
         if !self.forced_frame_rate {
@@ -347,20 +354,19 @@ impl<'gc> UpdateContext<'gc> {
             self.frame_rate,
         );
 
-        *self.swf = Arc::new(movie);
+        *self.root_swf = Arc::new(movie);
         *self.instance_counter = 0;
 
-        if self.swf.is_action_script_3() {
+        if self.root_swf.is_action_script_3() {
             self.avm2.root_api_version =
-                ApiVersion::from_swf_version(self.swf.version(), self.avm2.player_runtime)
-                    .unwrap_or_else(|| panic!("Unknown SWF version {}", self.swf.version()));
+                ApiVersion::from_swf_version(self.root_swf.version(), self.avm2.player_runtime);
         }
 
         self.stage.set_movie_size(
-            self.swf.width().to_pixels() as u32,
-            self.swf.height().to_pixels() as u32,
+            self.root_swf.width().to_pixels() as u32,
+            self.root_swf.height().to_pixels() as u32,
         );
-        self.stage.set_movie(self.gc(), self.swf.clone());
+        self.stage.set_movie(self.gc(), self.root_swf.clone());
 
         let stage_domain = self.avm2.stage_domain();
         let mut activation = Avm2Activation::from_domain(self, stage_domain);
@@ -368,11 +374,11 @@ impl<'gc> UpdateContext<'gc> {
         activation
             .context
             .library
-            .library_for_movie_mut(activation.context.swf.clone())
+            .library_for_movie_mut(activation.context.root_swf.clone())
             .set_avm2_domain(stage_domain);
         activation.context.ui.set_mouse_visible(true);
 
-        let swf = activation.context.swf.clone();
+        let swf = activation.context.root_swf.clone();
         let root: DisplayObject = MovieClip::player_root_movie(&mut activation, swf.clone()).into();
 
         // The Stage `LoaderInfo` is permanently in the 'not yet loaded' state,
@@ -382,10 +388,8 @@ impl<'gc> UpdateContext<'gc> {
         let stage_loader_info =
             LoaderInfoObject::not_yet_loaded(&mut activation, swf, None, Some(root), true)
                 .expect("Failed to construct Stage LoaderInfo");
-        stage_loader_info
-            .as_loader_info_object()
-            .unwrap()
-            .set_expose_content();
+        stage_loader_info.set_expose_content();
+
         activation
             .context
             .stage
@@ -394,9 +398,11 @@ impl<'gc> UpdateContext<'gc> {
         drop(activation);
 
         root.set_depth(0);
-        let flashvars = if !self.swf.parameters().is_empty() {
+        root.set_perspective_projection(None); // Set default PerspectiveProjection
+
+        let flashvars = if !self.root_swf.parameters().is_empty() {
             let object = Avm1Object::new(&self.strings, None);
-            for (key, value) in self.swf.parameters().iter() {
+            for (key, value) in self.root_swf.parameters().iter() {
                 object.define_value(
                     self.gc(),
                     AvmString::new_utf8(self.gc(), key),
@@ -466,6 +472,10 @@ impl<'gc> UpdateContext<'gc> {
 
     pub fn avm_trace(&self, message: &str) {
         self.log.avm_trace(&message.replace('\r', "\n"));
+    }
+
+    pub fn avm_warning(&self, message: &str) {
+        self.log.avm_warning(message);
     }
 }
 

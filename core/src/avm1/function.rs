@@ -219,7 +219,7 @@ impl<'gc> Avm1Function<'gc> {
         // TODO: `super` should only be defined if this was a method call (depth > 0?)
         // `f[""]()` emits a CallMethod op, causing `this` to be undefined, but `super` is a function; what is it?
         let zuper = this.filter(|_| !suppress).map(|this| {
-            let zuper = NativeObject::Super(SuperObject::new(frame, this, depth));
+            let zuper = NativeObject::Super(SuperObject::new(this, depth));
             Object::new_with_native(frame.strings(), None, zuper).into()
         });
 
@@ -333,7 +333,7 @@ impl<'gc> Executable<'gc> {
     /// returns. If on-stack execution is possible, then this function returns
     /// a return value you must push onto the stack. Otherwise, you must
     /// create a new stack frame and execute the action data yourself.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn exec(
         &self,
         name: ExecutionName<'gc>,
@@ -432,7 +432,7 @@ impl<'gc> Executable<'gc> {
             Some(callee),
         );
 
-        frame.allocate_local_registers(af.register_count(), frame.gc());
+        frame.allocate_local_registers(af.register_count());
 
         let mut preload_r = 1;
         af.load_this(&mut frame, this, &mut preload_r);

@@ -1,7 +1,8 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::amf::deserialize_value;
+use crate::avm2::function::FunctionArgs;
 use crate::avm2::object::script_object::ScriptObjectData;
-use crate::avm2::object::{ClassObject, EventObject, Object, ObjectPtr, TObject};
+use crate::avm2::object::{ClassObject, EventObject, Object, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::{Avm2, Domain, Error};
 use crate::context::UpdateContext;
@@ -83,7 +84,7 @@ impl<'gc> LocalConnectionObject<'gc> {
         }
 
         let connection_handle = activation.context.local_connections.connect(
-            &LocalConnections::get_domain(activation.context.swf.url()),
+            &LocalConnections::get_domain(activation.context.root_swf.url()),
             (activation.domain(), *self),
             &name,
         );
@@ -134,17 +135,27 @@ impl<'gc> LocalConnectionObject<'gc> {
             arguments
                 .push(deserialize_value(&mut activation, &argument).unwrap_or(Value::Undefined));
         }
+        let arguments = FunctionArgs::from_slice(&arguments);
 
         let client = Value::from(self.client());
-        if let Err(e) = client.call_public_property(method_name, &arguments, &mut activation) {
-            match e {
-                Error::AvmError(error) => {
+        if let Err(e) = client.call_public_property(method_name, arguments, &mut activation) {
+            match e.as_avm_error() {
+                Some(error) => {
                     let event_name = istr!("asyncError");
                     let async_error_event_cls = activation.avm2().classes().asyncerrorevent;
+
+                    let text = AvmString::new_utf8(activation.gc(), format!("Error #2095: flash.net.LocalConnection was unable to invoke callback {method_name}."));
+
                     let event = EventObject::from_class_and_args(
                         &mut activation,
                         async_error_event_cls,
-                        &[event_name.into(), false.into(), false.into(), error, error],
+                        &[
+                            event_name.into(),
+                            false.into(),
+                            false.into(),
+                            text.into(),
+                            error,
+                        ],
                     );
 
                     Avm2::dispatch_event(activation.context, event, (*self).into());
@@ -160,13 +171,5 @@ impl<'gc> LocalConnectionObject<'gc> {
 impl<'gc> TObject<'gc> for LocalConnectionObject<'gc> {
     fn gc_base(&self) -> Gc<'gc, ScriptObjectData<'gc>> {
         HasPrefixField::as_prefix_gc(self.0)
-    }
-
-    fn as_ptr(&self) -> *const ObjectPtr {
-        Gc::as_ptr(self.0) as *const ObjectPtr
-    }
-
-    fn as_local_connection_object(&self) -> Option<LocalConnectionObject<'gc>> {
-        Some(*self)
     }
 }

@@ -31,6 +31,9 @@ const METADATA_INSTANCE_ALLOCATOR: &str = "InstanceAllocator";
 /// Indicates that we should generate a reference to a class call handler
 /// method (used as a metadata key with `Ruffle` metadata)
 const METADATA_CALL_HANDLER: &str = "CallHandler";
+/// Indicates that we should generate a class call handler that constructs the
+/// class being called.
+const METADATA_CONSTRUCT_ON_CALL: &str = "ConstructOnCall";
 /// Indicates that we should generate a reference to a custom constructor
 /// method (used as a metadata key with `Ruffle` metadata)
 const METADATA_CUSTOM_CONSTRUCTOR: &str = "CustomConstructor";
@@ -44,6 +47,9 @@ const METADATA_ABSTRACT: &str = "Abstract";
 const METADATA_NATIVE_ACCESSIBLE: &str = "NativeAccessible";
 /// Like `METADATA_NATIVE_ACCESSIBLE`, but for methods instead of slots.
 const METADATA_NATIVE_CALLABLE: &str = "NativeCallable";
+/// Indicates that this method does not read any properties of the Activation
+/// passed to it except UpdateContext fields. This is used as an optimization.
+const METADATA_FAST_CALL: &str = "FastCall";
 // The name for metadata for namespace versioning- the Flex SDK doesn't
 // strip versioning metadata, so we have to allow this metadata name
 const API_METADATA_NAME: &str = "API";
@@ -442,6 +448,7 @@ fn write_native_table(data: &[u8], out_dir: &Path) -> Result<Vec<u8>, Box<dyn st
     let mut rust_instance_allocators = vec![none_tokens.clone(); abc.classes.len()];
     let mut rust_call_handlers = vec![none_tokens.clone(); abc.classes.len()];
     let mut rust_custom_constructors = vec![none_tokens; abc.classes.len()];
+    let mut rust_fast_calls = vec![];
 
     let mut rust_accessible_slots: HashMap<String, Vec<_>> = HashMap::new();
     let mut rust_accessible_methods: HashMap<String, Vec<_>> = HashMap::new();
@@ -504,12 +511,16 @@ fn write_native_table(data: &[u8], out_dir: &Path) -> Result<Vec<u8>, Box<dyn st
                     }
                 }
 
-                let method_id = method.0;
+                let method_id = method.0 as usize;
 
-                let abc_method = &abc.methods[method_id as usize];
+                let abc_method = &abc.methods[method_id];
                 // We only want to process native methods
                 if !abc_method.flags.contains(MethodFlags::NATIVE) {
                     return;
+                }
+
+                if trait_has_metadata(&abc, trait_, METADATA_FAST_CALL) {
+                    rust_fast_calls.push(quote! { #method_id });
                 }
 
                 // Note - technically, this could conflict with
@@ -523,8 +534,7 @@ fn write_native_table(data: &[u8], out_dir: &Path) -> Result<Vec<u8>, Box<dyn st
                     _ => "",
                 };
 
-                rust_paths[method_id as usize] =
-                    rust_method_path(&abc, trait_, parent, method_prefix, "");
+                rust_paths[method_id] = rust_method_path(&abc, trait_, parent, method_prefix, "");
             }
             TraitKind::Function { .. } => {
                 panic!("TraitKind::Function is not supported: {trait_:?}")
@@ -649,6 +659,13 @@ fn write_native_table(data: &[u8], out_dir: &Path) -> Result<Vec<u8>, Box<dyn st
                             quote! { Some(#path_tokens) }
                         };
                     }
+                    (None, METADATA_CONSTRUCT_ON_CALL) if !is_versioning => {
+                        rust_call_handlers[class_id as usize] = {
+                            let path = "crate::avm2::object::construct_call_handler";
+                            let path_tokens = TokenStream::from_str(path).unwrap();
+                            quote! { Some(#path_tokens) }
+                        };
+                    }
                     (None, _) if is_versioning => {}
                     _ => panic!("Unexpected metadata pair ({key:?}, {value})"),
                 }
@@ -724,6 +741,15 @@ fn write_native_table(data: &[u8], out_dir: &Path) -> Result<Vec<u8>, Box<dyn st
         // constructor for the corresponding class when we load it into Ruffle.
         pub const NATIVE_CUSTOM_CONSTRUCTOR_TABLE: &[Option<crate::avm2::class::CustomConstructorFn>] = &[
             #(#rust_custom_constructors,)*
+        ];
+
+        // This is an array containing the method ids of every method marked
+        // "[Ruffle(FastCall)]". Unlike the rest, it is not indexed by method id-
+        // instead, every item in the list is a method id.
+        //
+        // FIXME: should this be some sort of hashset?
+        pub const NATIVE_FAST_CALL_LIST: &[usize] = &[
+            #(#rust_fast_calls,)*
         ];
 
         pub mod slots {

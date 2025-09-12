@@ -1,8 +1,7 @@
 use ruffle_wstr::WString;
 
-use crate::avm2::object::TObject;
 use crate::avm2::{Activation, AvmString, Class, Multiname, Value};
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 use std::mem::size_of;
 
 use super::function::display_function;
@@ -10,7 +9,10 @@ use super::method::Method;
 use super::ClassObject;
 
 /// An error generated while handling AVM2 logic
-pub enum Error<'gc> {
+#[repr(transparent)]
+pub struct Error<'gc>(Box<ErrorData<'gc>>);
+
+enum ErrorData<'gc> {
     /// A thrown error. This can be produced by an explicit 'throw'
     /// opcode, or by a native implementation that throws an exception.
     /// This can be caught by any catch blocks created by ActionScript code
@@ -21,23 +23,40 @@ pub enum Error<'gc> {
     RustError(Box<dyn std::error::Error>),
 }
 
+impl<'gc> Error<'gc> {
+    pub fn avm_error(error: Value<'gc>) -> Self {
+        Error(Box::new(ErrorData::AvmError(error)))
+    }
+
+    pub fn rust_error(error: Box<dyn std::error::Error>) -> Self {
+        Error(Box::new(ErrorData::RustError(error)))
+    }
+
+    pub fn as_avm_error(&self) -> Option<Value<'gc>> {
+        match &*self.0 {
+            ErrorData::AvmError(value) => Some(*value),
+            _ => None,
+        }
+    }
+}
+
 impl Debug for Error<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Error::AvmError(error) = self {
+        if let ErrorData::AvmError(error) = &*self.0 {
             if let Some(error) = error.as_object().and_then(|obj| obj.as_error_object()) {
                 return write!(f, "{}", error.display_full());
             }
         }
 
-        match self {
-            Error::AvmError(error) => write!(f, "AvmError({error:?})"),
-            Error::RustError(error) => write!(f, "RustError({error:?})"),
+        match &*self.0 {
+            ErrorData::AvmError(error) => write!(f, "AvmError({error:?})"),
+            ErrorData::RustError(error) => write!(f, "RustError({error:?})"),
         }
     }
 }
 
 // This type is used very frequently, so make sure it doesn't unexpectedly grow.
-const _: () = assert!(size_of::<Result<Value<'_>, Error<'_>>>() <= 24);
+const _: () = assert!(size_of::<Result<Value<'_>, Error<'_>>>() <= 16);
 
 #[inline(never)]
 #[cold]
@@ -59,7 +78,7 @@ pub fn make_null_or_undefined_error<'gc>(
             ));
         }
         match error_constructor(activation, class, &msg, 1009) {
-            Ok(err) => Error::AvmError(err),
+            Ok(err) => Error::avm_error(err),
             Err(err) => err,
         }
     }
@@ -71,6 +90,7 @@ pub enum ReferenceErrorCode {
     InvalidRead = 1069,
     WriteToReadOnly = 1074,
     ReadFromWriteOnly = 1077,
+    InvalidNsRead = 1081,
     InvalidDelete = 1120,
 }
 
@@ -103,6 +123,9 @@ pub fn make_reference_error<'gc>(
         ReferenceErrorCode::ReadFromWriteOnly => format!(
             "Error #1077: Illegal read of write-only property {qualified_name} on {class_name}.",
         ),
+        ReferenceErrorCode::InvalidNsRead => format!(
+            "Error #1081: Property {qualified_name} not found on {class_name} and there is no default value.",
+        ),
         ReferenceErrorCode::InvalidDelete => format!(
             "Error #1120: Cannot delete property {qualified_name} on {class_name}.",
         ),
@@ -111,7 +134,7 @@ pub fn make_reference_error<'gc>(
     let class = activation.avm2().classes().referenceerror;
     let error = error_constructor(activation, class, &msg, code as u32);
     match error {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -125,7 +148,7 @@ pub fn make_error_1002<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> 
         1002,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -139,7 +162,17 @@ pub fn make_error_1003<'gc>(activation: &mut Activation<'_, 'gc>, radix: i32) ->
         1003,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
+        Err(err) => err,
+    }
+}
+
+#[inline(never)]
+#[cold]
+pub fn make_error_1006<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> {
+    let err = type_error(activation, "Error #1006: value is not a function.", 1006);
+    match err {
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -159,7 +192,7 @@ pub fn make_error_1010<'gc>(
     }
     let error = type_error(activation, &msg, 1010);
     match error {
-        Ok(e) => Error::AvmError(e),
+        Ok(e) => Error::avm_error(e),
         Err(e) => e,
     }
 }
@@ -182,7 +215,7 @@ pub fn make_error_1014<'gc>(
         Error1014Type::VerifyError => verify_error(activation, message, 1014),
     };
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -196,7 +229,7 @@ pub fn make_error_1021<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> 
         1021,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -210,7 +243,25 @@ pub fn make_error_1025<'gc>(activation: &mut Activation<'_, 'gc>, index: u32) ->
         1025,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
+        Err(err) => err,
+    }
+}
+
+#[inline(never)]
+#[cold]
+pub fn make_error_1026<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    slot_id: u32,
+    slot_count: usize,
+) -> Error<'gc> {
+    let err = verify_error(
+        activation,
+        &format!("Error #1026: Slot {slot_id} exceeds slotCount={slot_count} of global."),
+        1026,
+    );
+    match err {
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -224,7 +275,7 @@ pub fn make_error_1032<'gc>(activation: &mut Activation<'_, 'gc>, index: u32) ->
         1032,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -234,7 +285,47 @@ pub fn make_error_1032<'gc>(activation: &mut Activation<'_, 'gc>, index: u32) ->
 pub fn make_error_1033<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> {
     let err = verify_error(activation, "Error #1033: Cpool entry is wrong type.", 1033);
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
+        Err(err) => err,
+    }
+}
+
+#[inline(never)]
+#[cold]
+pub fn make_error_1035<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> {
+    let err = verify_error(
+        activation,
+        "Error #1035: Illegal super expression found in method.",
+        1035,
+    );
+    match err {
+        Ok(err) => Error::avm_error(err),
+        Err(err) => err,
+    }
+}
+
+#[inline(never)]
+#[cold]
+pub fn make_error_1051<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> {
+    let err = verify_error(
+        activation,
+        "Error #1051: Illegal early binding access.",
+        1051,
+    );
+    match err {
+        Ok(err) => Error::avm_error(err),
+        Err(err) => err,
+    }
+}
+
+pub fn make_error_1052<'gc>(activation: &mut Activation<'_, 'gc>, func_name: &str) -> Error<'gc> {
+    let err = uri_error(
+        activation,
+        &format!("Error #1052: Invalid URI passed to {func_name} function."),
+        1052,
+    );
+    match err {
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -250,7 +341,7 @@ pub fn make_error_1053<'gc>(
         1053,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -264,7 +355,17 @@ pub fn make_error_1054<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> 
         1054,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
+        Err(err) => err,
+    }
+}
+
+#[inline(never)]
+#[cold]
+pub fn make_error_1058<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> {
+    let err = verify_error(activation, "#1058: Illegal operand type.", 1058);
+    match err {
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -283,7 +384,7 @@ pub fn make_error_1065<'gc>(
         1065,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -297,7 +398,7 @@ pub fn make_error_1080<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> 
         1080,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -311,7 +412,7 @@ pub fn make_error_1085<'gc>(activation: &mut Activation<'_, 'gc>, tag: &str) -> 
         1085,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -325,7 +426,7 @@ pub fn make_error_1086<'gc>(activation: &mut Activation<'_, 'gc>, method_name: &
         1086,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -339,7 +440,7 @@ pub fn make_error_1087<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> 
         1087,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -353,7 +454,7 @@ pub fn make_error_1089<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> 
         1089,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -370,7 +471,7 @@ pub fn make_error_1098<'gc>(
         1098,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -384,7 +485,7 @@ pub fn make_error_1107<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> 
         1107,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -402,7 +503,7 @@ pub fn make_error_1117<'gc>(
     );
 
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -416,7 +517,7 @@ pub fn make_error_1118<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> 
         1118,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -425,7 +526,7 @@ pub fn make_error_1118<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> 
 #[cold]
 pub fn make_error_1125<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    index: usize,
+    index: f64,
     range: usize,
 ) -> Error<'gc> {
     let err = range_error(
@@ -434,7 +535,7 @@ pub fn make_error_1125<'gc>(
         1125,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -448,7 +549,17 @@ pub fn make_error_1127<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> 
         1127,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
+        Err(err) => err,
+    }
+}
+
+#[inline(never)]
+#[cold]
+pub fn make_error_1132<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> {
+    let err = syntax_error(activation, "Error #1132: Invalid JSON parse input.", 1132);
+    match err {
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -462,7 +573,7 @@ pub fn make_error_1506<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> 
         1506,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -476,7 +587,7 @@ pub fn make_error_1508<'gc>(activation: &mut Activation<'_, 'gc>, param_name: &s
         1508,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -500,7 +611,7 @@ pub fn make_error_2004<'gc>(
         Error2004Type::TypeError => type_error(activation, message, 2004),
     };
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -514,7 +625,7 @@ pub fn make_error_2006<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> 
         2006,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -528,7 +639,7 @@ pub fn make_error_2007<'gc>(activation: &mut Activation<'_, 'gc>, param_name: &s
         2007,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -542,7 +653,24 @@ pub fn make_error_2008<'gc>(activation: &mut Activation<'_, 'gc>, param_name: &s
         2008,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
+        Err(err) => err,
+    }
+}
+
+#[inline(never)]
+#[cold]
+pub fn make_error_2012<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    class_name: impl Display,
+) -> Error<'gc> {
+    let err = argument_error(
+        activation,
+        &format!("Error #2012: {class_name} class cannot be instantiated."),
+        2012,
+    );
+    match err {
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -556,7 +684,7 @@ pub fn make_error_2025<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> 
         2025,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -570,7 +698,21 @@ pub fn make_error_2027<'gc>(activation: &mut Activation<'_, 'gc>, value: i32) ->
         2027,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
+        Err(err) => err,
+    }
+}
+
+#[inline(never)]
+#[cold]
+pub fn make_error_2030<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> {
+    let err = error(
+        activation,
+        "Error #2030: End of file was encountered.",
+        2030,
+    );
+    match err {
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -584,7 +726,7 @@ pub fn make_error_2037<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> 
         2037,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -598,7 +740,7 @@ pub fn make_error_2085<'gc>(activation: &mut Activation<'_, 'gc>, param_name: &s
         2007,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -612,7 +754,7 @@ pub fn make_error_2097<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> 
         2097,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -626,7 +768,7 @@ pub fn make_error_2126<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> 
         2126,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -640,7 +782,21 @@ pub fn make_error_2136<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> 
         2136,
     );
     match err {
-        Ok(err) => Error::AvmError(err),
+        Ok(err) => Error::avm_error(err),
+        Err(err) => err,
+    }
+}
+
+#[inline(never)]
+#[cold]
+pub fn make_error_2162<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> {
+    let err = argument_error(
+        activation,
+        "Error #2162: The Shader output type is not compatible for this operation.",
+        2162,
+    );
+    match err {
+        Ok(err) => Error::avm_error(err),
         Err(err) => err,
     }
 }
@@ -806,7 +962,7 @@ pub fn make_mismatch_error<'gc>(
 
     display_function(&mut function_name, method, bound_class);
 
-    return Err(Error::AvmError(argument_error(
+    return Err(Error::avm_error(argument_error(
         activation,
         &format!(
             "Error #1063: Argument count mismatch on {function_name}. Expected {expected_num_params}, got {passed_arg_count}.",
@@ -839,18 +995,18 @@ impl std::fmt::Display for Error<'_> {
 
 impl<'gc, 'a> From<&'a str> for Error<'gc> {
     fn from(val: &'a str) -> Error<'gc> {
-        Error::RustError(val.into())
+        Error::rust_error(val.into())
     }
 }
 
 impl<'gc> From<String> for Error<'gc> {
     fn from(val: String) -> Error<'gc> {
-        Error::RustError(val.into())
+        Error::rust_error(val.into())
     }
 }
 
 impl<'gc> From<ruffle_render::error::Error> for Error<'gc> {
     fn from(val: ruffle_render::error::Error) -> Error<'gc> {
-        Error::RustError(val.into())
+        Error::rust_error(val.into())
     }
 }

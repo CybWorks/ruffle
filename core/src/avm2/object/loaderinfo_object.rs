@@ -2,10 +2,10 @@
 
 use crate::avm2::activation::Activation;
 use crate::avm2::object::script_object::ScriptObjectData;
-use crate::avm2::object::{EventObject, Object, ObjectPtr, StageObject, TObject};
+use crate::avm2::object::{EventObject, Object, TObject};
 use crate::avm2::{Avm2, Error, Value};
 use crate::context::UpdateContext;
-use crate::display_object::{DisplayObject, TDisplayObject};
+use crate::display_object::DisplayObject;
 use crate::loader::ContentType;
 use crate::tag_utils::SwfMovie;
 use crate::utils::HasPrefixField;
@@ -106,54 +106,6 @@ pub struct LoaderInfoObjectData<'gc> {
 }
 
 impl<'gc> LoaderInfoObject<'gc> {
-    /// Box a movie into a loader info object.
-    pub fn from_movie(
-        activation: &mut Activation<'_, 'gc>,
-        movie: Arc<SwfMovie>,
-        root: DisplayObject<'gc>,
-        loader: Option<Object<'gc>>,
-    ) -> Result<Object<'gc>, Error<'gc>> {
-        let class = activation.avm2().classes().loaderinfo;
-        let base = ScriptObjectData::new(class);
-        let loaded_stream = LoaderStream::Swf(movie, root);
-
-        let this: Object<'gc> = LoaderInfoObject(Gc::new(
-            activation.gc(),
-            LoaderInfoObjectData {
-                base,
-                loaded_stream: RefLock::new(loaded_stream),
-                loader,
-                init_event_fired: Cell::new(false),
-                complete_event_fired: Cell::new(false),
-                shared_events: activation
-                    .context
-                    .avm2
-                    .classes()
-                    .eventdispatcher
-                    .construct(activation, &[])?
-                    .as_object()
-                    .unwrap(),
-                uncaught_error_events: activation
-                    .context
-                    .avm2
-                    .classes()
-                    .uncaughterrorevents
-                    .construct(activation, &[])?
-                    .as_object()
-                    .unwrap(),
-                cached_avm1movie: Lock::new(None),
-                content_type: Cell::new(ContentType::Swf),
-                expose_content: Cell::new(false),
-                errored: Cell::new(false),
-            },
-        ))
-        .into();
-
-        class.call_init(this.into(), &[], activation)?;
-
-        Ok(this)
-    }
-
     /// Create a loader info object that has not yet been loaded.
     ///
     /// Use `None` as the root clip to indicate that this is the stage's loader
@@ -164,11 +116,11 @@ impl<'gc> LoaderInfoObject<'gc> {
         loader: Option<Object<'gc>>,
         root_clip: Option<DisplayObject<'gc>>,
         is_stage: bool,
-    ) -> Result<Object<'gc>, Error<'gc>> {
+    ) -> Result<Self, Error<'gc>> {
         let class = activation.avm2().classes().loaderinfo;
         let base = ScriptObjectData::new(class);
 
-        let this: Object<'gc> = LoaderInfoObject(Gc::new(
+        let object = LoaderInfoObject(Gc::new(
             activation.gc(),
             LoaderInfoObjectData {
                 base,
@@ -197,12 +149,9 @@ impl<'gc> LoaderInfoObject<'gc> {
                 expose_content: Cell::new(false),
                 errored: Cell::new(false),
             },
-        ))
-        .into();
+        ));
 
-        class.call_init(this.into(), &[], activation)?;
-
-        Ok(this)
+        Ok(object)
     }
 
     pub fn loader(&self) -> Option<Object<'gc>> {
@@ -272,7 +221,7 @@ impl<'gc> LoaderInfoObject<'gc> {
                     root.as_movie_clip()
                         .map(|mc| mc.loaded_bytes() as i32 >= mc.total_bytes())
                         .unwrap_or(true),
-                    movie.loader_url().is_some(),
+                    movie.url() != "file:///",
                 ),
                 _ => (false, false),
             };
@@ -297,8 +246,8 @@ impl<'gc> LoaderInfoObject<'gc> {
     }
 
     /// Unwrap this object's loader stream
-    pub fn loader_stream(&self) -> Ref<LoaderStream<'gc>> {
-        self.0.loaded_stream.borrow()
+    pub fn loader_stream(&self) -> Ref<'gc, LoaderStream<'gc>> {
+        Gc::as_ref(self.0).loaded_stream.borrow()
     }
 
     pub fn expose_content(&self) -> bool {
@@ -320,37 +269,10 @@ impl<'gc> LoaderInfoObject<'gc> {
         self.0.content_type.set(content_type);
     }
 
-    /// Returns the AVM1Movie corresponding to the loaded movie- if
-    /// it doesn't exist yet, creates it.
-    pub fn get_or_init_avm1movie(
-        &self,
-        activation: &mut Activation<'_, 'gc>,
-        obj: DisplayObject<'gc>,
-    ) -> Object<'gc> {
-        let cached_avm1movie = self.0.cached_avm1movie.get();
-        if cached_avm1movie.is_none() {
-            let class_object = activation.avm2().classes().avm1movie;
-            let object = StageObject::for_display_object(activation, obj, class_object)
-                .expect("for_display_object cannot return Err");
-
-            class_object
-                .call_init(object.into(), &[], activation)
-                .expect("Native init should succeed");
-
-            unlock!(
-                Gc::write(activation.gc(), self.0),
-                LoaderInfoObjectData,
-                cached_avm1movie
-            )
-            .set(Some(object.into()));
-        }
-
-        self.0.cached_avm1movie.get().unwrap()
-    }
-
     pub fn unload(&self, activation: &mut Activation<'_, 'gc>) {
         // Reset properties
-        let empty_swf = Arc::new(SwfMovie::empty(activation.context.swf.version()));
+        let movie = &activation.context.root_swf;
+        let empty_swf = Arc::new(SwfMovie::empty(movie.version(), Some(movie.url().into())));
         let loader_stream = LoaderStream::NotYetLoaded(empty_swf, None, false);
         self.set_loader_stream(loader_stream, activation.gc());
         self.set_errored(false);
@@ -374,13 +296,5 @@ impl<'gc> LoaderInfoObject<'gc> {
 impl<'gc> TObject<'gc> for LoaderInfoObject<'gc> {
     fn gc_base(&self) -> Gc<'gc, ScriptObjectData<'gc>> {
         HasPrefixField::as_prefix_gc(self.0)
-    }
-
-    fn as_ptr(&self) -> *const ObjectPtr {
-        Gc::as_ptr(self.0) as *const ObjectPtr
-    }
-
-    fn as_loader_info_object(&self) -> Option<&LoaderInfoObject<'gc>> {
-        Some(self)
     }
 }

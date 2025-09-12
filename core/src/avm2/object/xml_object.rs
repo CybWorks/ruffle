@@ -3,11 +3,10 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::e4x::{string_to_multiname, E4XNamespace, E4XNode, E4XNodeKind};
 use crate::avm2::error::make_error_1087;
+use crate::avm2::function::FunctionArgs;
 use crate::avm2::multiname::NamespaceSet;
 use crate::avm2::object::script_object::ScriptObjectData;
-use crate::avm2::object::{
-    ClassObject, NamespaceObject, Object, ObjectPtr, TObject, XmlListObject,
-};
+use crate::avm2::object::{ClassObject, NamespaceObject, Object, TObject, XmlListObject};
 use crate::avm2::string::AvmString;
 use crate::avm2::value::Value;
 use crate::avm2::{Error, Multiname};
@@ -290,14 +289,6 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
         HasPrefixField::as_prefix_gc(self.0)
     }
 
-    fn as_ptr(&self) -> *const ObjectPtr {
-        Gc::as_ptr(self.0) as *const ObjectPtr
-    }
-
-    fn as_xml_object(&self) -> Option<Self> {
-        Some(*self)
-    }
-
     fn xml_descendants(
         &self,
         activation: &mut Activation<'_, 'gc>,
@@ -344,11 +335,9 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
     fn call_property_local(
         self,
         multiname: &Multiname<'gc>,
-        arguments: &[Value<'gc>],
+        arguments: FunctionArgs<'_, 'gc>,
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
-        let this = self.as_xml_object().unwrap();
-
         let method = Value::from(self.proto().expect("XMLList missing prototype"))
             .get_property(multiname, activation)?;
 
@@ -363,8 +352,8 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
             // Compare to the very similar case in XMLListObject::call_property_local
             let prop = self.get_property_local(multiname, activation)?;
             if let Some(list) = prop.as_object().and_then(|obj| obj.as_xml_list_object()) {
-                if list.length() == 0 && this.node().has_simple_content() {
-                    let receiver = Value::String(this.node().xml_to_string(activation));
+                if list.length() == 0 && self.node().has_simple_content() {
+                    let receiver = Value::String(self.node().xml_to_string(activation));
 
                     return receiver.call_property(multiname, arguments, activation);
                 }

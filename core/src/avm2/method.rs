@@ -10,10 +10,10 @@ use crate::avm2::Multiname;
 use crate::string::AvmString;
 use crate::tag_utils::SwfMovie;
 use gc_arena::barrier::{unlock, Write};
-use gc_arena::lock::RefLock;
+use gc_arena::lock::OnceLock;
 use gc_arena::{Collect, Gc};
 use std::borrow::Cow;
-use std::cell::Ref;
+use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 use swf::avm2::types::{
@@ -121,7 +121,13 @@ struct MethodData<'gc> {
     return_type: Option<Gc<'gc, Multiname<'gc>>>,
 
     /// The resolved signature and return type.
-    resolved_info: RefLock<Option<ResolvedMethodInfo<'gc>>>,
+    resolved_info: OnceLock<ResolvedMethodInfo<'gc>>,
+
+    /// Whether this method should be run in "interpreter mode" (as opposed to
+    /// "JIT mode"). Most methods run in "JIT mode", except for class
+    /// initializer and script initializer methods, which always run in
+    /// "interpreter mode". See `Activation.is_interpreter` for more information.
+    is_interpreted: Cell<bool>,
 
     /// Whether or not this method was declared as a free-standing function.
     ///
@@ -155,13 +161,14 @@ impl<'gc> Method<'gc> {
     pub fn from_method_index(
         txunit: TranslationUnit<'gc>,
         abc_method: Index<AbcMethod>,
-        native_method: Option<NativeMethodImpl>,
         is_function: bool,
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<Self, Error<'gc>> {
+        let method_index = abc_method.0 as usize;
         let abc = txunit.abc();
-        let Some(method) = abc.methods.get(abc_method.0 as usize) else {
-            return Err(Error::AvmError(verify_error(
+
+        let Some(method) = abc.methods.get(method_index) else {
+            return Err(Error::avm_error(verify_error(
                 activation,
                 "Error #1027: Method_info exceeds method_count.",
                 1027,
@@ -184,10 +191,27 @@ impl<'gc> Method<'gc> {
             }
         }
 
-        let method_kind = if let Some(native_method) = native_method {
-            MethodKind::Native(native_method)
+        let mut native_info = None;
+        if txunit.domain().is_playerglobals_domain(activation.avm2()) {
+            if let Some(native_method) = activation.avm2().native_method_table[method_index] {
+                let fast_call = activation
+                    .avm2()
+                    .native_fast_call_list
+                    .contains(&method_index);
+
+                native_info = Some((native_method, fast_call));
+            }
+        };
+
+        let method_kind = if let Some((native_method, fast_call)) = native_info {
+            MethodKind::Native {
+                native_method,
+                fast_call,
+            }
         } else {
-            MethodKind::Bytecode(RefLock::new(None))
+            MethodKind::Bytecode {
+                verified_info: OnceLock::new(),
+            }
         };
 
         Ok(Self(Gc::new(
@@ -200,7 +224,8 @@ impl<'gc> Method<'gc> {
                 method_kind,
                 signature,
                 return_type,
-                resolved_info: RefLock::new(None),
+                resolved_info: OnceLock::new(),
+                is_interpreted: Cell::new(false),
                 is_function,
                 is_unchecked: is_function && all_params_unchecked,
             },
@@ -246,19 +271,19 @@ impl<'gc> Method<'gc> {
     pub fn verify(self, activation: &mut Activation<'_, 'gc>) -> Result<(), Error<'gc>> {
         // TODO: avmplus seems to eagerly verify some methods
 
-        let method_kind = &self.0.method_kind;
+        match &self.0.method_kind {
+            MethodKind::Bytecode { verified_info } if verified_info.get().is_none() => {
+                let info = crate::avm2::verify::verify_method(activation, self)?;
 
-        match method_kind {
-            MethodKind::Bytecode(verified_info) => {
-                let needs_verify = verified_info.borrow().is_none();
+                Gc::write(activation.gc(), self.0);
 
-                if needs_verify {
-                    method_kind.verify_bytecode(activation, self)?;
-                }
+                // SAFETY: We just triggered a write barrier on the Gc.
+                let verified_info = unsafe { Write::assume(verified_info) };
+                let _ = verified_info.unlock().set(info);
 
                 Ok(())
             }
-            _ => Ok(()),
+            MethodKind::Bytecode { .. } | MethodKind::Native { .. } => Ok(()),
         }
     }
 
@@ -267,29 +292,17 @@ impl<'gc> Method<'gc> {
         &self.0.signature
     }
 
-    pub fn resolved_param_config(&self) -> Ref<Vec<ResolvedParamConfig<'gc>>> {
-        let resolved_info = self.0.resolved_info.borrow();
-
-        Ref::map(resolved_info, |b| &b.as_ref().unwrap().param_config)
+    pub fn resolved_param_config(&self) -> &[ResolvedParamConfig<'gc>] {
+        &self.0.resolved_info.get().unwrap().param_config
     }
 
     pub fn resolved_return_type(&self) -> Option<Class<'gc>> {
-        let resolved_info = self.0.resolved_info.borrow();
-
-        resolved_info.as_ref().unwrap().return_type
+        self.0.resolved_info.get().unwrap().return_type
     }
 
-    pub fn is_info_resolved(self) -> bool {
-        let resolved_info = self.0.resolved_info.borrow();
-
-        resolved_info.is_some()
-    }
-
-    pub fn get_verified_info(&self) -> Ref<VerifiedMethodInfo<'gc>> {
+    pub fn get_verified_info(&self) -> &VerifiedMethodInfo<'gc> {
         match &self.0.method_kind {
-            MethodKind::Bytecode(verified_info) => {
-                Ref::map(verified_info.borrow(), |b| b.as_ref().unwrap())
-            }
+            MethodKind::Bytecode { verified_info } => verified_info.get().unwrap(),
             _ => panic!("get_verified_info should be called on a bytecode method"),
         }
     }
@@ -297,6 +310,10 @@ impl<'gc> Method<'gc> {
     /// Resolve the classes used in this method's signature and return type.
     #[inline(never)]
     pub fn resolve_info(self, activation: &mut Activation<'_, 'gc>) -> Result<(), Error<'gc>> {
+        if self.0.resolved_info.get().is_some() {
+            return Ok(());
+        }
+
         let param_config = resolve_param_config(activation, self.signature())?;
         let return_type = resolve_return_type(activation, self.return_type())?;
 
@@ -305,12 +322,12 @@ impl<'gc> Method<'gc> {
             return_type,
         };
 
-        *unlock!(
+        let _ = unlock!(
             Gc::write(activation.gc(), self.0),
             MethodData,
             resolved_info
         )
-        .borrow_mut() = Some(resolved_info);
+        .set(resolved_info);
 
         Ok(())
     }
@@ -353,6 +370,18 @@ impl<'gc> Method<'gc> {
         self.0.return_type
     }
 
+    /// Whether this method should be run in "interpreter mode" (as opposed to
+    /// "JIT mode").
+    pub fn is_interpreted(self) -> bool {
+        self.0.is_interpreted.get()
+    }
+
+    /// Mark this method as one that should be run in "interpreter mode" (as
+    /// opposed to "JIT mode").
+    pub fn mark_as_interpreted(self) {
+        self.0.is_interpreted.set(true);
+    }
+
     pub fn is_function(self) -> bool {
         self.0.is_function
     }
@@ -372,34 +401,14 @@ impl<'gc> Method<'gc> {
 #[derive(Collect)]
 #[collect(no_drop)]
 pub enum MethodKind<'gc> {
-    Bytecode(RefLock<Option<VerifiedMethodInfo<'gc>>>),
-
-    Native(#[collect(require_static)] NativeMethodImpl),
-}
-
-impl<'gc> MethodKind<'gc> {
-    /// If this MethodKind represents a bytecode method's info, verify it.
-    #[inline(never)]
-    pub fn verify_bytecode(
-        &self,
-        activation: &mut Activation<'_, 'gc>,
-        method: Method<'gc>,
-    ) -> Result<(), Error<'gc>> {
-        match self {
-            MethodKind::Bytecode(verified_info) => {
-                Gc::write(activation.gc(), method.0);
-
-                // SAFETY: We just triggered a write barrier on the Gc.
-                let verified_info = unsafe { Write::assume(verified_info) };
-
-                *verified_info.unlock().borrow_mut() =
-                    Some(crate::avm2::verify::verify_method(activation, method)?);
-
-                Ok(())
-            }
-            MethodKind::Native(_) => Ok(()),
-        }
-    }
+    Bytecode {
+        verified_info: OnceLock<VerifiedMethodInfo<'gc>>,
+    },
+    Native {
+        #[collect(require_static)]
+        native_method: NativeMethodImpl,
+        fast_call: bool,
+    },
 }
 
 /// The resolved parameters and return type of a method.

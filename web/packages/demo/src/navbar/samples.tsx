@@ -21,7 +21,7 @@ export interface DemoSwf {
     author?: string;
     authorLink?: string;
     config?: Config.BaseLoadOptions;
-    type: SampleCategory | null;
+    type?: SampleCategory;
 }
 
 interface SampleSelectionProperties {
@@ -76,7 +76,7 @@ export function SampleSelection({
     return (
         <div
             id="sample-swfs-container"
-            className={availableSamples.length == 0 ? "hidden" : ""}
+            className={availableSamples.length === 0 ? "hidden" : ""}
         >
             <span id="sample-swfs-label">Sample SWF:</span>
             <select
@@ -87,7 +87,7 @@ export function SampleSelection({
             >
                 {availableSamples.map((sample, i) => (
                     <Fragment key={i}>
-                        {sample.type == null && (
+                        {sample.type === undefined && (
                             <option value={i}>{sample.title}</option>
                         )}
                     </Fragment>
@@ -99,7 +99,7 @@ export function SampleSelection({
                     >
                         {availableSamples.map((sample, i) => (
                             <Fragment key={i}>
-                                {sample.type == category && (
+                                {sample.type === category && (
                                     <option value={i}>{sample.title}</option>
                                 )}
                             </Fragment>
