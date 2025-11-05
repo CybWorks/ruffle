@@ -37,7 +37,7 @@ thiserror = { workspace = true }
 chrono = { workspace = true, features = ["clock"] }
 web-time = "1.1.0"
 encoding_rs = { workspace = true }
-rand = { version = "0.9.1", features = ["std", "small_rng", "os_rng"], default-features = false }
+rand = { version = "0.9.1", features = ["std", "os_rng"], default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order"] }
 nellymoser-rs = { git = "https://github.com/ruffle-rs/nellymoser", rev = "073eb48d907201f46dea0c8feb4e8d9a1d92208c", optional = true }
@@ -45,7 +45,7 @@ regress = { git = "https://github.com/ruffle-rs/regras3", rev = "5fcb02513c5ab4e
 flash-lso = { git = "https://github.com/ruffle-rs/rust-flash-lso", rev = "998f47c926b9986aabd518fbb7394ff56936d0b0" }
 lzma-rs = { workspace = true, optional = true }
 dasp = { version = "0.11.0", features = ["interpolate", "interpolate-linear", "signal"], optional = true }
-symphonia = { version = "0.5.4", default-features = false, optional = true }
+symphonia = { version = "0.5.5", default-features = false, optional = true }
 enumset = "1.1.10"
 bytemuck = { workspace = true, features = ["derive"] }
 clap = { workspace = true, optional=true }
@@ -55,7 +55,7 @@ scopeguard = "1.2.0"
 fluent-templates = { workspace = true }
 egui = { workspace = true, optional = true }
 egui_extras = { git = "https://github.com/emilk/egui.git", branch = "main", default-features = false, optional = true }
-png = { version = "0.17.16", optional = true }
+png = { version = "0.18.0", optional = true }
 flv-rs = { path = "../flv" }
 async-channel = { workspace = true }
 jpegxr = { git = "https://github.com/ruffle-rs/jpegxr", rev = "2a429b0d71ab416e10b73d4dbdcf34cfe2900395", optional = true }
@@ -63,17 +63,17 @@ image = { workspace = true, features = ["tiff"] }
 enum-map = { workspace = true }
 ttf-parser = "0.25"
 num-bigint = "0.4"
-unic-segment = "0.9.0"
+unicode-segmentation = "1.12.0"
 id3 = "1.16.3"
 either = "1.15.0"
 chardetng = "0.1.17"
-tracy-client = { version = "0.17.6", optional = true, default-features = false }
+tracy-client = { version = "0.18.2", optional = true, default-features = false }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies.futures]
 workspace = true
 
 [target.'cfg(target_family = "wasm")'.dependencies.wasm-bindgen-futures]
-version = "0.4.50"
+version = "0.4.51"
 
 [features]
 default = []

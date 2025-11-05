@@ -4,14 +4,14 @@ use crate::avm1::Object as Avm1Object;
 use crate::avm2::object::Stage3DObject;
 use crate::avm2::{
     Activation as Avm2Activation, Avm2, EventObject as Avm2EventObject, LoaderInfoObject,
-    Object as Avm2Object, StageObject as Avm2StageObject, Value as Avm2Value,
+    Object as Avm2Object, StageObject as Avm2StageObject,
 };
 use crate::backend::ui::MouseCursor;
 use crate::config::Letterbox;
 use crate::context::{RenderContext, UpdateContext};
 use crate::display_object::container::ChildContainer;
 use crate::display_object::interactive::{InteractiveObjectBase, TInteractiveObject};
-use crate::display_object::{render_base, DisplayObjectBase, RenderOptions};
+use crate::display_object::DisplayObjectBase;
 use crate::events::{ClipEvent, ClipEventResult};
 use crate::focus_tracker::FocusTracker;
 use crate::prelude::*;
@@ -605,6 +605,45 @@ impl<'gc> Stage<'gc> {
         }
     }
 
+    /// Render stage from the perspective of the viewport.
+    ///
+    /// This differs from rendering the stage directly, because it takes into
+    /// account the viewport matrix, the letterbox, etc.
+    ///
+    /// You can easily observe the difference between render_viewport and render
+    /// in FP by checking which stuff can be rendered using `BitmapData.draw`.
+    pub fn render_viewport(self, context: &mut RenderContext<'_, 'gc>) {
+        context.transform_stack.push(&Transform {
+            matrix: self.0.viewport_matrix.get(),
+            color_transform: Default::default(),
+            // TODO: Verify perspective_projection when its rendering is implemented.
+            perspective_projection: self.as_displayobject().base().perspective_projection(),
+        });
+
+        // All of our Stage3D instances get rendered *underneath* the main stage.
+        // Note that the stage background color is actually the lowest possible
+        // layer, and gets applied when we start the frame (before
+        // `render_viewport` is called).
+        for stage3d in self.stage3ds().iter() {
+            let stage3d = stage3d.as_stage_3d().unwrap();
+            if stage3d.visible() {
+                if let Some(context3d) = stage3d.context3d() {
+                    context3d.as_context_3d().unwrap().render(context);
+                }
+            }
+        }
+
+        self.render(context);
+
+        self.focus_tracker().render_highlight(context);
+
+        if self.should_letterbox() {
+            self.draw_letterbox(context);
+        }
+
+        context.transform_stack.pop();
+    }
+
     /// Draw the stage's letterbox.
     fn draw_letterbox(self, context: &mut RenderContext<'_, 'gc>) {
         let ViewportDimensions {
@@ -699,9 +738,9 @@ impl<'gc> Stage<'gc> {
                     context,
                 );
             }
-        } else if let Avm2Value::Object(stage) = self.object2() {
+        } else if let Some(stage) = self.object2() {
             let resized_event = Avm2EventObject::bare_default_event(context, "resize");
-            Avm2::dispatch_event(context, resized_event, stage);
+            Avm2::dispatch_event(context, resized_event, stage.into());
         }
     }
 
@@ -729,7 +768,7 @@ impl<'gc> Stage<'gc> {
                     context,
                 );
             }
-        } else if let Avm2Value::Object(stage) = self.object2() {
+        } else if let Some(stage) = self.object2() {
             let mut activation = Avm2Activation::from_nothing(context);
 
             let full_screen_event_cls = activation.avm2().classes().fullscreenevent;
@@ -746,7 +785,7 @@ impl<'gc> Stage<'gc> {
                 ],
             );
 
-            Avm2::dispatch_event(context, full_screen_event, stage);
+            Avm2::dispatch_event(context, full_screen_event, stage.into());
         }
     }
 
@@ -816,37 +855,6 @@ impl<'gc> TDisplayObject<'gc> for Stage<'gc> {
         self.render_children(context);
     }
 
-    fn render_with_options(self, context: &mut RenderContext<'_, 'gc>, options: RenderOptions) {
-        context.transform_stack.push(&Transform {
-            matrix: self.0.viewport_matrix.get(),
-            color_transform: Default::default(),
-            // TODO: Verify perspective_projection when its rendering is implemented.
-            perspective_projection: self.as_displayobject().base().perspective_projection(),
-        });
-
-        // All of our Stage3D instances get rendered *underneath* the main stage.
-        // Note that the stage background color is actually the lowest possible layer,
-        // and get applied when we start the frame (before `render` is called).
-        for stage3d in self.stage3ds().iter() {
-            let stage3d = stage3d.as_stage_3d().unwrap();
-            if stage3d.visible() {
-                if let Some(context3d) = stage3d.context3d() {
-                    context3d.as_context_3d().unwrap().render(context);
-                }
-            }
-        }
-
-        render_base(self.into(), context, options);
-
-        self.focus_tracker().render_highlight(context);
-
-        if self.should_letterbox() {
-            self.draw_letterbox(context);
-        }
-
-        context.transform_stack.pop();
-    }
-
     fn enter_frame(self, context: &mut UpdateContext<'gc>) {
         for child in self.iter_render_list() {
             child.enter_frame(context);
@@ -863,12 +871,12 @@ impl<'gc> TDisplayObject<'gc> for Stage<'gc> {
         }
     }
 
-    fn object2(self) -> Avm2Value<'gc> {
-        self.0
-            .avm2_object
-            .get()
-            .expect("Attempted to access Stage::object2 before initialization")
-            .into()
+    fn object1(self) -> Option<Avm1Object<'gc>> {
+        None
+    }
+
+    fn object2(self) -> Option<Avm2StageObject<'gc>> {
+        self.0.avm2_object.get()
     }
 
     fn set_perspective_projection(self, mut perspective_projection: Option<PerspectiveProjection>) {
@@ -968,12 +976,11 @@ pub enum StageScaleMode {
 
 impl Display for StageScaleMode {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        // Match string values returned by AS.
         let s = match *self {
-            StageScaleMode::ExactFit => "exactFit",
-            StageScaleMode::NoBorder => "noBorder",
-            StageScaleMode::NoScale => "noScale",
-            StageScaleMode::ShowAll => "showAll",
+            StageScaleMode::ExactFit => "exact_fit",
+            StageScaleMode::NoBorder => "no_border",
+            StageScaleMode::NoScale => "no_scale",
+            StageScaleMode::ShowAll => "show_all",
         };
         f.write_str(s)
     }
@@ -1008,6 +1015,17 @@ impl FromWStr for StageScaleMode {
             Ok(StageScaleMode::ShowAll)
         } else {
             Err(ParseEnumError)
+        }
+    }
+}
+
+impl StageScaleMode {
+    pub fn to_avm_string(self) -> &'static str {
+        match self {
+            Self::ExactFit => "exactFit",
+            Self::NoBorder => "noBorder",
+            Self::NoScale => "noScale",
+            Self::ShowAll => "showAll",
         }
     }
 }
@@ -1111,6 +1129,34 @@ impl FromStr for StageAlign {
             _ => return Err(ParseEnumError),
         };
         Ok(align)
+    }
+}
+
+impl Display for StageAlign {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(match *self {
+            StageAlign::BOTTOM => "bottom",
+            StageAlign::LEFT => "left",
+            StageAlign::RIGHT => "right",
+            StageAlign::TOP => "top",
+            _ => {
+                if self.contains(StageAlign::BOTTOM) {
+                    match self.difference(StageAlign::BOTTOM) {
+                        StageAlign::LEFT => "bottom_left",
+                        StageAlign::RIGHT => "bottom_right",
+                        _ => "center",
+                    }
+                } else if self.contains(StageAlign::TOP) {
+                    match self.difference(StageAlign::TOP) {
+                        StageAlign::LEFT => "top_left",
+                        StageAlign::RIGHT => "top_right",
+                        _ => "center",
+                    }
+                } else {
+                    "center"
+                }
+            }
+        })
     }
 }
 

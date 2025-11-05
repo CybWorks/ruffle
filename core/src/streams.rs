@@ -27,7 +27,7 @@ use flv_rs::{
     VideoData as FlvVideoData, VideoPacket as FlvVideoPacket,
 };
 use gc_arena::barrier::unlock;
-use gc_arena::{Collect, Gc, Lock, Mutation};
+use gc_arena::{Collect, DynamicRoot, Gc, Lock, Mutation, Rootable};
 use ruffle_macros::istr;
 use ruffle_render::bitmap::BitmapInfo;
 use ruffle_video::frame::EncodedFrame;
@@ -167,6 +167,19 @@ impl PartialEq for NetStream<'_> {
 }
 
 impl Eq for NetStream<'_> {}
+
+#[derive(Clone)]
+pub struct NetStreamHandle(DynamicRoot<Rootable![NetStreamData<'_>]>);
+
+impl NetStreamHandle {
+    pub fn stash<'gc>(context: &UpdateContext<'gc>, this: NetStream<'gc>) -> Self {
+        Self(context.dynamic_root.stash(context.gc(), this.0))
+    }
+
+    pub fn fetch<'gc>(&self, context: &UpdateContext<'gc>) -> NetStream<'gc> {
+        NetStream(context.dynamic_root.fetch(&self.0))
+    }
+}
 
 /// The current type of the data in the stream buffer.
 #[derive(Clone, Debug)]
@@ -588,9 +601,7 @@ impl<'gc> NetStream<'gc> {
             };
             self.0.url.replace(Some(request.url().to_string()));
             self.source().preload_offset.set(0);
-            let future = context
-                .load_manager
-                .load_netstream(context.player.clone(), self, request);
+            let future = crate::loader::load_netstream(context, self, request);
 
             context.navigator.spawn_future(future);
         }
@@ -1309,12 +1320,12 @@ impl<'gc> NetStream<'gc> {
         match object {
             Some(NetStreamKind::Avm1(object)) => {
                 let root = context.stage.root_clip().expect("root");
-                let object_proto = context.avm1.prototypes().object;
                 let mut activation = Avm1Activation::from_nothing(
                     context,
                     Avm1ActivationIdentifier::root("[NetStream Status Event]"),
                     root,
                 );
+                let object_proto = activation.prototypes().object;
                 let info_object = Avm1Object::new(&activation.context.strings, Some(object_proto));
 
                 for (key, value) in values {
@@ -1358,11 +1369,12 @@ impl<'gc> NetStream<'gc> {
         match avm_object {
             Some(NetStreamKind::Avm1(object)) => {
                 let avm_string_name = AvmString::new_utf8_bytes(context.gc(), variable_name);
+                let activation_name = format!("[FLV {avm_string_name}]");
 
                 let root = context.stage.root_clip().expect("root");
                 let mut activation = Avm1Activation::from_nothing(
                     context,
-                    Avm1ActivationIdentifier::root(format!("[FLV {avm_string_name}]")),
+                    Avm1ActivationIdentifier::root(&activation_name),
                     root,
                 );
 

@@ -6,6 +6,7 @@ use crate::avm1::VariableDumper;
 use crate::avm1::{Activation, ActivationIdentifier};
 use crate::avm2::object::{EventObject as Avm2EventObject, Object as Avm2Object};
 use crate::avm2::{Activation as Avm2Activation, Avm2, CallStack};
+use crate::avm_rng::AvmRng;
 use crate::backend::ui::FontDefinition;
 use crate::backend::{
     audio::{AudioBackend, AudioManager},
@@ -38,7 +39,6 @@ use crate::library::Library;
 use crate::limits::ExecutionLimit;
 use crate::loader::{LoadBehavior, LoadManager};
 use crate::local_connection::LocalConnections;
-use crate::locale::get_current_date_time;
 use crate::net_connection::NetConnections;
 use crate::orphan_manager::OrphanManager;
 use crate::prelude::*;
@@ -54,7 +54,6 @@ use crate::DefaultFont;
 use async_channel::Sender;
 use gc_arena::lock::GcRefLock;
 use gc_arena::{Collect, DynamicRootSet, Mutation, Rootable};
-use rand::{rngs::SmallRng, SeedableRng};
 use ruffle_macros::istr;
 use ruffle_render::backend::{null::NullRenderer, RenderBackend, ViewportDimensions};
 use ruffle_render::commands::CommandList;
@@ -63,6 +62,7 @@ use ruffle_render::transform::TransformStack;
 use ruffle_video::backend::VideoBackend;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::rc::{Rc, Weak as RcWeak};
 use std::str::FromStr;
@@ -76,7 +76,7 @@ use web_time::Instant;
 pub const NEWEST_PLAYER_VERSION: u8 = 32;
 
 #[cfg(feature = "default_font")]
-pub const FALLBACK_DEVICE_FONT: &[u8] = include_bytes!("../assets/notosans-regular.subset.ttf.gz");
+pub const FALLBACK_DEVICE_FONT: &[u8] = include_bytes!("../assets/notosans.subset.ttf.gz");
 
 #[derive(Collect)]
 #[collect(no_drop)]
@@ -315,7 +315,7 @@ pub struct Player {
 
     transform_stack: TransformStack,
 
-    rng: SmallRng,
+    rng: AvmRng,
 
     gc_arena: Rc<RefCell<GcArena>>,
 
@@ -458,8 +458,8 @@ impl Player {
         on_metadata: Box<dyn FnOnce(&swf::HeaderExt)>,
     ) {
         self.mutate_with_update_context(|context| {
-            let future = context.load_manager.load_root_movie(
-                context.player.clone(),
+            let future = crate::loader::load_root_movie(
+                context,
                 Request::get(movie_url),
                 parameters,
                 on_metadata,
@@ -640,7 +640,7 @@ impl Player {
 
             let display_obj = Player::get_context_menu_display_object(context);
 
-            let menu = if let Some(Value::Object(obj)) = display_obj.map(|obj| obj.object()) {
+            let menu = if let Some(obj) = display_obj.and_then(|obj| obj.object1()) {
                 let mut activation =
                     Activation::from_stub(context, ActivationIdentifier::root("[ContextMenu]"));
                 let menu_object = if let Ok(Value::Object(menu)) =
@@ -657,7 +657,7 @@ impl Player {
                 };
 
                 crate::avm1::make_context_menu_state(menu_object, display_obj, &mut activation)
-            } else if let Some(Avm2Value::Object(hit_obj)) = display_obj.map(|obj| obj.object2()) {
+            } else if let Some(hit_obj) = display_obj.and_then(|obj| obj.object2()) {
                 let mut activation = Avm2Activation::from_nothing(context);
 
                 let menu_object = display_obj
@@ -740,8 +740,8 @@ impl Player {
                                         menu_item_select_string.into(),
                                         false.into(),
                                         false.into(),
-                                        display_obj.object2(),
-                                        display_obj.object2(),
+                                        display_obj.object2_or_null(),
+                                        display_obj.object2_or_null(),
                                     ],
                                 );
 
@@ -781,7 +781,7 @@ impl Player {
                     display_object,
                 );
 
-                let params = vec![display_object.object(), Value::Object(item)];
+                let params = vec![display_object.object1_or_undef(), Value::Object(item)];
 
                 let _ = callback.call(
                     "[Context Menu Callback]",
@@ -801,7 +801,7 @@ impl Player {
             run_mouse_pick(context, false).map(|picked_obj| picked_obj.as_displayobject());
 
         while let Some(display_obj) = picked_obj {
-            if let Value::Object(obj) = display_obj.object() {
+            if let Some(obj) = display_obj.object1() {
                 let mut activation =
                     Activation::from_stub(context, ActivationIdentifier::root("[ContextMenu]"));
 
@@ -1084,19 +1084,20 @@ impl Player {
                         dumper.print_variables(
                             "Global Variables:",
                             "_global",
-                            &activation.context.avm1.global_object(),
+                            activation.global_object(),
                             &mut activation,
                         );
 
                         for display_object in activation.context.stage.iter_render_list() {
                             let level = display_object.depth();
-                            let object = display_object.object().coerce_to_object(&mut activation);
-                            dumper.print_variables(
-                                &format!("Level #{level}:"),
-                                &format!("_level{level}"),
-                                &object,
-                                &mut activation,
-                            );
+                            if let Some(object) = display_object.object1() {
+                                dumper.print_variables(
+                                    &format!("Level #{level}:"),
+                                    &format!("_level{level}"),
+                                    object,
+                                    &mut activation,
+                                );
+                            }
                         }
                         tracing::info!("Variable dump:\n{}", dumper.output());
                     });
@@ -1195,10 +1196,9 @@ impl Player {
                 if target_object.movie().is_action_script_3() {
                     let target = target_object
                         .object2()
-                        .as_object()
-                        .expect("DisplayObject is not an object!");
+                        .expect("DisplayObject was not constructed!");
 
-                    Avm2::dispatch_event(activation.context, keyboard_event, target);
+                    Avm2::dispatch_event(activation.context, keyboard_event, target.into());
                 }
             }
 
@@ -1629,7 +1629,7 @@ impl Player {
                 && !InteractiveObject::option_ptr_eq(cur_over_object, new_over_object)
             {
                 // If the mouse button is down, the object the user clicked on grabs the focus
-                // and fires "drag" events. Other objects are ignored.
+                // and fires "drag" events.
                 if context.input.is_mouse_down(MouseButton::Left) {
                     context.mouse_data.hovered = new_over_object;
                     if let Some(down_object) = context.mouse_data.pressed {
@@ -1637,7 +1637,7 @@ impl Player {
                             context.mouse_data.pressed,
                             cur_over_object,
                         ) {
-                            // Dragged from outside the clicked object to the inside.
+                            // Dragged from inside the clicked object to the outside.
                             events.push((
                                 down_object,
                                 ClipEvent::DragOut {
@@ -1648,10 +1648,40 @@ impl Player {
                             context.mouse_data.pressed,
                             new_over_object,
                         ) {
-                            // Dragged from inside the clicked object to the outside.
+                            // Dragged from outside the clicked object to the inside.
                             events.push((
                                 down_object,
                                 ClipEvent::DragOver {
+                                    from: cur_over_object,
+                                },
+                            ));
+                        }
+                    }
+
+                    // While dragging, dispatch hover roll events only for AVM2 targets.
+                    if let Some(cur_over_object) = cur_over_object {
+                        if cur_over_object
+                            .as_displayobject()
+                            .movie()
+                            .is_action_script_3()
+                        {
+                            events.push((
+                                cur_over_object,
+                                ClipEvent::RollOut {
+                                    to: new_over_object,
+                                },
+                            ));
+                        }
+                    }
+                    if let Some(new_over_object) = new_over_object {
+                        if new_over_object
+                            .as_displayobject()
+                            .movie()
+                            .is_action_script_3()
+                        {
+                            events.push((
+                                new_over_object,
+                                ClipEvent::RollOver {
                                     from: cur_over_object,
                                 },
                             ));
@@ -2003,7 +2033,7 @@ impl Player {
                 stage,
             };
 
-            stage.render(&mut render_context);
+            stage.render_viewport(&mut render_context);
 
             #[cfg(feature = "egui")]
             {
@@ -2113,7 +2143,7 @@ impl Player {
                         action.clip,
                     );
                     if let Ok(prototype) = constructor.get(istr!("prototype"), &mut activation) {
-                        if let Value::Object(object) = action.clip.object() {
+                        if let Some(object) = action.clip.object1() {
                             object.define_value(
                                 activation.gc(),
                                 istr!("__proto__"),
@@ -2163,9 +2193,8 @@ impl Player {
                 }
             }
 
-            // AVM1 bytecode may leave the stack unbalanced, so do not let garbage values accumulate
-            // across multiple executions and/or frames.
-            context.avm1.clear_stack();
+            // Do not let garbage values accumulate across multiple executions and/or frames.
+            context.avm1.clear();
         }
     }
 
@@ -2920,7 +2949,9 @@ impl PlayerBuilder {
                 mouse_cursor_needs_check: false,
 
                 // Misc. state
-                rng: SmallRng::seed_from_u64(get_current_date_time().timestamp_millis() as u64),
+                // TODO: AVM1 and AVM2 use separate RNGs (though algorithm is same), so this is technically incorrect.
+                // See: https://github.com/ruffle-rs/ruffle/issues/20244
+                rng: AvmRng::default(),
                 system: SystemProperties::new(language),
                 page_url: self.page_url.clone(),
                 transform_stack: TransformStack::new(),
@@ -3102,6 +3133,15 @@ pub enum PlayerRuntime {
     #[default]
     FlashPlayer,
     AIR,
+}
+
+impl fmt::Display for PlayerRuntime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            PlayerRuntime::AIR => "air",
+            PlayerRuntime::FlashPlayer => "flash_player",
+        })
+    }
 }
 
 pub struct ParseEnumError;

@@ -287,8 +287,8 @@ pub trait TInteractiveObject<'gc>:
             }
         }
 
-        let target = if let Avm2Value::Object(target) = self.as_displayobject().object2() {
-            target
+        let target = if let Some(target) = self.as_displayobject().object2() {
+            target.into()
         } else {
             return ClipEventResult::NotHandled;
         };
@@ -435,9 +435,12 @@ pub trait TInteractiveObject<'gc>:
                         MouseButton::Left,
                     );
 
-                    if let Avm2Value::Object(avm2_target) = tgt.object2() {
-                        handled = Avm2::dispatch_event(activation.context, avm2_event, avm2_target)
-                            || handled;
+                    if let Some(avm2_target) = tgt.object2() {
+                        handled = Avm2::dispatch_event(
+                            activation.context,
+                            avm2_event,
+                            avm2_target.into(),
+                        ) || handled;
                     }
 
                     rollout_target = tgt.parent();
@@ -471,9 +474,12 @@ pub trait TInteractiveObject<'gc>:
                         MouseButton::Left,
                     );
 
-                    if let Avm2Value::Object(avm2_target) = tgt.object2() {
-                        handled = Avm2::dispatch_event(activation.context, avm2_event, avm2_target)
-                            || handled;
+                    if let Some(avm2_target) = tgt.object2() {
+                        handled = Avm2::dispatch_event(
+                            activation.context,
+                            avm2_event,
+                            avm2_target.into(),
+                        ) || handled;
                     }
 
                     rollover_target = tgt.parent();
@@ -628,9 +634,9 @@ pub trait TInteractiveObject<'gc>:
         other: Option<InteractiveObject<'gc>>,
     ) {
         let self_do = self.as_displayobject();
-        if let Avm1Value::Object(object) = self_do.object() {
+        if let Some(object) = self_do.object1() {
             let other = other
-                .map(|d| d.as_displayobject().object())
+                .map(|d| d.as_displayobject().object1_or_undef())
                 .unwrap_or(Avm1Value::Null);
 
             let method_name = if focused {
@@ -640,11 +646,11 @@ pub trait TInteractiveObject<'gc>:
             };
 
             Avm1::run_stack_frame_for_method(self_do, object, method_name, &[other], context);
-        } else if let Avm2Value::Object(object) = self_do.object2() {
+        } else if let Some(object) = self_do.object2() {
             let mut activation = Avm2Activation::from_nothing(context);
             let event_name = if focused { "focusIn" } else { "focusOut" };
             let event = EventObject::focus_event(&mut activation, event_name, false, other, 0);
-            Avm2::dispatch_event(activation.context, event, object);
+            Avm2::dispatch_event(activation.context, event, object.into());
         }
     }
 

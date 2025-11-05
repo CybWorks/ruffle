@@ -183,8 +183,7 @@ pub fn get_focus<'gc>(
         .focus_tracker
         .get()
         .map(|o| o.as_displayobject())
-        .and_then(|focus_dobj| focus_dobj.object2().as_object())
-        .map(|o| o.into())
+        .map(|focus_dobj| focus_dobj.object2_or_null())
         .unwrap_or(Value::Null))
 }
 
@@ -267,7 +266,7 @@ pub fn get_scale_mode<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let scale_mode = AvmString::new_utf8(
         activation.gc(),
-        activation.context.stage.scale_mode().to_string(),
+        activation.context.stage.scale_mode().to_avm_string(),
     );
     Ok(scale_mode.into())
 }
@@ -438,7 +437,7 @@ pub fn get_stage3ds<'gc>(
             false,
             Some(activation.avm2().classes().stage3d.inner_class_definition()),
         );
-        let stage3ds = VectorObject::from_vector(storage, activation)?;
+        let stage3ds = VectorObject::from_vector(storage, activation);
         return Ok(stage3ds.into());
     }
     Ok(Value::Undefined)

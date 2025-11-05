@@ -71,8 +71,6 @@ pub struct Activation<'a, 'gc: 'a> {
     /// This will not be available outside of method, setter, or getter calls.
     bound_superclass_object: Option<ClassObject<'gc>>,
 
-    bound_class: Option<Class<'gc>>,
-
     /// The stack frame.
     stack: StackFrame<'a, 'gc>,
 
@@ -125,7 +123,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             caller_domain: None,
             caller_movie: None,
             bound_superclass_object: None,
-            bound_class: None,
             stack: StackFrame::empty(),
             scope_depth: context.avm2.scope_stack.len(),
             is_interpreter: false,
@@ -149,7 +146,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             caller_domain: Some(domain),
             caller_movie: None,
             bound_superclass_object: None,
-            bound_class: None,
             stack: StackFrame::empty(),
             scope_depth: context.avm2.scope_stack.len(),
             is_interpreter: false,
@@ -194,7 +190,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         method: Method<'gc>,
         user_arguments: FunctionArgs<'_, 'gc>,
         signature: &[ResolvedParamConfig<'gc>],
-        bound_class: Option<Class<'gc>>,
     ) -> Result<Vec<Value<'gc>>, Error<'gc>> {
         let mut arguments_list = Vec::new();
         for (arg, param_config) in user_arguments.iter().zip(signature.iter()) {
@@ -223,7 +218,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                             self,
                             method,
                             user_arguments.len(),
-                            bound_class,
                         )?));
                     };
 
@@ -319,7 +313,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         user_arguments: FunctionArgs<'_, 'gc>,
         stack_frame: StackFrame<'a, 'gc>,
         bound_superclass_object: Option<ClassObject<'gc>>,
-        bound_class: Option<Class<'gc>>,
         callee: Option<FunctionObject<'gc>>,
     ) -> Result<(), Error<'gc>> {
         let body = method
@@ -329,7 +322,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let num_locals = body.num_locals as usize;
         let has_rest_or_args = method.is_variadic();
 
-        if let Some(bound_class) = bound_class {
+        if let Some(bound_class) = method.bound_class() {
             assert!(this.is_of_type(bound_class));
         }
 
@@ -338,7 +331,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         self.caller_domain = Some(outer.domain());
         self.caller_movie = Some(method.owner_movie());
         self.bound_superclass_object = bound_superclass_object;
-        self.bound_class = bound_class;
         self.stack = stack_frame;
         self.scope_depth = self.context.avm2.scope_stack.len();
         self.is_interpreter = method.is_interpreted();
@@ -356,7 +348,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                 self,
                 method,
                 user_arguments.len(),
-                bound_class,
             )?));
         }
 
@@ -390,7 +381,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                         self,
                         method,
                         user_arguments.len(),
-                        bound_class,
                     )?));
                 };
 
@@ -427,7 +417,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     pub fn from_builtin(
         context: &'a mut UpdateContext<'gc>,
         bound_superclass_object: Option<ClassObject<'gc>>,
-        bound_class: Option<Class<'gc>>,
         outer: ScopeChain<'gc>,
         caller_domain: Option<Domain<'gc>>,
         caller_movie: Option<Arc<SwfMovie>>,
@@ -438,7 +427,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             caller_domain,
             caller_movie,
             bound_superclass_object,
-            bound_class,
             stack: StackFrame::empty(),
             scope_depth: context.avm2.scope_stack.len(),
             is_interpreter: false,
@@ -612,11 +600,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         self.bound_superclass_object
     }
 
-    /// Get the class that defined the currently-executing method, if it exists.
-    pub fn bound_class(&self) -> Option<Class<'gc>> {
-        self.bound_class
-    }
-
     pub fn run_actions(&mut self, method: Method<'gc>) -> Result<Value<'gc>, Error<'gc>> {
         // The method must be verified at this point
 
@@ -647,6 +630,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                 Op::Dup => self.op_dup(),
                 Op::GetLocal { index } => self.op_get_local(*index),
                 Op::SetLocal { index } => self.op_set_local(*index),
+                Op::StoreLocal { index } => self.op_store_local(*index),
                 Op::Kill { index } => self.op_kill(*index),
                 Op::Call { num_args } => self.op_call(*num_args),
                 Op::CallMethod {
@@ -832,6 +816,14 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
                     continue;
                 }
+                Op::PopJump { offset } => {
+                    self.timeout_check()?;
+
+                    let _ = self.pop_stack();
+                    ip = *offset;
+
+                    continue;
+                }
                 Op::LookupSwitch(lookup_switch) => {
                     self.timeout_check()?;
 
@@ -999,6 +991,14 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    fn op_store_local(&mut self, register_index: u32) -> Result<(), Error<'gc>> {
+        let value = self.stack.peek(0);
+
+        self.set_local_register(register_index, value);
+
+        Ok(())
+    }
+
     fn op_kill(&mut self, register_index: u32) -> Result<(), Error<'gc>> {
         self.set_local_register(register_index, Value::Undefined);
 
@@ -1114,9 +1114,17 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     fn op_call_static(&mut self, method: Method<'gc>, arg_count: u32) -> Result<(), Error<'gc>> {
         let args = self.stack.get_args(arg_count as usize);
         let receiver = self.pop_stack();
+
+        // Ensure receiver is of the correct type
+        let bound_class = method
+            .bound_class()
+            .expect("Verifier ensures callstatic methods are classbound");
+        let receiver = receiver.coerce_to_type(self, bound_class)?;
+
         // TODO: What scope should the function be executed with?
         let scope = self.create_scopechain();
-        let function = FunctionObject::from_method(self, method, scope, None, None, None);
+
+        let function = FunctionObject::from_method(self, method, scope, None, None);
         let value = function.call(self, receiver, args)?;
 
         self.push_stack(value);
@@ -1209,13 +1217,15 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
         if let Value::Object(object) = object_value {
             match name_value {
-                Value::Integer(name_int) if name_int >= 0 => {
-                    if let Some(value) = object.get_index_property(name_int as usize) {
-                        let _ = self.pop_stack();
-                        let _ = self.pop_stack();
-                        self.push_stack(value);
+                Value::Integer(_) | Value::Number(_) => {
+                    if let Some(index) = name_value.try_as_index() {
+                        if let Some(value) = object.get_index_property(index) {
+                            let _ = self.pop_stack();
+                            let _ = self.pop_stack();
+                            self.push_stack(value);
 
-                        return Ok(());
+                            return Ok(());
+                        }
                     }
                 }
                 Value::Object(name_object) => {
@@ -1282,14 +1292,15 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
         if let Value::Object(object) = object_value {
             match name_value {
-                Value::Integer(name_int) if name_int >= 0 => {
-                    if let Some(result) = object.set_index_property(self, name_int as usize, value)
-                    {
-                        let _ = self.pop_stack();
-                        let _ = self.pop_stack();
-                        let _ = self.pop_stack();
+                Value::Integer(_) | Value::Number(_) => {
+                    if let Some(index) = name_value.try_as_index() {
+                        if let Some(result) = object.set_index_property(self, index, value) {
+                            let _ = self.pop_stack();
+                            let _ = self.pop_stack();
+                            let _ = self.pop_stack();
 
-                        return result;
+                            return result;
+                        }
                     }
                 }
                 Value::Object(name_object) => {
@@ -1760,7 +1771,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     fn op_new_function(&mut self, method: Method<'gc>) -> Result<(), Error<'gc>> {
         let scope = self.create_scopechain();
 
-        let new_fn = FunctionObject::from_method(self, method, scope, None, None, None);
+        let new_fn = FunctionObject::from_method(self, method, scope, None, None);
 
         self.push_stack(new_fn);
 
@@ -2155,9 +2166,21 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     fn op_multiply(&mut self) -> Result<(), Error<'gc>> {
-        let value2 = self.pop_stack().coerce_to_number(self)?;
-        let value1 = self.pop_stack().coerce_to_number(self)?;
+        let value2 = self.pop_stack();
+        let value1 = self.pop_stack();
 
+        // note: this exists only to preserve int*int -> int behavior
+        // to help int-indexing.
+        // Once we get a generic implicit double->int conversion,
+        // we can reevaluate whether this path is needed.
+        if let (Value::Integer(n1), Value::Integer(n2)) = (value1, value2) {
+            if let Some(result) = n1.checked_mul(n2) {
+                self.push_stack(result);
+                return Ok(());
+            }
+        }
+        let value2 = value2.coerce_to_number(self)?;
+        let value1 = value1.coerce_to_number(self)?;
         self.push_stack(value1 * value2);
 
         Ok(())

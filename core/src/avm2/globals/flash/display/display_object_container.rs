@@ -6,7 +6,7 @@ use swf::Twips;
 use crate::avm2::activation::Activation;
 use crate::avm2::error::{argument_error, make_error_2025, range_error};
 use crate::avm2::globals::slots::flash_geom_point as point_slots;
-use crate::avm2::object::TObject as _;
+use crate::avm2::object::{Object, TObject as _};
 use crate::avm2::parameters::ParametersExt;
 use crate::avm2::value::Value;
 use crate::avm2::{ArrayObject, ArrayStorage, Error};
@@ -109,7 +109,7 @@ fn validate_remove_operation<'gc>(
 fn remove_child_from_displaylist<'gc>(context: &mut UpdateContext<'gc>, child: DisplayObject<'gc>) {
     if let Some(parent) = child.parent() {
         if let Some(mut ctr) = parent.as_container() {
-            child.set_placed_by_script(true);
+            child.set_placed_by_avm2_script(true);
             ctr.remove_child(context, child);
         }
     }
@@ -123,7 +123,7 @@ pub(super) fn add_child_to_displaylist<'gc>(
     index: usize,
 ) {
     if let Some(mut ctr) = parent.as_container() {
-        child.set_placed_by_script(true);
+        child.set_placed_by_avm2_script(true);
         ctr.insert_at_index(context, child, index);
     }
 }
@@ -142,7 +142,7 @@ pub fn get_child_at<'gc>(
     {
         let index = args.get_i32(0);
         return if let Some(child) = dobj.child_by_index(index as usize) {
-            Ok(child.object2())
+            Ok(child.object2_or_null())
         } else {
             // Flash error message: The supplied index is out of bounds.
             Err(Error::avm_error(range_error(
@@ -170,7 +170,7 @@ pub fn get_child_by_name<'gc>(
     {
         let name = args.get_string(activation, 0);
         if let Some(child) = dobj.child_by_name(&name, true) {
-            return Ok(child.object2());
+            return Ok(child.object2_or_null());
         } else {
             return Ok(Value::Null);
         }
@@ -199,7 +199,7 @@ pub fn add_child<'gc>(
             validate_add_operation(activation, parent, child, target_index)?;
             add_child_to_displaylist(activation.context, parent, child, target_index);
 
-            return Ok(child.object2());
+            return Ok(child.object2_or_null());
         }
     }
 
@@ -224,7 +224,7 @@ pub fn add_child_at<'gc>(
         validate_add_operation(activation, parent, child, target_index)?;
         add_child_to_displaylist(activation.context, parent, child, target_index);
 
-        return Ok(child.object2());
+        return Ok(child.object2_or_null());
     }
 
     Ok(Value::Null)
@@ -247,7 +247,7 @@ pub fn remove_child<'gc>(
         validate_remove_operation(activation, parent, child)?;
         remove_child_from_displaylist(activation.context, child);
 
-        return Ok(child.object2());
+        return Ok(child.object2_or_null());
     }
 
     Ok(Value::Null)
@@ -348,11 +348,11 @@ pub fn remove_child_at<'gc>(
             }
 
             let child = ctr.child_by_index(target_child as usize).unwrap();
-            child.set_placed_by_script(true);
+            child.set_placed_by_avm2_script(true);
 
             ctr.remove_child(activation.context, child);
 
-            return Ok(child.object2());
+            return Ok(child.object2_or_null());
         }
     }
 
@@ -483,8 +483,8 @@ pub fn swap_children_at<'gc>(
             let child0 = ctr.child_by_index(index0 as usize).unwrap();
             let child1 = ctr.child_by_index(index1 as usize).unwrap();
 
-            child0.set_placed_by_script(true);
-            child1.set_placed_by_script(true);
+            child0.set_placed_by_avm2_script(true);
+            child1.set_placed_by_avm2_script(true);
 
             ctr.swap_at_index(activation.context, index0 as usize, index1 as usize);
         }
@@ -521,8 +521,8 @@ pub fn swap_children<'gc>(
                 .position(|a| DisplayObject::ptr_eq(a, child1))
                 .ok_or(make_error_2025(activation))?;
 
-            child0.set_placed_by_script(true);
-            child1.set_placed_by_script(true);
+            child0.set_placed_by_avm2_script(true);
+            child1.set_placed_by_avm2_script(true);
 
             ctr.swap_at_index(activation.context, index0, index1);
         }
@@ -547,10 +547,8 @@ pub fn stop_all_movie_clips<'gc>(
         if let Some(ctr) = parent.as_container() {
             for child in ctr.iter_render_list() {
                 if child.as_container().is_some() {
-                    let child_this = child.object2().as_object();
-
-                    if let Some(child_this) = child_this {
-                        stop_all_movie_clips(activation, Value::Object(child_this), &[])?;
+                    if let Some(child_this) = child.object2() {
+                        stop_all_movie_clips(activation, child_this.into(), &[])?;
                     }
                 }
             }
@@ -595,8 +593,12 @@ pub fn get_objects_under_point<'gc>(
 
     while let Some(child) = children.pop() {
         let obj = child.object2();
-        if obj != this && child.hit_test_shape(activation.context, point, options) {
-            under_point.push(Some(obj));
+        if let Some(obj) = obj {
+            let obj = Object::StageObject(obj);
+
+            if obj != thisobj && child.hit_test_shape(activation.context, point, options) {
+                under_point.push(Some(obj.into()));
+            }
         }
         if let Some(container) = child.as_container() {
             for child in container.iter_render_list().rev() {

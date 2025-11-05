@@ -1,10 +1,9 @@
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
-use crate::avm1::property_decl::{define_properties_on, Declaration};
+use crate::avm1::property_decl::{DeclContext, Declaration, SystemClass};
 use crate::avm1::{Object, Value};
 use crate::context_menu;
 use crate::display_object::DisplayObject;
-use crate::string::StringContext;
 use ruffle_macros::istr;
 
 const PROTO_DECLS: &[Declaration] = declare_properties! {
@@ -12,7 +11,16 @@ const PROTO_DECLS: &[Declaration] = declare_properties! {
     "hideBuiltInItems" => method(hide_builtin_items; DONT_ENUM | DONT_DELETE);
 };
 
-pub fn constructor<'gc>(
+pub fn create_class<'gc>(
+    context: &mut DeclContext<'_, 'gc>,
+    super_proto: Object<'gc>,
+) -> SystemClass<'gc> {
+    let class = context.class(constructor, super_proto);
+    context.define_properties_on(class.proto, PROTO_DECLS);
+    class
+}
+
+fn constructor<'gc>(
     activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
@@ -26,7 +34,7 @@ pub fn constructor<'gc>(
 
     let built_in_items = Object::new(
         &activation.context.strings,
-        Some(activation.context.avm1.prototypes().object),
+        Some(activation.prototypes().object),
     );
 
     built_in_items.set(istr!("print"), true.into(), activation)?;
@@ -40,7 +48,7 @@ pub fn constructor<'gc>(
 
     this.set(istr!("builtInItems"), built_in_items.into(), activation)?;
 
-    let constructor = activation.context.avm1.prototypes().array_constructor;
+    let constructor = activation.prototypes().array_constructor;
     let custom_items = constructor.construct(activation, &[])?;
 
     this.set(istr!("customItems"), custom_items, activation)?;
@@ -57,11 +65,7 @@ pub fn copy<'gc>(
         .get(istr!("onSelect"), activation)?
         .coerce_to_object(activation);
 
-    let constructor = activation
-        .context
-        .avm1
-        .prototypes()
-        .context_menu_constructor;
+    let constructor = activation.prototypes().context_menu_constructor;
     let copy = constructor
         .construct(activation, &[callback.into()])?
         .coerce_to_object(activation);
@@ -138,16 +142,6 @@ pub fn hide_builtin_items<'gc>(
     built_in_items.set(istr!("forward_back"), false.into(), activation)?;
     built_in_items.set(istr!("print"), false.into(), activation)?;
     Ok(Value::Undefined)
-}
-
-pub fn create_proto<'gc>(
-    context: &mut StringContext<'gc>,
-    proto: Object<'gc>,
-    fn_proto: Object<'gc>,
-) -> Object<'gc> {
-    let object = Object::new(context, Some(proto));
-    define_properties_on(PROTO_DECLS, context, object, fn_proto);
-    object
 }
 
 pub fn make_context_menu_state<'gc>(

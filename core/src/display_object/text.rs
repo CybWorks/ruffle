@@ -74,7 +74,7 @@ impl<'gc> Text<'gc> {
         self.invalidate_cached_bitmap();
     }
 
-    pub fn text(&self, context: &mut UpdateContext<'gc>) -> WString {
+    pub fn text(self, context: &mut UpdateContext<'gc>) -> WString {
         let mut ret = WString::new();
 
         for block in &self.0.shared.get().text_blocks {
@@ -162,7 +162,7 @@ impl<'gc> TDisplayObject<'gc> for Text<'gc> {
                 let scale = (height.get() as f32) / font.scale();
                 transform.matrix.a = scale;
                 transform.matrix.d = scale;
-                transform.color_transform.set_mult_color(&color);
+                transform.color_transform.set_mult_color(color);
                 for c in &block.glyphs {
                     if let Some(glyph) = font.get_glyph(c.index as usize) {
                         if let Some(glyph_shape_handle) = glyph.shape_handle(context.renderer) {
@@ -273,12 +273,12 @@ impl<'gc> TDisplayObject<'gc> for Text<'gc> {
         }
     }
 
-    fn object2(self) -> Avm2Value<'gc> {
-        self.0
-            .avm2_object
-            .get()
-            .map(|o| o.into())
-            .unwrap_or(Avm2Value::Null)
+    fn object1(self) -> Option<crate::avm1::Object<'gc>> {
+        None
+    }
+
+    fn object2(self) -> Option<Avm2StageObject<'gc>> {
+        self.0.avm2_object.get()
     }
 
     fn set_object2(self, context: &mut UpdateContext<'gc>, to: Avm2StageObject<'gc>) {

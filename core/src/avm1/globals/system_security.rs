@@ -1,11 +1,11 @@
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
-use crate::avm1::property_decl::{define_properties_on, Declaration};
+use crate::avm1::property_decl::{DeclContext, Declaration};
 use crate::avm1::{Object, Value};
 use crate::avm1_stub;
 use crate::prelude::TDisplayObject;
 use crate::sandbox::SandboxType;
-use crate::string::{AvmString, StringContext};
+use crate::string::AvmString;
 
 const OBJECT_DECLS: &[Declaration] = declare_properties! {
     "PolicyFileResolver" => method(policy_file_resolver);
@@ -17,13 +17,19 @@ const OBJECT_DECLS: &[Declaration] = declare_properties! {
     "chooseLocalSwfPath" => property(get_choose_local_swf_path);
 };
 
+pub fn create<'gc>(context: &mut DeclContext<'_, 'gc>) -> Object<'gc> {
+    let security = Object::new(context.strings, Some(context.object_proto));
+    context.define_properties_on(security, OBJECT_DECLS);
+    security
+}
+
 fn allow_domain<'gc>(
     activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
-    _args: &[Value<'gc>],
+    args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     avm1_stub!(activation, "System.security", "allowDomain");
-    Ok(Value::Undefined)
+    Ok(Value::Bool(args.get(0).is_some()))
 }
 
 fn allow_insecure_domain<'gc>(
@@ -87,14 +93,4 @@ fn policy_file_resolver<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     avm1_stub!(activation, "System.security", "chooseLocalSwfPath");
     Ok(Value::Undefined)
-}
-
-pub fn create<'gc>(
-    context: &mut StringContext<'gc>,
-    proto: Object<'gc>,
-    fn_proto: Object<'gc>,
-) -> Object<'gc> {
-    let security = Object::new(context, Some(proto));
-    define_properties_on(OBJECT_DECLS, context, security, fn_proto);
-    security
 }

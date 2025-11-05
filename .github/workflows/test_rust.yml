@@ -111,7 +111,7 @@ jobs:
 
       - name: Upload images
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: swf_images_${{ matrix.rust_version }}_${{ matrix.os }}
           path: |
@@ -232,6 +232,7 @@ jobs:
             --exclude ruffle_scanner
             --exclude ruffle_frontend_utils
             --exclude ruffle_render_canvas
+            --exclude ruffle_render_webgl
             --exclude ruffle_web
             --exclude ruffle_web_common
             --exclude ruffle_web_safari
@@ -246,7 +247,7 @@ jobs:
 
       - name: Upload llvm-cov reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: llvm-cov
           path: target/llvm-cov
@@ -262,7 +263,7 @@ jobs:
 
       - name: Upload diff-cover reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: diff-cover
           path: target/diff-cover
@@ -271,13 +272,9 @@ jobs:
         if: always()
         run: cat target/diff-cover/report.md >> $GITHUB_STEP_SUMMARY
 
-      - name: Comment
+      - name: Warnings
         if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          $COVERAGE_SCRIPT comment_report "target/diff-cover/report.json" "${{ github.event.pull_request.number }}" "${RUN_URL}"
+        run: $COVERAGE_SCRIPT raise_warnings "target/diff-cover/report.json"
 
   dependencies:
     needs: changes
@@ -299,7 +296,13 @@ jobs:
         # So the previous step failing doesn't prevent this one from running.
         if: always()
 
-  check-required:
+  # The rest is needed only because otherwise the real jobs couldn't be made required for merging PRs,
+  # as they would fail the entire workflow run if skipped - this makes GitHub happy instead.
+  # See:
+  #  - https://github.com/orgs/community/discussions/13690
+  #  - https://github.com/orgs/community/discussions/44490
+
+  build-dummy:
     needs: changes
     if: needs.changes.outputs.should_run == 'false'
     name: Test Rust ${{ matrix.rust_version }} / ${{ matrix.os }}
@@ -313,6 +316,19 @@ jobs:
             os: ubuntu-24.04
           - rust_version: beta
             os: ubuntu-24.04
+
+    steps:
+      - name: No-op
+        run: echo noop
+
+  lints-dummy:
+    needs: changes
+    if: needs.changes.outputs.should_run == 'false'
+    name: Lints with Rust ${{ matrix.rust_version }}
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        rust_version: [stable, beta, nightly]
 
     steps:
       - name: No-op

@@ -1,13 +1,12 @@
 //! Contexts and helper types passed between functions.
 
-use crate::avm1::Activation;
-use crate::avm1::ActivationIdentifier;
 use crate::avm1::Attribute;
 use crate::avm1::Avm1;
 use crate::avm1::{Object as Avm1Object, Value as Avm1Value};
 use crate::avm2::api_version::ApiVersion;
 use crate::avm2::Activation as Avm2Activation;
 use crate::avm2::{Avm2, LoaderInfoObject, Object as Avm2Object, SoundChannelObject};
+use crate::avm_rng::AvmRng;
 use crate::backend::{
     audio::{AudioBackend, AudioManager, SoundHandle, SoundInstanceHandle},
     log::LogBackend,
@@ -43,7 +42,6 @@ use crate::PlayerMode;
 use async_channel::Sender;
 use core::fmt;
 use gc_arena::{Collect, Mutation};
-use rand::rngs::SmallRng;
 use ruffle_render::backend::{BitmapCacheEntry, RenderBackend};
 use ruffle_render::commands::{CommandHandler, CommandList};
 use ruffle_render::transform::TransformStack;
@@ -119,7 +117,7 @@ pub struct UpdateContext<'gc> {
     pub video: &'gc mut dyn VideoBackend,
 
     /// The RNG, used by the AVM `RandomNumber` opcode, `Math.random(),` and `random()`.
-    pub rng: &'gc mut SmallRng,
+    pub rng: &'gc mut AvmRng,
 
     /// The current player's stage (including all loaded levels)
     pub stage: Stage<'gc>,
@@ -400,45 +398,31 @@ impl<'gc> UpdateContext<'gc> {
         root.set_depth(0);
         root.set_perspective_projection(None); // Set default PerspectiveProjection
 
-        let flashvars = if !self.root_swf.parameters().is_empty() {
-            let object = Avm1Object::new(&self.strings, None);
+        root.post_instantiation(self, None, Instantiator::Movie, false);
+        root.set_default_root_name(self);
+
+        // Set flashvars and the version parameters (AVM1 only)
+        if let Some(flashvars) = root.object1() {
             for (key, value) in self.root_swf.parameters().iter() {
-                object.define_value(
+                flashvars.define_value(
                     self.gc(),
                     AvmString::new_utf8(self.gc(), key),
                     AvmString::new_utf8(self.gc(), value).into(),
                     Attribute::empty(),
                 );
             }
-            Some(object)
-        } else {
-            None
-        };
 
-        root.post_instantiation(self, flashvars, Instantiator::Movie, false);
-        root.set_default_root_name(self);
+            let version_string = self.system.get_version_string(self.player_version);
+            flashvars.define_value(
+                self.gc(),
+                AvmString::new_ascii_static(self.gc(), b"$version"),
+                AvmString::new_utf8(self.gc(), version_string).into(),
+                Attribute::empty(),
+            );
+        }
+
         self.stage.replace_at_depth(self, root, 0);
-
-        // Set the version parameter on the root.
-        let mut activation =
-            Activation::from_stub(self, ActivationIdentifier::root("[Version Setter]"));
-        let object = root.object().coerce_to_object(&mut activation);
-        let version_string = activation
-            .context
-            .system
-            .get_version_string(activation.context.player_version);
-        object.define_value(
-            activation.gc(),
-            AvmString::new_ascii_static(activation.gc(), b"$version"),
-            AvmString::new_utf8(activation.gc(), version_string).into(),
-            Attribute::empty(),
-        );
-
-        let stage = activation.context.stage;
-        stage.build_matrices(activation.context);
-
-        drop(activation);
-
+        self.stage.build_matrices(self);
         self.audio.set_frame_rate(*self.frame_rate);
     }
 
@@ -476,6 +460,13 @@ impl<'gc> UpdateContext<'gc> {
 
     pub fn avm_warning(&self, message: &str) {
         self.log.avm_warning(message);
+    }
+
+    /// Obtain a strong reference to the current `Player`.
+    pub fn player_handle(&self) -> Arc<Mutex<Player>> {
+        self.player
+            .upgrade()
+            .expect("Could not upgrade weak reference to player")
     }
 }
 

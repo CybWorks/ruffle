@@ -58,7 +58,7 @@ pub use graphic::Graphic;
 pub use interactive::{Avm2MousePick, InteractiveObject, TInteractiveObject};
 pub use loader_display::LoaderDisplay;
 pub use morph_shape::MorphShape;
-pub use movie_clip::{MovieClip, MovieClipWeak, Scene};
+pub use movie_clip::{MovieClip, MovieClipHandle, MovieClipWeak, Scene};
 use ruffle_render::backend::{BitmapCacheEntry, RenderBackend};
 use ruffle_render::bitmap::{BitmapHandle, BitmapInfo, PixelSnapping};
 use ruffle_render::blend::ExtendedBlendMode;
@@ -193,15 +193,61 @@ impl BitmapCache {
 
 #[derive(Clone)]
 pub struct RenderOptions {
+    /// Whether to skip rendering masks.
+    ///
+    /// Masks are usually skipped when rendering, but when e.g. rendering
+    /// the mask itself, it can't be skipped.
+    ///
+    /// Masks are skipped by default.
+    pub skip_masks: bool,
+
+    /// Whether to apply object's base transform.
+    ///
+    /// For instance, when calling BitmapData.draw, object's transform is not
+    /// applied.
+    ///
+    /// Transform is applied by default.
     pub apply_transform: bool,
+
+    /// Whether to apply base transform's matrix when rendering.
+    ///
+    /// Sometimes we need to render an object without applying its matrix, but
+    /// with applying other parts of its transform (e.g. color transform).
+    /// This happens e.g. when rendering alpha masks.
+    ///
+    /// Matrix is applied by default.
+    pub apply_matrix: bool,
 }
 
 impl Default for RenderOptions {
     fn default() -> Self {
         Self {
             apply_transform: true,
+            skip_masks: true,
+            apply_matrix: true,
         }
     }
+}
+
+#[derive(Clone, Collect, Debug)]
+#[collect(no_drop)]
+pub enum RenderMask<'gc> {
+    /// There's no mask.
+    None,
+
+    /// Stencil masks are the classic, default masks used in Flash Player.
+    ///
+    /// The masker behaves like a stencil, and masks everything outside its
+    /// rendered pixels irrespectively of the pixels themselves.
+    /// The maskee acts like being masked with the masker's hit test image.
+    Stencil(DisplayObject<'gc>),
+
+    /// Alpha masks are the more advanced (and more intuitive) masks used when
+    /// CAB is enabled.
+    ///
+    /// The maskee is being masked based on the value of the masker's alpha
+    /// channel.
+    Alpha(DisplayObject<'gc>),
 }
 
 #[derive(Clone, Collect)]
@@ -213,6 +259,7 @@ pub struct DisplayObjectBase<'gc> {
     parent: Lock<Option<DisplayObject<'gc>>>,
     place_frame: Cell<u16>,
     depth: Cell<Depth>,
+    ratio: Cell<u16>,
     name: Lock<Option<AvmString<'gc>>>,
     clip_depth: Cell<Depth>,
 
@@ -291,6 +338,7 @@ impl Default for DisplayObjectBase<'_> {
             parent: Default::default(),
             place_frame: Default::default(),
             depth: Default::default(),
+            ratio: Default::default(),
             name: Lock::new(None),
             clip_depth: Default::default(),
             matrix: Default::default(),
@@ -347,9 +395,13 @@ impl<'gc> DisplayObjectBase<'gc> {
         self.place_frame.set(frame);
     }
 
-    fn transform(&self) -> Transform {
+    fn transform(&self, apply_matrix: bool) -> Transform {
         Transform {
-            matrix: self.matrix.get(),
+            matrix: if apply_matrix {
+                self.matrix.get()
+            } else {
+                Matrix::IDENTITY
+            },
             color_transform: self.color_transform.get(),
             perspective_projection: self.perspective_projection.get(),
         }
@@ -728,12 +780,20 @@ impl<'gc> DisplayObjectBase<'gc> {
         self.set_flag(DisplayObjectFlags::TRANSFORMED_BY_SCRIPT, value);
     }
 
-    fn placed_by_script(&self) -> bool {
-        self.contains_flag(DisplayObjectFlags::PLACED_BY_SCRIPT)
+    fn placed_by_avm1_script(&self) -> bool {
+        self.contains_flag(DisplayObjectFlags::PLACED_BY_AVM1_SCRIPT)
     }
 
-    fn set_placed_by_script(&self, value: bool) {
-        self.set_flag(DisplayObjectFlags::PLACED_BY_SCRIPT, value);
+    fn set_placed_by_avm1_script(&self, value: bool) {
+        self.set_flag(DisplayObjectFlags::PLACED_BY_AVM1_SCRIPT, value);
+    }
+
+    fn placed_by_avm2_script(&self) -> bool {
+        self.contains_flag(DisplayObjectFlags::PLACED_BY_AVM2_SCRIPT)
+    }
+
+    fn set_placed_by_avm2_script(&self, value: bool) {
+        self.set_flag(DisplayObjectFlags::PLACED_BY_AVM2_SCRIPT, value);
     }
 
     fn is_bitmap_cached_preference(&self) -> bool {
@@ -850,12 +910,16 @@ pub fn render_base<'gc>(
     context: &mut RenderContext<'_, 'gc>,
     options: RenderOptions,
 ) {
-    if this.maskee().is_some() {
+    if options.skip_masks && this.maskee().is_some() {
+        // Skip rendering masks (unless we are rendering one explicitly).
         return;
     }
+
     if options.apply_transform {
-        context.transform_stack.push(&this.base().transform());
+        let transform = this.base().transform(options.apply_matrix);
+        context.transform_stack.push(&transform);
     }
+
     let blend_mode = this.blend_mode();
     let original_commands = if blend_mode != ExtendedBlendMode::Normal {
         Some(std::mem::take(&mut context.commands))
@@ -1089,26 +1153,15 @@ pub fn apply_standard_mask_and_scroll<'gc, F>(
         });
     }
 
-    enum Mask<'gc> {
-        None,
-        Stencil(DisplayObject<'gc>),
-        Alpha(DisplayObject<'gc>),
-    }
-
-    let mask = match this.masker() {
-        None => Mask::None,
-        Some(mask) if this.is_bitmap_cached() && mask.is_bitmap_cached() => Mask::Alpha(mask),
-        Some(mask) => Mask::Stencil(mask),
-    };
-
+    let mask = this.get_render_mask();
     let mut mask_transform = ruffle_render::transform::Transform::default();
-    if let Mask::Stencil(m) | Mask::Alpha(m) = mask {
+    if let RenderMask::Stencil(m) | RenderMask::Alpha(m) = mask {
         if options.apply_transform {
             mask_transform.matrix = this.global_to_local_matrix().unwrap_or_default();
         }
         mask_transform.matrix *= m.local_to_global_matrix();
     }
-    if let Mask::Stencil(m) = mask {
+    if let RenderMask::Stencil(m) = mask {
         context.commands.push_mask();
         context.transform_stack.push(&mask_transform);
         m.render_self(context);
@@ -1134,16 +1187,20 @@ pub fn apply_standard_mask_and_scroll<'gc, F>(
         context.commands.activate_mask();
     }
 
-    if let Mask::Alpha(m) = mask {
+    if let RenderMask::Alpha(m) = mask {
         let original_commands = std::mem::take(&mut context.commands);
 
         draw(context);
 
         let maskee_commands = std::mem::take(&mut context.commands);
 
-        // TODO We should use m.render() here, but it needs to be adapted for rendering masks.
         context.transform_stack.push(&mask_transform);
-        m.render_self(context);
+        let options = RenderOptions {
+            skip_masks: false,
+            apply_matrix: false,
+            ..Default::default()
+        };
+        m.render_with_options(context, options);
         context.transform_stack.pop();
 
         let mask_commands = std::mem::replace(&mut context.commands, original_commands);
@@ -1163,7 +1220,7 @@ pub fn apply_standard_mask_and_scroll<'gc, F>(
         context.commands.pop_mask();
     }
 
-    if let Mask::Stencil(m) = mask {
+    if let RenderMask::Stencil(m) = mask {
         context.commands.deactivate_mask();
         context.transform_stack.push(&mask_transform);
         m.render_self(context);
@@ -1649,6 +1706,20 @@ pub trait TDisplayObject<'gc>:
         self.set_scale_y(Percent::from_unit(new_scale_y));
     }
 
+    #[no_dynamic]
+    fn ratio(self) -> u16 {
+        self.base().ratio.get()
+    }
+
+    #[no_dynamic]
+    fn set_ratio(self, context: &mut UpdateContext<'gc>, ratio: u16) {
+        self.base().ratio.set(ratio);
+        self.invalidate_cached_bitmap();
+        self.on_ratio_changed(context, ratio);
+    }
+
+    fn on_ratio_changed(self, _context: &mut UpdateContext<'gc>, _new_ratio: u16) {}
+
     /// The opacity of this display object.
     /// 1 is fully opaque.
     /// Returned by the `_alpha`/`alpha` ActionScript properties.
@@ -1845,6 +1916,17 @@ pub trait TDisplayObject<'gc>:
             self.invalidate_cached_bitmap();
         }
         DisplayObjectBase::set_maskee(Gc::write(mc, self.base()), node);
+    }
+
+    #[no_dynamic]
+    fn get_render_mask(self) -> RenderMask<'gc> {
+        match self.masker() {
+            None => RenderMask::None,
+            Some(mask) if self.is_bitmap_cached() && mask.is_bitmap_cached() => {
+                RenderMask::Alpha(mask)
+            }
+            Some(mask) => RenderMask::Stencil(mask),
+        }
     }
 
     /// High level method for setting the mask. Sets both masker and maskee.
@@ -2085,20 +2167,31 @@ pub trait TDisplayObject<'gc>:
         self.base().set_has_scroll_rect(value)
     }
 
+    /// Whether this display object has been created by ActionScript 1/2.
+    #[no_dynamic]
+    fn placed_by_avm1_script(self) -> bool {
+        self.base().placed_by_avm1_script()
+    }
+
+    /// Sets whether this display object has been created by ActionScript 1/2.
+    #[no_dynamic]
+    fn set_placed_by_avm1_script(self, value: bool) {
+        self.base().set_placed_by_avm1_script(value);
+    }
+
     /// Whether this display object has been created by ActionScript 3.
     /// When this flag is set, changes from SWF `RemoveObject` tags are
     /// ignored.
     #[no_dynamic]
-    fn placed_by_script(self) -> bool {
-        self.base().placed_by_script()
+    fn placed_by_avm2_script(self) -> bool {
+        self.base().placed_by_avm2_script()
     }
 
-    /// Sets whether this display object has been created by ActionScript 3.
     /// When this flag is set, changes from SWF `RemoveObject` tags are
     /// ignored.
     #[no_dynamic]
-    fn set_placed_by_script(self, value: bool) {
-        self.base().set_placed_by_script(value)
+    fn set_placed_by_avm2_script(self, value: bool) {
+        self.base().set_placed_by_avm2_script(value)
     }
 
     /// Whether this display object has been instantiated by the timeline.
@@ -2177,18 +2270,17 @@ pub trait TDisplayObject<'gc>:
     #[no_dynamic]
     #[inline(never)]
     fn on_construction_complete(self, context: &mut UpdateContext<'gc>) {
-        let placed_by_script = self.placed_by_script();
+        let placed_by_avm2_script = self.placed_by_avm2_script();
         self.fire_added_events(context);
-        // Check `self.placed_by_script()` before we fire events, since those
-        // events might `placed_by_script`
-        if !placed_by_script {
+        // Check `self.placed_by_avm2_script()` before we fire events, since those
+        // events might `placed_by_avm2_script`
+        if !placed_by_avm2_script {
             self.set_on_parent_field(context);
         }
 
         if let Some(movie) = self.as_movie_clip() {
             let obj = movie
                 .object2()
-                .as_object()
                 .expect("MovieClip object should have been constructed");
             let movieclip_class = context.avm2.classes().movieclip.inner_class_definition();
             // It's possible to have a DefineSprite tag with multiple frames, but have
@@ -2204,7 +2296,7 @@ pub trait TDisplayObject<'gc>:
 
     #[no_dynamic]
     fn fire_added_events(self, context: &mut UpdateContext<'gc>) {
-        if !self.placed_by_script() {
+        if !self.placed_by_avm2_script() {
             // Since we construct AVM2 display objects after they are
             // allocated and placed on the render list, we have to emit all
             // events after this point.
@@ -2224,8 +2316,10 @@ pub trait TDisplayObject<'gc>:
         //TODO: Don't report missing property errors.
         //TODO: Don't attempt to set properties if object was placed without a name.
         if self.has_explicit_name() {
-            if let Some(parent @ Avm2Value::Object(_)) = self.parent().map(|p| p.object2()) {
-                if let Avm2Value::Object(child) = self.object2() {
+            if let Some(parent) = self.parent().and_then(|p| p.object2()) {
+                let parent = Avm2Value::from(parent);
+
+                if let Some(child) = self.object2() {
                     if let Some(name) = self.name() {
                         let domain = context
                             .library
@@ -2292,6 +2386,7 @@ pub trait TDisplayObject<'gc>:
 
     fn render_self(self, _context: &mut RenderContext<'_, 'gc>) {}
 
+    #[no_dynamic]
     fn render(self, context: &mut RenderContext<'_, 'gc>) {
         self.render_with_options(context, Default::default())
     }
@@ -2315,7 +2410,7 @@ pub trait TDisplayObject<'gc>:
         let bounds = self.world_bounds();
 
         let mut classname = "".to_string();
-        if let Some(o) = self.object2().as_object() {
+        if let Some(o) = self.object2() {
             classname = format!("{:?}", o.base().class_name());
         }
 
@@ -2388,11 +2483,7 @@ pub trait TDisplayObject<'gc>:
                 }
             }
             if let Some(ratio) = place_object.ratio {
-                if let Some(morph_shape) = self.as_morph_shape() {
-                    morph_shape.set_ratio(ratio);
-                } else if let Some(video) = self.as_video() {
-                    video.seek(context, ratio.into());
-                }
+                self.set_ratio(context, ratio);
             }
             if let Some(is_bitmap_cached) = place_object.is_bitmap_cached {
                 self.set_bitmap_cached_preference(is_bitmap_cached);
@@ -2430,15 +2521,23 @@ pub trait TDisplayObject<'gc>:
         // Noop for most symbols; only shapes can replace their innards with another Graphic.
     }
 
-    fn object(self) -> Avm1Value<'gc> {
-        Avm1Value::Undefined // TODO: Implement for every type and delete this fallback.
+    fn object1(self) -> Option<Avm1Object<'gc>>;
+
+    #[no_dynamic]
+    fn object1_or_undef(self) -> Avm1Value<'gc> {
+        self.object1()
+            .map(|o| o.into())
+            .unwrap_or(Avm1Value::Undefined)
     }
 
-    fn object2(self) -> Avm2Value<'gc> {
-        Avm2Value::Undefined // TODO: See above. Also, unconstructed objects should return null.
-    }
+    fn object2(self) -> Option<Avm2StageObject<'gc>>;
 
     fn set_object2(self, _context: &mut UpdateContext<'gc>, _to: Avm2StageObject<'gc>) {}
+
+    #[no_dynamic]
+    fn object2_or_null(self) -> Avm2Value<'gc> {
+        self.object2().map(|o| o.into()).unwrap_or(Avm2Value::Null)
+    }
 
     /// Tests if a given stage position point intersects with the world bounds of this object.
     #[no_dynamic]
@@ -2662,7 +2761,7 @@ pub trait TDisplayObject<'gc>:
     where
         F: FnOnce(&mut UpdateContext<'gc>) -> bool,
     {
-        if let Avm1Value::Object(object) = self.object() {
+        if let Some(object) = self.object1() {
             let mut activation = Activation::from_nothing(
                 context,
                 Avm1ActivationIdentifier::root("[AVM1 Boolean Property]"),
@@ -2688,7 +2787,7 @@ pub trait TDisplayObject<'gc>:
         value: Avm1Value<'gc>,
         context: &mut UpdateContext<'gc>,
     ) {
-        if let Avm1Value::Object(object) = self.object() {
+        if let Some(object) = self.object1() {
             let mut activation = Activation::from_nothing(
                 context,
                 Avm1ActivationIdentifier::root("[AVM1 Property Set]"),
@@ -2795,7 +2894,8 @@ bitflags! {
 
         /// Whether this object has been placed in a container by ActionScript 3.
         /// When this flag is set, changes from SWF `RemoveObject` tags are ignored.
-        const PLACED_BY_SCRIPT         = 1 << 4;
+        // TODO [KJ] Can we repurpose it to cover PLACED_BY_AVM1_SCRIPT too?
+        const PLACED_BY_AVM2_SCRIPT    = 1 << 4;
 
         /// Whether this object has been instantiated by a SWF tag.
         /// When this flag is set, attempts to change the object's name from AVM2 throw an exception.
@@ -2833,6 +2933,11 @@ bitflags! {
 
         /// Whether this object has matrix3D (used for stubbing).
         const HAS_MATRIX3D_STUB        = 1 << 14;
+
+        /// Whether this object has been placed by an AVM1 method,
+        /// i.e. attachMovie, createEmptyMovieClip, duplicateMovieClip.
+        // TODO [KJ] Can this be merged with PLACED_BY_AVM2_SCRIPT?
+        const PLACED_BY_AVM1_SCRIPT    = 1 << 15;
     }
 }
 

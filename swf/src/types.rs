@@ -529,7 +529,7 @@ pub enum Tag<'a> {
     DefineButtonColorTransform(ButtonColorTransform),
     DefineButtonSound(Box<ButtonSounds>),
     DefineEditText(Box<EditText<'a>>),
-    DefineFont(Box<FontV1>),
+    DefineFont(FontV1),
     DefineFont2(Box<Font<'a>>),
     DefineFont4(Font4<'a>),
     DefineFontAlignZones {
@@ -548,8 +548,8 @@ pub enum Tag<'a> {
         id: CharacterId,
         splitter_rect: Rectangle<Twips>,
     },
-    DefineShape(Shape),
-    DefineSound(Box<Sound<'a>>),
+    DefineShape(Box<Shape>),
+    DefineSound(Sound<'a>),
     DefineSprite(Sprite<'a>),
     DefineText(Box<Text>),
     DefineText2(Box<Text>),
@@ -579,8 +579,8 @@ pub enum Tag<'a> {
         tab_index: u16,
     },
     SoundStreamBlock(SoundStreamBlock<'a>),
-    SoundStreamHead(Box<SoundStreamHead>),
-    SoundStreamHead2(Box<SoundStreamHead>),
+    SoundStreamHead(SoundStreamHead),
+    SoundStreamHead2(SoundStreamHead),
     StartSound(StartSound),
     StartSound2 {
         class_name: &'a SwfStr,
@@ -611,7 +611,7 @@ pub struct ExportedAsset<'a> {
     pub name: &'a SwfStr,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct RemoveObject {
     pub depth: Depth,
     pub character_id: Option<CharacterId>,
@@ -1378,10 +1378,10 @@ impl<'a> EditText<'a> {
     }
 
     #[inline]
-    pub fn color(&self) -> Option<&Color> {
+    pub fn color(&self) -> Option<Color> {
         self.flags
             .contains(EditTextFlag::HAS_TEXT_COLOR)
-            .then_some(&self.color)
+            .then_some(self.color)
     }
 
     #[inline]

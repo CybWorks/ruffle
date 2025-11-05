@@ -1,9 +1,8 @@
-use crate::avm1::function::FunctionObject;
-use crate::avm1::property_decl::{define_properties_on, Declaration};
+use crate::avm1::property_decl::{DeclContext, Declaration, SystemClass};
 use crate::avm1::{Activation, Attribute, Error, NativeObject, Object, Value};
 use crate::avm1_stub;
 use crate::display_object::TDisplayObject;
-use crate::string::{AvmString, StringContext};
+use crate::string::AvmString;
 use flash_lso::amf0::read::AMF0Decoder;
 use flash_lso::amf0::writer::{Amf0Writer, CacheKey, ObjWriter};
 use flash_lso::types::{Lso, ObjectId, Reference, Value as AmfValue};
@@ -48,6 +47,16 @@ const OBJECT_DECLS: &[Declaration] = declare_properties! {
     "getLocal" => method(get_local);
     "getRemote" => method(get_remote);
 };
+
+pub fn create_class<'gc>(
+    context: &mut DeclContext<'_, 'gc>,
+    super_proto: Object<'gc>,
+) -> SystemClass<'gc> {
+    let class = context.class(constructor, super_proto);
+    context.define_properties_on(class.proto, PROTO_DECLS);
+    context.define_properties_on(class.constr, OBJECT_DECLS);
+    class
+}
 
 fn delete_all<'gc>(
     activation: &mut Activation<'_, 'gc>,
@@ -95,7 +104,7 @@ fn recursive_serialize<'gc>(
 
             match elem {
                 Value::Object(o) => {
-                    if o.as_executable().is_some() {
+                    if o.as_function().is_some() {
                     } else if o.as_display_object().is_some() {
                         writer.undefined(name.as_ref())
                     } else if let NativeObject::Array(_) = o.native() {
@@ -156,7 +165,7 @@ pub fn deserialize_value<'gc>(
         AmfValue::String(s) => Value::String(AvmString::new_utf8(activation.gc(), s)),
         AmfValue::Bool(b) => (*b).into(),
         AmfValue::ECMAArray(_, _, associative, len) => {
-            let array_constructor = activation.context.avm1.prototypes().array_constructor;
+            let array_constructor = activation.prototypes().array_constructor;
             if let Ok(Value::Object(obj)) =
                 array_constructor.construct(activation, &[(*len).into()])
             {
@@ -191,7 +200,7 @@ pub fn deserialize_value<'gc>(
             // Deserialize Object
             let obj = Object::new(
                 &activation.context.strings,
-                Some(activation.context.avm1.prototypes().object),
+                Some(activation.prototypes().object),
             );
 
             let v: Value<'gc> = obj.into();
@@ -210,7 +219,7 @@ pub fn deserialize_value<'gc>(
             v
         }
         AmfValue::Date(time, _) => {
-            let date_proto = activation.context.avm1.prototypes().date_constructor;
+            let date_proto = activation.prototypes().date_constructor;
 
             if let Ok(Value::Object(obj)) = date_proto.construct(activation, &[(*time).into()]) {
                 Value::Object(obj)
@@ -219,7 +228,7 @@ pub fn deserialize_value<'gc>(
             }
         }
         AmfValue::XML(content, _) => {
-            let xml_proto = activation.context.avm1.prototypes().xml_constructor;
+            let xml_proto = activation.prototypes().xml_constructor;
 
             if let Ok(Value::Object(obj)) = xml_proto.construct(
                 activation,
@@ -248,7 +257,7 @@ fn deserialize_lso<'gc>(
 ) -> Result<Object<'gc>, Error<'gc>> {
     let obj = Object::new(
         &activation.context.strings,
-        Some(activation.context.avm1.prototypes().object),
+        Some(activation.prototypes().object),
     );
 
     let mut reference_cache = BTreeMap::default();
@@ -397,11 +406,7 @@ fn get_local<'gc>(
     }
 
     // Data property only should exist when created with getLocal/Remote
-    let constructor = activation
-        .context
-        .avm1
-        .prototypes()
-        .shared_object_constructor;
+    let constructor = activation.prototypes().shared_object_constructor;
     let this = constructor
         .construct(activation, &[])?
         .coerce_to_object(activation);
@@ -425,7 +430,7 @@ fn get_local<'gc>(
         // No data; create a fresh data object.
         data = Object::new(
             &activation.context.strings,
-            Some(activation.context.avm1.prototypes().object),
+            Some(activation.prototypes().object),
         )
         .into();
     }
@@ -579,16 +584,4 @@ fn constructor<'gc>(
         NativeObject::SharedObject(Gc::new(activation.gc(), Default::default())),
     );
     Ok(Value::Undefined)
-}
-
-pub fn create_constructor<'gc>(
-    context: &mut StringContext<'gc>,
-    proto: Object<'gc>,
-    fn_proto: Object<'gc>,
-) -> Object<'gc> {
-    let shared_object_proto = Object::new(context, Some(proto));
-    define_properties_on(PROTO_DECLS, context, shared_object_proto, fn_proto);
-    let constructor = FunctionObject::native(context, constructor, fn_proto, shared_object_proto);
-    define_properties_on(OBJECT_DECLS, context, constructor, fn_proto);
-    constructor
 }

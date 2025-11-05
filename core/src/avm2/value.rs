@@ -2,7 +2,7 @@
 
 use crate::avm2::activation::Activation;
 use crate::avm2::error::{self};
-use crate::avm2::error::{make_error_1006, type_error};
+use crate::avm2::error::{make_error_1006, make_error_1034, type_error};
 use crate::avm2::function::{exec, FunctionArgs};
 use crate::avm2::object::{NamespaceObject, Object, TObject};
 use crate::avm2::property::Property;
@@ -118,20 +118,20 @@ impl From<u16> for Value<'_> {
 
 impl From<i32> for Value<'_> {
     fn from(value: i32) -> Self {
-        if value >= (1 << 28) || value < -(1 << 28) {
-            Value::Number(value as f64)
-        } else {
+        if fits_in_value_integer_i32(value) {
             Value::Integer(value)
+        } else {
+            Value::Number(value as f64)
         }
     }
 }
 
 impl From<u32> for Value<'_> {
     fn from(value: u32) -> Self {
-        if value >= (1 << 28) {
-            Value::Number(value as f64)
-        } else {
+        if fits_in_value_integer_u32(value) {
             Value::Integer(value as i32)
+        } else {
+            Value::Number(value as f64)
         }
     }
 }
@@ -157,6 +157,14 @@ impl PartialEq for Value<'_> {
             _ => false,
         }
     }
+}
+
+fn fits_in_value_integer_i32(value: i32) -> bool {
+    value < (1 << 28) && value >= -(1 << 28)
+}
+
+fn fits_in_value_integer_u32(value: u32) -> bool {
+    value < (1 << 28)
 }
 
 /// Strips leading whitespace.
@@ -502,13 +510,13 @@ pub fn abc_double<'gc>(
 /// Retrieve a default value as an AVM2 `Value`.
 pub fn abc_default_value<'gc>(
     translation_unit: TranslationUnit<'gc>,
-    default: &AbcDefaultValue,
+    default: AbcDefaultValue,
     activation: &mut Activation<'_, 'gc>,
 ) -> Result<Value<'gc>, Error<'gc>> {
     match default {
-        AbcDefaultValue::Int(i) => abc_int(translation_unit, *i).map(|v| v.into()),
-        AbcDefaultValue::Uint(u) => abc_uint(translation_unit, *u).map(|v| v.into()),
-        AbcDefaultValue::Double(d) => abc_double(translation_unit, *d).map(|v| v.into()),
+        AbcDefaultValue::Int(i) => abc_int(translation_unit, i).map(|v| v.into()),
+        AbcDefaultValue::Uint(u) => abc_uint(translation_unit, u).map(|v| v.into()),
+        AbcDefaultValue::Double(d) => abc_double(translation_unit, d).map(|v| v.into()),
         AbcDefaultValue::String(s) => translation_unit
             .pool_string(s.0, activation.strings())
             .map(Into::into),
@@ -523,7 +531,7 @@ pub fn abc_default_value<'gc>(
         | AbcDefaultValue::Explicit(ns)
         | AbcDefaultValue::StaticProtected(ns)
         | AbcDefaultValue::Private(ns) => {
-            let ns = translation_unit.pool_namespace(activation, *ns)?;
+            let ns = translation_unit.pool_namespace(activation, ns)?;
             Ok(NamespaceObject::from_namespace(activation, ns).into())
         }
     }
@@ -536,6 +544,40 @@ impl<'gc> Value<'gc> {
                 .as_namespace()
                 .ok_or_else(|| "Expected Namespace, found Object".into()),
             _ => Err(format!("Expected Namespace, found {self:?}").into()),
+        }
+    }
+
+    /// Normalize this value to an equivalent, normal value.
+    ///
+    /// It should be fine to call this method whenever, it does not change
+    /// semantics, but has an effect on performance only.
+    ///
+    /// Flash Player does this normalization on every atom instantiation,
+    /// but for Ruffle it's too inefficient (we aren't doing any allocs).
+    /// However, there are some observable behaviors that result from it, and
+    /// that's why this method is provided in order to cover such cases.
+    ///
+    /// The rule of thumb is to normalize the value before differentiating
+    /// between a [`Value::Number`] and [`Value::Integer`]. If there's no need
+    /// to differentiate between those variants, no normalization is needed.
+    pub fn normalize(self) -> Self {
+        match self {
+            Value::Number(n) => {
+                let i = n as i32;
+                if n.to_bits() == (i as f64).to_bits() && fits_in_value_integer_i32(i) {
+                    Value::Integer(i)
+                } else {
+                    self
+                }
+            }
+            Value::Integer(i) => {
+                if !fits_in_value_integer_i32(i) {
+                    Value::Number(i as f64)
+                } else {
+                    self
+                }
+            }
+            _ => self,
         }
     }
 
@@ -559,7 +601,7 @@ impl<'gc> Value<'gc> {
         self.try_as_f64().expect("Expected Number or Integer")
     }
 
-    /// Like `as_number`, but for `i32`
+    /// Like `as_f64`, but for `i32`
     pub fn as_i32(&self) -> i32 {
         match self {
             Value::Number(num) => f64_to_wrapping_i32(*num),
@@ -568,13 +610,26 @@ impl<'gc> Value<'gc> {
         }
     }
 
-    /// Like `as_number`, but for `u32`
+    /// Like `as_f64`, but for `u32`
     pub fn as_u32(&self) -> u32 {
         match self {
             Value::Number(num) => f64_to_wrapping_u32(*num),
             Value::Integer(num) => *num as u32,
             _ => panic!("Expected Number or Integer"),
         }
+    }
+
+    // If the current value represents an index (a unsigned integer less than u32::MAX),
+    // then return that value. Returns None otherwise.
+    pub fn try_as_index(&self) -> Option<usize> {
+        Some(match self {
+            value @ Value::Integer(num) if value.is_u32() => *num as usize,
+            value @ Value::Number(num) if value.is_u32() && *num < u32::MAX as f64 => {
+                assert!(num.is_finite());
+                *num as usize
+            }
+            _ => return None,
+        })
     }
 
     /// Yields `true` if the given value is an unboxed primitive value.
@@ -1243,7 +1298,6 @@ impl<'gc> Value<'gc> {
                 full_method.scope(),
                 *self,
                 full_method.super_class_obj,
-                Some(full_method.class),
                 arguments,
                 activation,
                 None,
@@ -1448,15 +1502,7 @@ impl<'gc> Value<'gc> {
             }
         }
 
-        let name = class.name().to_qualified_name_err_message(activation.gc());
-
-        let debug_str = self.as_debug_string(activation)?;
-
-        Err(Error::avm_error(type_error(
-            activation,
-            &format!("Error #1034: Type Coercion failed: cannot convert {debug_str} to {name}."),
-            1034,
-        )?))
+        Err(make_error_1034(activation, *self, class))
     }
 
     /// Determine if this value is any kind of number.

@@ -7,7 +7,6 @@ pub use crate::display_object::{
 };
 use crate::display_object::{EditText, InteractiveObject, TInteractiveObject};
 use crate::events::{ClipEvent, KeyCode};
-use crate::prelude::Avm2Value;
 use crate::Player;
 use either::Either;
 use gc_arena::barrier::unlock;
@@ -193,10 +192,10 @@ impl<'gc> FocusTracker<'gc> {
                     istr!(context, "onSetFocus"),
                     &[
                         old.map(|o| o.as_displayobject())
-                            .map(|v| v.object())
+                            .map(|v| v.object1_or_undef())
                             .unwrap_or(Value::Null),
                         new.map(|o| o.as_displayobject())
-                            .map(|v| v.object())
+                            .map(|v| v.object1_or_undef())
                             .unwrap_or(Value::Null),
                     ],
                     context,
@@ -207,7 +206,7 @@ impl<'gc> FocusTracker<'gc> {
         self.update_virtual_keyboard(context);
     }
 
-    fn update_virtual_keyboard(&self, context: &mut UpdateContext<'gc>) {
+    fn update_virtual_keyboard(self, context: &mut UpdateContext<'gc>) {
         if let Some(text_field) = self.get_as_edit_text() {
             if text_field.is_editable() {
                 context.ui.open_virtual_keyboard();
@@ -222,7 +221,7 @@ impl<'gc> FocusTracker<'gc> {
     /// Update selection on the newly focused text field.
     ///
     /// This applies even if the focused element hasn't changed.
-    fn update_edittext_selection(&self) {
+    fn update_edittext_selection(self) {
         // Only key and programmatic focus change should trigger this, because
         // when focusing a text field with a mouse, a caret should be placed.
         // Note that this may suggest we should reorder operations on the text field:
@@ -250,7 +249,7 @@ impl<'gc> FocusTracker<'gc> {
             .map(|int| int.as_displayobject())
             .unwrap_or_else(|| context.stage.as_displayobject())
             .object2();
-        let Avm2Value::Object(target) = target else {
+        let Some(target) = target else {
             return false;
         };
 
@@ -258,7 +257,7 @@ impl<'gc> FocusTracker<'gc> {
         let key_code = key_code.map(|k| k.value()).unwrap_or_default();
         let event =
             EventObject::focus_event(&mut activation, event_type, true, related_object, key_code);
-        Avm2::dispatch_event(activation.context, event, target);
+        Avm2::dispatch_event(activation.context, event, target.into());
 
         let canceled = event.event().is_cancelled();
         canceled
@@ -337,7 +336,7 @@ impl<'gc> FocusTracker<'gc> {
         self.0.highlight.replace(self.calculate_highlight(context));
     }
 
-    fn calculate_highlight(&self, context: &mut UpdateContext<'gc>) -> Highlight {
+    fn calculate_highlight(self, context: &mut UpdateContext<'gc>) -> Highlight {
         let Some(focus) = self.get() else {
             return Highlight::Inactive;
         };

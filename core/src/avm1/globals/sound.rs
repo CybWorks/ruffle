@@ -1,25 +1,25 @@
 //! AVM1 Sound object
-//! TODO: Sound position, transform, loadSound
 
 use std::cell::Cell;
 use std::fmt;
+use std::io::Cursor;
 
 use gc_arena::barrier::unlock;
 use gc_arena::{Collect, Gc, Mutation, RefLock};
+use id3::Tag;
 use ruffle_macros::istr;
 
 use crate::avm1::activation::Activation;
 use crate::avm1::clamp::Clamp;
 use crate::avm1::error::Error;
-use crate::avm1::function::FunctionObject;
-use crate::avm1::property_decl::{define_properties_on, Declaration};
-use crate::avm1::{NativeObject, Object, Value};
+use crate::avm1::property_decl::{DeclContext, Declaration, SystemClass};
+use crate::avm1::{ArrayBuilder, Attribute, ExecutionReason, NativeObject, Object, Value};
 use crate::backend::audio::{SoundHandle, SoundInstanceHandle};
 use crate::backend::navigator::Request;
 use crate::character::Character;
 use crate::context::UpdateContext;
 use crate::display_object::{DisplayObject, SoundTransform, TDisplayObject};
-use crate::string::StringContext;
+use crate::string::AvmString;
 use crate::{avm1_stub, avm_warn};
 
 #[derive(Debug, Collect)]
@@ -205,27 +205,123 @@ impl<'gc> Sound<'gc> {
             }
         }
     }
+
+    pub fn load_id3(
+        self,
+        activation: &mut Activation<'_, 'gc>,
+        sound_object: Object<'gc>,
+        bytes: &[u8],
+    ) -> Result<(), Error<'gc>> {
+        let tag = Tag::read_from2(Cursor::new(bytes));
+        let Ok(ref tag) = tag else {
+            // no ID3, or malformed
+            return Ok(());
+        };
+
+        let id3 = Object::new_without_proto(activation.gc());
+
+        for frame in tag.frames() {
+            let id_2_0 = frame.id();
+            let id_2_0_avm = AvmString::new_utf8(activation.gc(), id_2_0);
+            let id_1_0 = match id_2_0 {
+                "COMM" => Some(istr!("comment")),
+                "TALB" => Some(istr!("album")),
+                "TCON" => Some(istr!("genre")),
+                "TIT2" => Some(istr!("songname")),
+                "TPE1" => Some(istr!("artist")),
+                "TRCK" => Some(istr!("track")),
+                "TYER" => Some(istr!("year")),
+                _ => None,
+            };
+
+            let (value_1_0, value_2_0): (Value<'gc>, Value<'gc>) = match frame.content() {
+                id3::Content::Text(text) => {
+                    let value = AvmString::new_utf8(activation.gc(), text).into();
+                    (value, value)
+                }
+                id3::Content::Comment(comment) => {
+                    let value = AvmString::new_utf8(activation.gc(), &comment.text).into();
+
+                    let comment_array =
+                        if let Value::Object(comment_array) = id3.get(id_2_0_avm, activation)? {
+                            comment_array
+                        } else {
+                            ArrayBuilder::empty(activation)
+                        };
+
+                    let len = comment_array.length(activation)?;
+                    comment_array.set_element(activation, len, value)?;
+                    comment_array.set_length(activation, len + 1)?;
+
+                    // ID3 1.0 value is always the last comment.
+                    // ID3 2.0 value aggregates all comments into an array.
+                    (value, comment_array.into())
+                }
+                _ => continue,
+            };
+
+            if let Some(id_1_0) = id_1_0 {
+                id3.set(id_1_0, value_1_0, activation)?;
+            }
+
+            // TODO: This probably should be set for FP 7+ only
+            id3.set(id_2_0_avm, value_2_0, activation)?;
+        }
+
+        if !sound_object.has_property(activation, istr!("id3")) {
+            sound_object.set(istr!("id3"), id3.into(), activation)?;
+            sound_object.set_attributes(
+                activation.gc(),
+                Some(istr!("id3")),
+                Attribute::DONT_ENUM | Attribute::DONT_DELETE | Attribute::READ_ONLY,
+                Attribute::empty(),
+            );
+        }
+
+        let _ = sound_object.call_method(
+            istr!("onID3"),
+            // Flash always passes true as the first argument, even if docs say
+            // the function does not accept anything. Can it be false?
+            &[true.into()],
+            activation,
+            ExecutionReason::Special,
+        );
+        Ok(())
+    }
 }
 
 const PROTO_DECLS: &[Declaration] = declare_properties! {
-    "attachSound" => method(attach_sound; DONT_ENUM | DONT_DELETE | READ_ONLY);
-    "duration" => property(duration; DONT_ENUM | DONT_DELETE | READ_ONLY);
-    "getDuration" => method(duration; DONT_ENUM | DONT_DELETE | READ_ONLY);
-    "setDuration" => method(set_duration; DONT_ENUM | DONT_DELETE | READ_ONLY);
-    "id3" => method(id3; DONT_ENUM | DONT_DELETE | READ_ONLY);
-    "getBytesLoaded" => method(get_bytes_loaded; DONT_ENUM | DONT_DELETE | READ_ONLY);
-    "getBytesTotal" => method(get_bytes_total; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    // Note: id3 is not a built-in property. See [`Sound::load_id3`].
     "getPan" => method(get_pan; DONT_ENUM | DONT_DELETE | READ_ONLY);
     "getTransform" => method(get_transform; DONT_ENUM | DONT_DELETE | READ_ONLY);
     "getVolume" => method(get_volume; DONT_ENUM | DONT_DELETE | READ_ONLY);
-    "loadSound" => method(load_sound; DONT_ENUM | DONT_DELETE | READ_ONLY);
-    "position" => property(position; DONT_ENUM | DONT_DELETE | READ_ONLY);
     "setPan" => method(set_pan; DONT_ENUM | DONT_DELETE | READ_ONLY);
     "setTransform" => method(set_transform; DONT_ENUM | DONT_DELETE | READ_ONLY);
     "setVolume" => method(set_volume; DONT_ENUM | DONT_DELETE | READ_ONLY);
-    "start" => method(start; DONT_ENUM | DONT_DELETE | READ_ONLY);
     "stop" => method(stop; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "attachSound" => method(attach_sound; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "start" => method(start; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "getDuration" => method(duration; DONT_ENUM | DONT_DELETE | READ_ONLY | VERSION_6);
+    "setDuration" => method(set_duration; DONT_ENUM | DONT_DELETE | READ_ONLY | VERSION_6);
+    "getPosition" => method(get_position; DONT_ENUM | DONT_DELETE | READ_ONLY | VERSION_6);
+    "setPosition" => method(set_position; DONT_ENUM | DONT_DELETE | READ_ONLY | VERSION_6);
+    "loadSound" => method(load_sound; DONT_ENUM | DONT_DELETE | READ_ONLY | VERSION_6);
+    "getBytesLoaded" => method(get_bytes_loaded; DONT_ENUM | DONT_DELETE | READ_ONLY | VERSION_6);
+    "getBytesTotal" => method(get_bytes_total; DONT_ENUM | DONT_DELETE | READ_ONLY | VERSION_6);
+
+    // TODO The following 2 probably should not be declared here. See avm1/sound_props_swf*
+    "duration" => property(duration; DONT_ENUM | DONT_DELETE);
+    "position" => property(position; DONT_ENUM | DONT_DELETE);
 };
+
+pub fn create_class<'gc>(
+    context: &mut DeclContext<'_, 'gc>,
+    super_proto: Object<'gc>,
+) -> SystemClass<'gc> {
+    let class = context.native_class(constructor, None, super_proto);
+    context.define_properties_on(class.proto, PROTO_DECLS);
+    class
+}
 
 /// Implements `Sound`
 fn constructor<'gc>(
@@ -246,24 +342,6 @@ fn constructor<'gc>(
     this.set_native(activation.gc(), NativeObject::Sound(sound));
 
     Ok(this.into())
-}
-
-pub fn create_proto<'gc>(
-    context: &mut StringContext<'gc>,
-    proto: Object<'gc>,
-    fn_proto: Object<'gc>,
-) -> Object<'gc> {
-    let object = Object::new(context, Some(proto));
-    define_properties_on(PROTO_DECLS, context, object, fn_proto);
-    object
-}
-
-pub fn create_constructor<'gc>(
-    context: &mut StringContext<'gc>,
-    proto: Object<'gc>,
-    fn_proto: Object<'gc>,
-) -> Object<'gc> {
-    FunctionObject::constructor(context, constructor, None, fn_proto, proto)
 }
 
 fn attach_sound<'gc>(
@@ -331,12 +409,8 @@ fn get_bytes_loaded<'gc>(
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if activation.swf_version() >= 6 {
-        avm1_stub!(activation, "Sound", "getBytesLoaded");
-        Ok(1.into())
-    } else {
-        Ok(Value::Undefined)
-    }
+    avm1_stub!(activation, "Sound", "getBytesLoaded");
+    Ok(1.into())
 }
 
 fn get_bytes_total<'gc>(
@@ -344,12 +418,8 @@ fn get_bytes_total<'gc>(
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if activation.swf_version() >= 6 {
-        avm1_stub!(activation, "Sound", "getBytesTotal");
-        Ok(1.into())
-    } else {
-        Ok(Value::Undefined)
-    }
+    avm1_stub!(activation, "Sound", "getBytesTotal");
+    Ok(1.into())
 }
 
 fn get_pan<'gc>(
@@ -381,7 +451,7 @@ fn get_transform<'gc>(
 
         let obj = Object::new(
             &activation.context.strings,
-            Some(activation.context.avm1.prototypes().object),
+            Some(activation.prototypes().object),
         );
         // Surprisingly `lr` means "right-to-left" and `rl` means "left-to-right".
         obj.set(istr!("ll"), transform.left_to_left.into(), activation)?;
@@ -410,17 +480,6 @@ fn get_volume<'gc>(
     }
 }
 
-fn id3<'gc>(
-    activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    if activation.swf_version() >= 6 {
-        avm1_stub!(activation, "Sound", "id3");
-    }
-    Ok(Value::Undefined)
-}
-
 fn load_sound<'gc>(
     activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
@@ -442,8 +501,8 @@ fn load_sound<'gc>(
             }
             sound.set_is_streaming(is_streaming);
             sound.set_is_loading(activation.context);
-            let future = activation.context.load_manager.load_sound_avm1(
-                activation.context.player.clone(),
+            let future = crate::loader::load_sound_avm1(
+                activation.context,
                 this,
                 Request::get(url.to_utf8_lossy().into_owned()),
                 is_streaming,
@@ -634,5 +693,23 @@ fn stop<'gc>(
         avm_warn!(activation, "Sound.stop: this is not a Sound");
     }
 
+    Ok(Value::Undefined)
+}
+
+fn set_position<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    _this: Object<'gc>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    avm1_stub!(activation, "Sound", "setPosition");
+    Ok(Value::Undefined)
+}
+
+fn get_position<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    _this: Object<'gc>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    avm1_stub!(activation, "Sound", "getPosition");
     Ok(Value::Undefined)
 }

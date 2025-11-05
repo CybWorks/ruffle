@@ -46,7 +46,7 @@ use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use swf::ColorTransform;
-use unic_segment::WordBoundIndices;
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::interactive::Avm2MousePick;
 
@@ -828,7 +828,7 @@ impl<'gc> EditText<'gc> {
     /// `DisplayObject`.
     pub fn text_transform(self, color: Color, baseline_adjustment: Twips) -> Transform {
         let mut transform: Transform = Default::default();
-        transform.color_transform.set_mult_color(&color);
+        transform.color_transform.set_mult_color(color);
 
         // TODO MIKE: This feels incorrect here but is necessary for correct vertical position;
         // the glyphs are rendered relative to the baseline. This should be taken into account either
@@ -1968,7 +1968,9 @@ impl<'gc> EditText<'gc> {
             return pos;
         }
         let to_utf8 = WStrToUtf8::new(head);
-        WordBoundIndices::new(&to_utf8.to_utf8_lossy())
+        to_utf8
+            .to_utf8_lossy()
+            .split_word_bound_indices()
             .rev()
             .find(|(_, span)| !span.trim().is_empty())
             .map(|(position, _)| position)
@@ -1988,7 +1990,9 @@ impl<'gc> EditText<'gc> {
             return pos;
         }
         let to_utf8 = WStrToUtf8::new(tail);
-        WordBoundIndices::new(&to_utf8.to_utf8_lossy())
+        to_utf8
+            .to_utf8_lossy()
+            .split_word_bound_indices()
             .skip_while(|(_, span)| span.trim().is_empty())
             .nth(1)
             .map(|p| p.0)
@@ -2062,7 +2066,7 @@ impl<'gc> EditText<'gc> {
 
         let filtered_text = self.0.restrict.borrow().filter_allowed(&text);
 
-        if let Avm2Value::Object(target) = self.object2() {
+        if let Some(target) = self.object2() {
             let character_string =
                 AvmString::new(context.gc(), text.replace(b'\r', WStr::from_units(b"\n")));
 
@@ -2074,7 +2078,7 @@ impl<'gc> EditText<'gc> {
                 true,
                 true,
             );
-            Avm2::dispatch_event(activation.context, text_evt, target);
+            Avm2::dispatch_event(activation.context, text_evt, target.into());
 
             if text_evt.event().is_cancelled() {
                 return;
@@ -2100,12 +2104,16 @@ impl<'gc> EditText<'gc> {
     }
 
     fn initialize_as_broadcaster(self, activation: &mut Avm1Activation<'_, 'gc>) {
-        if let Avm1Value::Object(object) = self.object() {
-            activation.context.avm1.broadcaster_functions().initialize(
-                &activation.context.strings,
-                object,
-                activation.context.avm1.prototypes().array,
-            );
+        if let Some(object) = self.object1() {
+            activation
+                .context
+                .avm1
+                .broadcaster_functions(activation.swf_version())
+                .initialize(
+                    &activation.context.strings,
+                    object,
+                    activation.prototypes().array,
+                );
 
             if let Ok(Avm1Value::Object(listeners)) = object.get(istr!("_listeners"), activation) {
                 let length = listeners.length(activation);
@@ -2121,26 +2129,26 @@ impl<'gc> EditText<'gc> {
     }
 
     fn on_changed(self, activation: &mut Avm1Activation<'_, 'gc>) {
-        if let Avm1Value::Object(object) = self.object() {
+        if let Some(object) = self.object1() {
             let _ = object.call_method(
                 istr!("broadcastMessage"),
                 &[istr!("onChanged").into(), object.into()],
                 activation,
                 ExecutionReason::Special,
             );
-        } else if let Avm2Value::Object(object) = self.object2() {
+        } else if let Some(object) = self.object2() {
             let change_evt = Avm2EventObject::bare_event(
                 activation.context,
                 "change",
                 true,  /* bubbles */
                 false, /* cancelable */
             );
-            Avm2::dispatch_event(activation.context, change_evt, object);
+            Avm2::dispatch_event(activation.context, change_evt, object.into());
         }
     }
 
     fn on_scroller(self, activation: &mut Avm1Activation<'_, 'gc>) {
-        if let Avm1Value::Object(object) = self.object() {
+        if let Some(object) = self.object1() {
             let _ = object.call_method(
                 istr!("broadcastMessage"),
                 &[istr!("onScroller").into(), object.into()],
@@ -2156,7 +2164,7 @@ impl<'gc> EditText<'gc> {
         if self.0.object.get().is_none() {
             let object = Avm1Object::new_with_native(
                 &context.strings,
-                Some(context.avm1.prototypes().text_field),
+                Some(context.avm1.prototypes(self.swf_version()).text_field),
                 Avm1NativeObject::EditText(self),
             );
 
@@ -2424,7 +2432,7 @@ impl<'gc> EditText<'gc> {
         );
         // [NA]: Should all `from_nothings` be scoped to root? It definitely should here.
         activation.set_scope_to_display_object(parent);
-        let this = parent.object().coerce_to_object(&mut activation);
+        let this = parent.object1_or_undef();
 
         if let Some((name, args)) = address.split_once(b',') {
             let name = AvmString::new(activation.gc(), name);
@@ -2445,12 +2453,12 @@ impl<'gc> EditText<'gc> {
                 error!("Couldn't execute URL \"{url:?}\": {e:?}");
             }
         } else if let Some(address) = url.strip_prefix(WStr::from_units(b"event:")) {
-            if let Avm2Value::Object(object) = self.object2() {
+            if let Some(object) = self.object2() {
                 let mut activation = Avm2Activation::from_nothing(context);
                 let text = AvmString::new(activation.gc(), address);
                 let event = Avm2EventObject::text_event(&mut activation, "link", text, true, false);
 
-                Avm2::dispatch_event(activation.context, event, object);
+                Avm2::dispatch_event(activation.context, event, object.into());
             }
         } else {
             context
@@ -2538,7 +2546,7 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
 
     /// Construct objects placed on this frame.
     fn construct_frame(self, context: &mut UpdateContext<'gc>) {
-        if self.movie().is_action_script_3() && matches!(self.object2(), Avm2Value::Null) {
+        if self.movie().is_action_script_3() && self.object2().is_none() {
             self.construct_as_avm2_object(context, self.into());
             self.on_construction_complete(context);
         }
@@ -2558,22 +2566,12 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
         }
     }
 
-    fn object(self) -> Avm1Value<'gc> {
-        self.0
-            .object
-            .get()
-            .and_then(|o| o.as_avm1_object())
-            .map(Avm1Value::from)
-            .unwrap_or(Avm1Value::Undefined)
+    fn object1(self) -> Option<Avm1Object<'gc>> {
+        self.0.object.get().and_then(|o| o.as_avm1_object())
     }
 
-    fn object2(self) -> Avm2Value<'gc> {
-        self.0
-            .object
-            .get()
-            .and_then(|o| o.as_avm2_object())
-            .map(Avm2Value::from)
-            .unwrap_or(Avm2Value::Null)
+    fn object2(self) -> Option<Avm2StageObject<'gc>> {
+        self.0.object.get().and_then(|o| o.as_avm2_object())
     }
 
     fn set_object2(self, context: &mut UpdateContext<'gc>, to: Avm2StageObject<'gc>) {
@@ -3522,8 +3520,8 @@ impl EditTextRestrict {
             && !self.intervals_contain(character, &self.disallowed)
     }
 
-    fn intervals_contain(&self, character: char, intervals: &Vec<(char, char)>) -> bool {
-        for interval in intervals {
+    fn intervals_contain(&self, character: char, intervals: &[(char, char)]) -> bool {
+        for &interval in intervals {
             if self.interval_contains(character, interval) {
                 return true;
             }
@@ -3532,7 +3530,7 @@ impl EditTextRestrict {
     }
 
     #[inline]
-    fn interval_contains(&self, character: char, interval: &(char, char)) -> bool {
+    fn interval_contains(&self, character: char, interval: (char, char)) -> bool {
         character >= interval.0 && character <= interval.1
     }
 
@@ -3602,9 +3600,10 @@ impl EditTextPixelSnapping {
     }
 }
 
-#[derive(Debug, Clone, Copy, Collect)]
+#[derive(Clone, Copy, Collect, Debug, Default)]
 #[collect(no_drop)]
 enum EditTextStyleSheet<'gc> {
+    #[default]
     None,
     Avm1(Avm1Object<'gc>),
     Avm2(Avm2StyleSheetObject<'gc>),
@@ -3631,12 +3630,6 @@ impl<'gc> EditTextStyleSheet<'gc> {
             }
             EditTextStyleSheet::Avm2(style_sheet_object) => Some(style_sheet_object.style_sheet()),
         }
-    }
-}
-
-impl Default for EditTextStyleSheet<'_> {
-    fn default() -> Self {
-        Self::None
     }
 }
 

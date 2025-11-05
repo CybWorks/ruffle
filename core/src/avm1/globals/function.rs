@@ -3,17 +3,28 @@
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::function::{ExecutionName, ExecutionReason};
-use crate::avm1::property_decl::{define_properties_on, Declaration};
+use crate::avm1::property_decl::{DeclContext, Declaration, SystemClass};
 use crate::avm1::{Object, Value};
-use crate::string::{AvmString, StringContext};
+use crate::string::AvmString;
 
 const PROTO_DECLS: &[Declaration] = declare_properties! {
     "call" => method(call; DONT_ENUM | DONT_DELETE);
     "apply" => method(apply; DONT_ENUM | DONT_DELETE);
 };
 
+/// Constructs the `Function` class.
+///
+/// Since Object and Function are so heavily intertwined, this function does
+/// not allocate an object to store either proto. Instead, they must be provided
+/// through the `DeclContext`.
+pub fn create_class<'gc>(context: &mut DeclContext<'_, 'gc>) -> SystemClass<'gc> {
+    let class = context.native_class_with_proto(constructor, Some(function), context.fn_proto);
+    context.define_properties_on(class.proto, PROTO_DECLS);
+    class
+}
+
 /// Implements `new Function()`
-pub fn constructor<'gc>(
+fn constructor<'gc>(
     _activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
@@ -22,7 +33,7 @@ pub fn constructor<'gc>(
 }
 
 /// Implements `Function()`
-pub fn function<'gc>(
+fn function<'gc>(
     activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
@@ -40,7 +51,7 @@ pub fn call<'gc>(
     myargs: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let this = match myargs.get(0).unwrap_or(&Value::Undefined) {
-        Value::Undefined | Value::Null => activation.context.avm1.global_object(),
+        Value::Undefined | Value::Null => activation.global_object(),
         this_val => this_val.coerce_to_object(activation),
     };
     let empty = [];
@@ -51,7 +62,7 @@ pub fn call<'gc>(
     };
 
     // NOTE: does not use `Object::call`, as `super()` only works with direct calls.
-    match func.as_executable() {
+    match func.as_function() {
         Some(exec) => exec.exec(
             ExecutionName::Static("[Anonymous]"),
             activation,
@@ -72,7 +83,7 @@ pub fn apply<'gc>(
     myargs: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let this = match myargs.get(0).unwrap_or(&Value::Undefined) {
-        Value::Undefined | Value::Null => activation.context.avm1.global_object(),
+        Value::Undefined | Value::Null => activation.global_object(),
         this_val => this_val.coerce_to_object(activation),
     };
     let args_object = myargs.get(1).cloned().unwrap_or(Value::Undefined);
@@ -92,7 +103,7 @@ pub fn apply<'gc>(
     }
 
     // NOTE: does not use `Object::call`, as `super()` only works with direct calls.
-    match func.as_executable() {
+    match func.as_function() {
         Some(exec) => exec.exec(
             ExecutionName::Static("[Anonymous]"),
             activation,
@@ -104,17 +115,4 @@ pub fn apply<'gc>(
         ),
         _ => Ok(Value::Undefined),
     }
-}
-
-/// Partially construct `Function.prototype`.
-///
-/// `__proto__` and other cross-linked properties of this object will *not*
-/// be defined here. The caller of this function is responsible for linking
-/// them in order to obtain a valid ECMAScript `Function` prototype. The
-/// returned object is also a bare object, which will need to be linked into
-/// the prototype of `Object`.
-pub fn create_proto<'gc>(context: &mut StringContext<'gc>, proto: Object<'gc>) -> Object<'gc> {
-    let function_proto = Object::new(context, Some(proto));
-    define_properties_on(PROTO_DECLS, context, function_proto, function_proto);
-    function_proto
 }

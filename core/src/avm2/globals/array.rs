@@ -11,7 +11,7 @@ use crate::avm2::Error;
 use crate::string::AvmString;
 use bitflags::bitflags;
 use ruffle_macros::istr;
-use std::cmp::{min, Ordering};
+use std::cmp::Ordering;
 use std::mem::swap;
 
 pub use crate::avm2::object::array_allocator;
@@ -239,19 +239,25 @@ impl<'gc> ArrayIter<'gc> {
         &mut self,
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<Option<(u32, Value<'gc>)>, Error<'gc>> {
+        let array_object = self.array_object;
+
         if self.index < self.rev_index {
             let i = self.index;
 
             self.index += 1;
 
-            let val = self.array_object.get_index_property(i as usize);
-
-            let val = if let Some(storage) = self.array_object.as_vector_storage() {
+            let val = if let Some(val) = array_object.get_index_property(i as usize) {
+                val
+            } else if let Some(storage) = array_object.as_vector_storage() {
                 // Special case for Vector- it throws an error if trying to access
                 // an element that was removed
-                val.ok_or_else(|| make_error_1125(activation, i as f64, storage.length()))?
+                return Err(make_error_1125(activation, i as f64, storage.length()));
             } else {
-                val.unwrap_or(Value::Undefined)
+                // Fallback to a slower full property lookup on the object
+                let array_object = Value::from(array_object);
+                let key = AvmString::new_utf8(activation.gc(), i.to_string());
+
+                array_object.get_public_property(key, activation)?
             };
 
             Ok(Some((i, val)))
@@ -643,49 +649,32 @@ pub fn splice<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let this = this.as_object().unwrap();
 
-    let array_length = this.as_array_storage().map(|a| a.length());
+    let Some(mut array_storage) = this.as_array_storage_mut(activation.gc()) else {
+        return Ok(Value::Undefined);
+    };
+    let array_length = array_storage.length();
+    let Some(start) = args.get_optional(0) else {
+        return Ok(Value::Undefined);
+    };
 
-    if let Some(array_length) = array_length {
-        if let Some(start) = args.get_optional(0) {
-            let actual_start = resolve_index(activation, start, array_length)?;
-            let delete_count = args
-                .get_optional(1)
-                .unwrap_or_else(|| array_length.into())
-                .coerce_to_i32(activation)?;
+    let actual_start = resolve_index(activation, start, array_length)?;
+    let delete_count = args
+        .get_optional(1)
+        .unwrap_or_else(|| array_length.into())
+        .coerce_to_i32(activation)?
+        .max(0);
 
-            let actual_end = min(array_length, actual_start + delete_count as usize);
-            let args_slice = if args.len() > 2 {
-                args[2..].iter().cloned()
-            } else {
-                [].iter().cloned()
-            };
+    let args_slice = if args.len() > 2 { &args[2..] } else { &[] };
 
-            let contents = this
-                .as_array_storage()
-                .map(|a| a.iter().collect::<Vec<Option<Value<'gc>>>>())
-                .unwrap();
-
-            let mut resolved = Vec::with_capacity(contents.len());
-            for (i, v) in contents.iter().enumerate() {
-                resolved.push(resolve_array_hole(activation, this, i, *v)?);
-            }
-
-            let removed = resolved
-                .splice(actual_start..actual_end, args_slice)
-                .collect::<Vec<Value<'gc>>>();
-            let removed_array = ArrayStorage::from_args(&removed[..]);
-
-            let mut resolved_array = ArrayStorage::from_args(&resolved[..]);
-
-            if let Some(mut array) = this.as_array_storage_mut(activation.gc()) {
-                swap(&mut *array, &mut resolved_array)
-            }
-
-            return Ok(build_array(activation, removed_array));
-        }
+    // FIXME Flash does not iterate over those elements like we do, it's too
+    //   inefficient. Flash probably iterates through set properties only.
+    for i in actual_start..array_length {
+        let item = array_storage.get(i);
+        array_storage.set(i, resolve_array_hole(activation, this, i, item)?);
     }
 
-    Ok(Value::Undefined)
+    let ret = array_storage.splice(actual_start, delete_count as usize, args_slice);
+    Ok(build_array(activation, ret))
 }
 
 /// Insert an element into a specific position of an array.
@@ -928,7 +917,7 @@ pub fn compare_numeric<'gc, const COMPAT: bool>(
     if COMPAT {
         // See <https://bugzilla.mozilla.org/show_bug.cgi?id=524122>
         // See <https://github.com/adobe/avmplus/blob/858d034a3bd3a54d9b70909386435cf4aec81d21/core/ArrayClass.cpp#L498>
-        if let (Value::Integer(a), Value::Integer(b)) = (a, b) {
+        if let (Value::Integer(a), Value::Integer(b)) = (a.normalize(), b.normalize()) {
             // The following expression corresponds to atomFromIntptrValue,
             // see <https://github.com/adobe-flash/avmplus/blob/master/core/atom-inlines.h#L82>
             let a = (a << 3) | 6;

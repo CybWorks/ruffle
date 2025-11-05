@@ -39,7 +39,7 @@ mod script_object;
 pub mod stage_object;
 pub mod super_object;
 
-pub use script_object::{Object, ObjectWeak};
+pub use script_object::{Object, ObjectHandle, ObjectWeak};
 
 #[derive(Copy, Clone, Collect)]
 #[collect(no_drop)]
@@ -123,7 +123,7 @@ impl<'gc> BoxedF64<'gc> {
     }
 
     #[inline]
-    pub fn value(&self) -> f64 {
+    pub fn value(self) -> f64 {
         #[cfg(target_pointer_width = "64")]
         return self.value;
         #[cfg(not(target_pointer_width = "64"))]
@@ -230,7 +230,7 @@ impl<'gc> Object<'gc> {
             while let Value::Object(this_proto) = proto {
                 if this_proto.has_own_virtual(activation, name) {
                     if let Some(setter) = this_proto.setter(name, activation) {
-                        if let Some(exec) = setter.as_executable() {
+                        if let Some(exec) = setter.as_function() {
                             let _ = exec.exec(
                                 ExecutionName::Static("[Setter]"),
                                 activation,
@@ -289,7 +289,7 @@ impl<'gc> Object<'gc> {
         // the method was found on the object's prototype.
         let depth = depth.max(1);
 
-        match method.as_executable() {
+        match method.as_function() {
             Some(exec) => exec.exec(
                 ExecutionName::Dynamic(name),
                 activation,
@@ -315,7 +315,7 @@ impl<'gc> Object<'gc> {
     /// can't implement interfaces within interfaces (fortunately), but if you
     /// somehow could this would support that, too.
     pub fn is_instance_of(
-        &self,
+        self,
         activation: &mut Activation<'_, 'gc>,
         constructor: Object<'gc>,
         prototype: Object<'gc>,
@@ -351,7 +351,7 @@ impl<'gc> Object<'gc> {
     }
 
     /// Get the underlying XML node for this object, if it exists.
-    pub fn as_xml_node(&self) -> Option<XmlNode<'gc>> {
+    pub fn as_xml_node(self) -> Option<XmlNode<'gc>> {
         match self.native() {
             NativeObject::Xml(xml) => Some(xml.root()),
             NativeObject::XmlNode(xml_node) => Some(xml_node),
@@ -360,11 +360,7 @@ impl<'gc> Object<'gc> {
     }
 
     /// Check if this object is in the prototype chain of the specified test object.
-    pub fn is_prototype_of(
-        &self,
-        activation: &mut Activation<'_, 'gc>,
-        other: Object<'gc>,
-    ) -> bool {
+    pub fn is_prototype_of(self, activation: &mut Activation<'_, 'gc>, other: Object<'gc>) -> bool {
         let mut proto = other.proto(activation);
 
         while let Value::Object(proto_ob) = proto {
@@ -409,7 +405,7 @@ pub fn search_prototype<'gc>(
         }
 
         if let Some(getter) = p.getter(name, activation) {
-            if let Some(exec) = getter.as_executable() {
+            if let Some(exec) = getter.as_function() {
                 let result = exec.exec(
                     ExecutionName::Static("[Getter]"),
                     activation,

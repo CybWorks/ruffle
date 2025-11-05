@@ -3,7 +3,7 @@ use crate::gui::dialogs::Dialogs;
 use crate::gui::{text, DebugMessage};
 use crate::player::LaunchOptions;
 use crate::preferences::GlobalPreferences;
-use egui::{containers::menu, Button, Key, KeyboardShortcut, Modifiers, Widget};
+use egui::{Button, Key, KeyboardShortcut, Modifiers, Widget};
 use ruffle_core::config::Letterbox;
 use ruffle_core::focus_tracker::DisplayObject;
 use ruffle_core::{Player, StageScaleMode};
@@ -98,7 +98,7 @@ impl MenuBar {
         mut player: Option<&mut Player>,
     ) {
         egui::TopBottomPanel::top("menu_bar").show(egui_ctx, |ui| {
-             menu::Bar::new().ui(ui, |ui| {
+             egui::MenuBar::new().ui(ui, |ui| {
                 self.file_menu(locale, ui, dialogs, player.is_some());
                 self.view_menu(locale, ui, &mut player);
                 self.controls_menu(locale, ui, dialogs, &mut player);
@@ -280,8 +280,16 @@ impl MenuBar {
                 None if self.cached_recents.is_some() => self.cached_recents = None,
                 _ => {}
             }
-
             ui.separator();
+
+            if ui
+                .add_enabled(player_exists, Button::new(text(locale, "file-menu-export")))
+                .clicked()
+            {
+                self.export_bundle(ui);
+            }
+            ui.separator();
+
             if Button::new(text(locale, "file-menu-preferences"))
                 .ui(ui)
                 .clicked()
@@ -503,6 +511,11 @@ impl MenuBar {
 
     fn launch_website(&mut self, ui: &mut egui::Ui, url: &str) {
         let _ = webbrowser::open(url);
+        ui.close();
+    }
+
+    fn export_bundle(&mut self, ui: &mut egui::Ui) {
+        let _ = self.event_loop.send_event(RuffleEvent::ExportBundle);
         ui.close();
     }
 }

@@ -137,7 +137,7 @@ impl<'gc> EventObject<'gc> {
                 local.y.to_pixels().into(),
                 // relatedObject
                 related_object
-                    .map(|o| o.as_displayobject().object2())
+                    .map(|o| o.as_displayobject().object2_or_null())
                     .unwrap_or(Value::Null),
                 // ctrlKey
                 activation
@@ -302,7 +302,7 @@ impl<'gc> EventObject<'gc> {
                 true.into(),
                 cancelable.into(),
                 related_object
-                    .map(|o| o.as_displayobject().object2())
+                    .map(|o| o.as_displayobject().object2_or_null())
                     .unwrap_or(Value::Null),
                 shift_key.into(),
                 key_code.into(),
@@ -352,7 +352,7 @@ impl<'gc> EventObject<'gc> {
         )
     }
 
-    pub fn event(&self) -> Ref<'gc, Event<'gc>> {
+    pub fn event(self) -> Ref<'gc, Event<'gc>> {
         Gc::as_ref(self.0).event.borrow()
     }
 

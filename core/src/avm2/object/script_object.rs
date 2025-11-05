@@ -8,11 +8,12 @@ use crate::avm2::object::{ClassObject, FunctionObject, Object, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::vtable::VTable;
 use crate::avm2::{Error, Multiname, QName};
+use crate::context::UpdateContext;
 use crate::string::AvmString;
 use gc_arena::barrier::{unlock, Write};
 use gc_arena::{
     lock::{Lock, RefLock},
-    Collect, Gc, GcWeak, Mutation,
+    Collect, DynamicRoot, Gc, GcWeak, Mutation, Rootable,
 };
 use std::cell::{Ref, RefMut};
 use std::fmt::Debug;
@@ -36,6 +37,19 @@ pub struct ScriptObject<'gc>(pub Gc<'gc, ScriptObjectData<'gc>>);
 #[collect(no_drop)]
 pub struct ScriptObjectWeak<'gc>(pub GcWeak<'gc, ScriptObjectData<'gc>>);
 
+#[derive(Clone)]
+pub struct ScriptObjectHandle(DynamicRoot<Rootable![ScriptObjectData<'_>]>);
+
+impl ScriptObjectHandle {
+    pub fn stash<'gc>(context: &UpdateContext<'gc>, this: ScriptObject<'gc>) -> Self {
+        Self(context.dynamic_root.stash(context.gc(), this.0))
+    }
+
+    pub fn fetch<'gc>(&self, context: &UpdateContext<'gc>) -> ScriptObject<'gc> {
+        ScriptObject(context.dynamic_root.fetch(&self.0))
+    }
+}
+
 /// Base data common to all `TObject` implementations.
 ///
 /// Host implementations of `TObject` should embed `ScriptObjectData` and
@@ -49,7 +63,7 @@ pub struct ScriptObjectData<'gc> {
     values: RefLock<DynamicMap<DynamicKey<'gc>, Value<'gc>>>,
 
     /// Slots stored on this object.
-    slots: Vec<Lock<Value<'gc>>>,
+    slots: Box<[Lock<Value<'gc>>]>,
 
     /// Methods stored on this object.
     bound_methods: RefLock<Vec<Option<FunctionObject<'gc>>>>,
@@ -141,13 +155,21 @@ impl<'gc> ScriptObjectData<'gc> {
         vtable: VTable<'gc>,
     ) -> Self {
         let default_slots = vtable.default_slots();
-        let mut slots = vec![Lock::new(Value::Undefined); default_slots.len()];
 
-        for (i, value) in default_slots.iter().enumerate() {
-            if let Some(value) = value {
-                slots[i] = Lock::new(*value);
-            }
-        }
+        // We use `iter` and `collect` rather than setting elements of a Box<[]>
+        // or pushing to a Vec for better performance
+        let slots = default_slots
+            .iter()
+            .map(|value| {
+                if let Some(value) = value {
+                    Lock::new(*value)
+                } else {
+                    // FIXME this case throws a VerifyError during vtable
+                    // construction in Flash Player
+                    Lock::new(Value::Undefined)
+                }
+            })
+            .collect::<Box<_>>();
 
         ScriptObjectData {
             values: RefLock::new(Default::default()),
@@ -188,7 +210,7 @@ impl<'gc> ScriptObjectWrapper<'gc> {
     }
 
     pub fn get_property_local(
-        &self,
+        self,
         multiname: &Multiname<'gc>,
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
@@ -220,7 +242,7 @@ impl<'gc> ScriptObjectWrapper<'gc> {
     }
 
     pub fn set_property_local(
-        &self,
+        self,
         multiname: &Multiname<'gc>,
         value: Value<'gc>,
         activation: &mut Activation<'_, 'gc>,
@@ -252,7 +274,7 @@ impl<'gc> ScriptObjectWrapper<'gc> {
     }
 
     pub fn init_property_local(
-        &self,
+        self,
         multiname: &Multiname<'gc>,
         value: Value<'gc>,
         activation: &mut Activation<'_, 'gc>,
@@ -260,7 +282,7 @@ impl<'gc> ScriptObjectWrapper<'gc> {
         self.set_property_local(multiname, value, activation)
     }
 
-    pub fn delete_property_local(&self, mc: &Mutation<'gc>, multiname: &Multiname<'gc>) -> bool {
+    pub fn delete_property_local(self, mc: &Mutation<'gc>, multiname: &Multiname<'gc>) -> bool {
         // TODO: FP behaves differently here in interpreter mode vs JIT mode
         if !multiname.valid_dynamic_name() {
             return false;
@@ -276,7 +298,7 @@ impl<'gc> ScriptObjectWrapper<'gc> {
     }
 
     #[inline(always)]
-    pub fn get_slot(&self, id: u32) -> Value<'gc> {
+    pub fn get_slot(self, id: u32) -> Value<'gc> {
         self.0
             .slots
             .get(id as usize)
@@ -286,7 +308,7 @@ impl<'gc> ScriptObjectWrapper<'gc> {
     }
 
     /// Set a slot by its index.
-    pub fn set_slot(&self, id: u32, value: Value<'gc>, mc: &Mutation<'gc>) {
+    pub fn set_slot(self, id: u32, value: Value<'gc>, mc: &Mutation<'gc>) {
         let slot = self
             .0
             .slots
@@ -300,11 +322,11 @@ impl<'gc> ScriptObjectWrapper<'gc> {
     }
 
     /// Retrieve a bound method from the method table.
-    pub fn get_bound_method(&self, id: u32) -> Option<FunctionObject<'gc>> {
+    pub fn get_bound_method(self, id: u32) -> Option<FunctionObject<'gc>> {
         self.bound_methods().get(id as usize).and_then(|v| *v)
     }
 
-    pub fn has_own_dynamic_property(&self, name: &Multiname<'gc>) -> bool {
+    pub fn has_own_dynamic_property(self, name: &Multiname<'gc>) -> bool {
         if name.valid_dynamic_name() {
             if let Some(name) = name.local_name() {
                 let key = maybe_int_property(name);
@@ -314,11 +336,11 @@ impl<'gc> ScriptObjectWrapper<'gc> {
         false
     }
 
-    pub fn has_own_property(&self, name: &Multiname<'gc>) -> bool {
+    pub fn has_own_property(self, name: &Multiname<'gc>) -> bool {
         self.vtable().has_trait(name) || self.has_own_dynamic_property(name)
     }
 
-    pub fn proto(&self) -> Option<Object<'gc>> {
+    pub fn proto(self) -> Option<Object<'gc>> {
         self.0.proto.get()
     }
 
@@ -326,14 +348,14 @@ impl<'gc> ScriptObjectWrapper<'gc> {
         unlock!(Gc::write(mc, self.0), ScriptObjectData, proto).set(Some(proto));
     }
 
-    pub fn get_next_enumerant(&self, last_index: u32) -> u32 {
+    pub fn get_next_enumerant(self, last_index: u32) -> u32 {
         self.values()
             .next(last_index as usize)
             .map(|val| val as u32)
             .unwrap_or(0)
     }
 
-    pub fn get_enumerant_name(&self, index: u32) -> Option<Value<'gc>> {
+    pub fn get_enumerant_name(self, index: u32) -> Option<Value<'gc>> {
         self.values().key_at(index as usize).map(|key| match key {
             DynamicKey::String(name) => Value::String(*name),
             DynamicKey::Object(obj) => Value::Object(*obj),
@@ -341,7 +363,7 @@ impl<'gc> ScriptObjectWrapper<'gc> {
         })
     }
 
-    pub fn property_is_enumerable(&self, name: AvmString<'gc>) -> bool {
+    pub fn property_is_enumerable(self, name: AvmString<'gc>) -> bool {
         let key = maybe_int_property(name);
         self.values()
             .as_hashmap()
@@ -350,7 +372,7 @@ impl<'gc> ScriptObjectWrapper<'gc> {
     }
 
     pub fn set_local_property_is_enumerable(
-        &self,
+        self,
         mc: &Mutation<'gc>,
         name: AvmString<'gc>,
         is_enumerable: bool,
@@ -363,7 +385,7 @@ impl<'gc> ScriptObjectWrapper<'gc> {
 
     /// Install a method into the object.
     pub fn install_bound_method(
-        &self,
+        self,
         mc: &Mutation<'gc>,
         disp_id: u32,
         function: FunctionObject<'gc>,
@@ -378,16 +400,16 @@ impl<'gc> ScriptObjectWrapper<'gc> {
     }
 
     /// Get the `Class` for this object.
-    pub fn instance_class(&self) -> Class<'gc> {
+    pub fn instance_class(self) -> Class<'gc> {
         self.0.instance_class
     }
 
     /// Get the vtable for this object, if it has one.
-    pub fn vtable(&self) -> VTable<'gc> {
+    pub fn vtable(self) -> VTable<'gc> {
         self.0.vtable.get()
     }
 
-    pub fn is_sealed(&self) -> bool {
+    pub fn is_sealed(self) -> bool {
         self.instance_class().is_sealed()
     }
 
@@ -401,7 +423,7 @@ impl<'gc> ScriptObjectWrapper<'gc> {
         unlock!(Gc::write(mc, self.0), ScriptObjectData, vtable).set(vtable);
     }
 
-    pub fn class_name(&self) -> QName<'gc> {
+    pub fn class_name(self) -> QName<'gc> {
         self.instance_class().name()
     }
 }

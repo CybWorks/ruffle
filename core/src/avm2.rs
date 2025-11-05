@@ -82,7 +82,7 @@ mod vtable;
 
 pub use crate::avm2::activation::Activation;
 pub use crate::avm2::array::ArrayStorage;
-pub use crate::avm2::call_stack::{CallNode, CallStack};
+pub use crate::avm2::call_stack::CallStack;
 pub use crate::avm2::class::Class;
 #[allow(unused)] // For debug_ui
 pub use crate::avm2::domain::{Domain, DomainPtr};
@@ -297,7 +297,6 @@ impl<'gc> Avm2<'gc> {
         let scope = ScopeChain::new(domain);
         // Script `global` classes extend Object
         let bound_superclass = Some(activation.avm2().classes().object);
-        let bound_class = Some(script.global_class());
 
         // Provide a callee object if necessary
         let callee = if method.needs_arguments_object() {
@@ -307,7 +306,6 @@ impl<'gc> Avm2<'gc> {
                 scope,
                 Some(global_object.into()),
                 bound_superclass,
-                bound_class,
             ))
         } else {
             None
@@ -318,7 +316,6 @@ impl<'gc> Avm2<'gc> {
             scope,
             global_object.into(),
             bound_superclass,
-            bound_class,
             FunctionArgs::empty(),
             &mut activation,
             callee,
@@ -491,22 +488,16 @@ impl<'gc> Avm2<'gc> {
         activation: &mut Activation<'_, 'gc>,
         movie_clip: MovieClip<'gc>,
         domain: Domain<'gc>,
-        name: QName<'gc>,
+        name: AvmString<'gc>,
         id: u16,
     ) -> Result<ClassObject<'gc>, Error<'gc>> {
         let movie = movie_clip.movie().clone();
 
         let class_object = domain
-            .get_defined_value(activation, name)?
+            .get_defined_value_handling_vector(activation, name)?
             .as_object()
             .and_then(|o| o.as_class_object())
-            .ok_or_else(|| {
-                make_error_1014(
-                    activation,
-                    Error1014Type::ReferenceError,
-                    name.to_qualified_name(activation.gc()),
-                )
-            })?;
+            .ok_or_else(|| make_error_1014(activation, Error1014Type::ReferenceError, name))?;
 
         let class = class_object.inner_class_definition();
 
@@ -526,7 +517,7 @@ impl<'gc> Avm2<'gc> {
                 if !class.has_class_in_chain(activation.avm2().class_defs().display_object) {
                     return Err(Error::avm_error(type_error(
                         activation,
-                        &format!("Error #2022: Class {}$ must inherit from DisplayObject to link to a symbol.", name.to_qualified_name(activation.gc())),
+                        &format!("Error #2022: Class {}$ must inherit from DisplayObject to link to a symbol.", class.name().local_name()),
                         2022,
                     )?));
                 }
@@ -541,7 +532,7 @@ impl<'gc> Avm2<'gc> {
                     activation,
                     &format!(
                         "Error #2023: Class {}$ must inherit from Sprite to link to the root.",
-                        name.to_qualified_name(activation.gc())
+                        class.name().local_name(),
                     ),
                     2023,
                 )?));
@@ -669,13 +660,13 @@ impl<'gc> Avm2<'gc> {
     }
 
     /// Pushes an executable on the call stack
-    pub fn push_call(&self, mc: &Mutation<'gc>, method: Method<'gc>, class: Option<Class<'gc>>) {
-        self.call_stack.borrow_mut(mc).push(method, class)
+    pub fn push_call(&self, mc: &Mutation<'gc>, method: Method<'gc>) {
+        self.call_stack.borrow_mut(mc).push(method)
     }
 
     /// Pops an executable off the call stack
-    pub fn pop_call(&self, mc: &Mutation<'gc>) -> Option<CallNode<'gc>> {
-        self.call_stack.borrow_mut(mc).pop()
+    pub fn pop_call(&self, mc: &Mutation<'gc>) {
+        self.call_stack.borrow_mut(mc).pop();
     }
 
     pub fn call_stack(&self) -> GcRefLock<'gc, CallStack<'gc>> {

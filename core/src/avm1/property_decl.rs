@@ -1,21 +1,82 @@
 //! Declarative macro for defining AVM1 properties.
 
-use crate::avm1::function::{Executable, FunctionObject, NativeFunction};
+use gc_arena::Mutation;
+
+use crate::avm1::function::{FunctionObject, NativeFunction, TableNativeFunction};
 use crate::avm1::property::Attribute;
 use crate::avm1::{Object, Value};
-use crate::string::{StringContext, WStr};
+use crate::string::{HasStringContext, StringContext, WStr};
 
-/// Defines a list of properties on a [`Object`].
-#[inline(never)]
-pub fn define_properties_on<'gc>(
-    decls: &[Declaration],
-    context: &mut StringContext<'gc>,
-    this: Object<'gc>,
-    fn_proto: Object<'gc>,
-) {
-    for decl in decls {
-        decl.define_on(context, this, fn_proto);
+pub struct DeclContext<'a, 'gc> {
+    pub strings: &'a mut StringContext<'gc>,
+    pub object_proto: Object<'gc>,
+    pub fn_proto: Object<'gc>,
+}
+
+impl<'gc> HasStringContext<'gc> for DeclContext<'_, 'gc> {
+    fn strings_ref(&self) -> &StringContext<'gc> {
+        self.strings
     }
+}
+
+impl<'gc> DeclContext<'_, 'gc> {
+    pub fn gc(&self) -> &'gc Mutation<'gc> {
+        self.strings.gc()
+    }
+
+    #[inline(never)]
+    pub fn define_properties_on(&mut self, this: Object<'gc>, decls: &[Declaration]) {
+        for decl in decls {
+            decl.define_on(self.strings, this, self.fn_proto);
+        }
+    }
+
+    pub fn empty_class(&self, super_proto: Object<'gc>) -> SystemClass<'gc> {
+        let proto = Object::new(self.strings, Some(super_proto));
+        let constr = FunctionObject::empty().build(self.strings, self.fn_proto, Some(proto));
+        SystemClass { proto, constr }
+    }
+
+    /// Creates a class with a 'normal' constructor. This should be used for classes whose constructor
+    /// is implemented in bytecode in Flash Player's `playerglobals.swf`.
+    pub fn class(&self, function: NativeFunction, super_proto: Object<'gc>) -> SystemClass<'gc> {
+        let proto = Object::new(self.strings, Some(super_proto));
+        let constr =
+            FunctionObject::native(function).build(self.strings, self.fn_proto, Some(proto));
+        SystemClass { proto, constr }
+    }
+
+    /// Creates a class with a 'special' constructor. This should be used for classes with a native
+    /// constructor in Flash Player's `playerglobals.swf`.
+    pub fn native_class(
+        &self,
+        constructor: NativeFunction,
+        function: Option<NativeFunction>,
+        super_proto: Object<'gc>,
+    ) -> SystemClass<'gc> {
+        let proto = Object::new(self.strings, Some(super_proto));
+        Self::native_class_with_proto(self, constructor, function, proto)
+    }
+
+    pub fn native_class_with_proto(
+        &self,
+        constructor: NativeFunction,
+        function: Option<NativeFunction>,
+        proto: Object<'gc>,
+    ) -> SystemClass<'gc> {
+        let constr = FunctionObject::constructor(constructor, function).build(
+            self.strings,
+            self.fn_proto,
+            Some(proto),
+        );
+        SystemClass { proto, constr }
+    }
+}
+
+#[derive(Copy, Clone)]
+pub struct SystemClass<'gc> {
+    pub proto: Object<'gc>,
+    pub constr: Object<'gc>,
 }
 
 /// The declaration of a property, method, or simple field, that
@@ -31,6 +92,11 @@ pub struct Declaration {
 #[derive(Copy, Clone)]
 pub enum DeclKind {
     /// Declares a property with a getter and an optional setter.
+    TableProperty {
+        native: TableNativeFunction,
+        getter: u16,
+        setter: Option<u16>,
+    },
     Property {
         getter: NativeFunction,
         setter: Option<NativeFunction>,
@@ -40,9 +106,12 @@ pub enum DeclKind {
     /// This is intended for use with defining host object prototypes. Notably,
     /// this creates a function object without an explicit `prototype`, which
     /// is only possible when defining host functions.
+    TableMethod(TableNativeFunction, u16),
     Method(NativeFunction),
     /// Declares a native function with a `prototype`.
     /// Prefer using [`Self::Method`] when defining host functions.
+    #[expect(unused)] // kept for symmetry.
+    TableFunction(TableNativeFunction, u16),
     Function(NativeFunction),
     /// Declares a static string value.
     String(&'static [u8]),
@@ -70,18 +139,36 @@ impl Declaration {
         let name = context.intern_static(WStr::from_units(self.name));
         let value = match self.kind {
             DeclKind::Property { getter, setter } => {
-                let getter = FunctionObject::native(context, getter, fn_proto, fn_proto);
+                // Property objects are unobservable by user code, so a bare function is enough.
+                let getter = FunctionObject::native(getter).build(context, fn_proto, None);
                 let setter = setter
-                    .map(|setter| FunctionObject::native(context, setter, fn_proto, fn_proto));
+                    .map(|setter| FunctionObject::native(setter).build(context, fn_proto, None));
                 this.add_property(mc, name.into(), getter, setter, self.attributes);
                 return Value::Undefined;
             }
-            DeclKind::Method(func) => {
-                FunctionObject::bare_function(context, Executable::Native(func), None, fn_proto)
-                    .into()
+            DeclKind::TableProperty {
+                native,
+                getter,
+                setter,
+            } => {
+                // Property objects are unobservable by user code, so a bare function is enough.
+                let getter =
+                    FunctionObject::table_native(native, getter).build(context, fn_proto, None);
+                let setter = setter.map(|setter| {
+                    FunctionObject::table_native(native, setter).build(context, fn_proto, None)
+                });
+                this.add_property(mc, name.into(), getter, setter, self.attributes);
+                return Value::Undefined;
             }
-            DeclKind::Function(func) => {
-                FunctionObject::native(context, func, fn_proto, fn_proto).into()
+            DeclKind::Method(f) | DeclKind::Function(f) => {
+                let p = matches!(self.kind, DeclKind::Function(_)).then_some(fn_proto);
+                FunctionObject::native(f).build(context, fn_proto, p).into()
+            }
+            DeclKind::TableMethod(f, index) | DeclKind::TableFunction(f, index) => {
+                let p = matches!(self.kind, DeclKind::Function(_)).then_some(fn_proto);
+                FunctionObject::table_native(f, index)
+                    .build(context, fn_proto, p)
+                    .into()
             }
             DeclKind::String(s) => context.intern_static(WStr::from_units(s)).into(),
             DeclKind::Bool(b) => b.into(),
@@ -104,6 +191,13 @@ impl Declaration {
 ///     "filters" => property(get_filters, set_filters);
 ///     "to_string" => method(to_string);
 ///     "to_string2" => function(to_string);
+///     // switches to 'table mode': function-like definitions will now take
+///     // an integer index instead of a function pointer, and will dispatch it to the
+///     // method provided here.
+///     use fn method;
+///     "callme" => function(CALLME);
+///     // you can go back to the 'default' mode
+///     use default;
 ///     "locale" => string("en-US");
 ///     "enabled" => bool(true);
 ///     "size" => int(123);
@@ -111,65 +205,152 @@ impl Declaration {
 ///     // all declarations can also specify attributes
 ///     "hidden" => string("shh!"; DONT_ENUM | DONT_DELETE | READ_ONLY);
 /// };
+///
+/// mod method {
+///   pub const CALLME: u16 = 0;
+/// }
+///
+/// fn method(..., id: u16) -> Result<Value<'gc>, Error<'gc>> {
+///   match id {
+///     CALLME => { ... }
+///     _ => Ok(Value::Undefined)
+///   }
+/// }
 /// ```
-#[allow(unused_macro_rules)]
 macro_rules! declare_properties {
-    ( $($name:literal => $kind:ident($($args:tt)*);)* ) => {
+    ( $($tts:tt)* ) => {
         const {
             const fn __assert_ascii(s: &str) -> &[u8] {
                 assert!(s.is_ascii());
                 s.as_bytes()
             }
 
-            &[ $(
-                declare_properties!(@__prop $kind($name, $($args)*))
-            ),* ]
+            __declare_properties!(@stmt [default] [/* out */] $($tts)*)
         }
     };
-    (@__prop $kind:ident($name:literal $(,$args:expr)*) ) => {
-        crate::avm1::property_decl::Declaration {
-            name: __assert_ascii($name),
-            kind: declare_properties!(@__kind $kind ($($args),*)),
-            attributes: crate::avm1::property::Attribute::empty(),
-        }
+}
+
+// Internal implementation
+macro_rules! __declare_properties {
+    // Main TT-muncher loop for distinguishing between `use ...` and `"name" => ...`
+    // and for threading the current 'use' mode.
+    (@stmt [$($mode:tt)*] [$($out:tt)*] )=> {
+        &[ $($out)* ]
     };
-    (@__prop $kind:ident($name:literal $(,$args:expr)*; $($attributes:ident)|*) ) => {
-        crate::avm1::property_decl::Declaration {
+    (
+        @stmt [$($mode:tt)*]
+        [$($out:tt)*]
+        $name:literal => $kind:ident($($args:tt)*);
+        $($rest:tt)*
+    ) => {
+        __declare_properties!(
+            @stmt [$($mode)*]
+            [ $($out)* __declare_properties!(
+                @prop [$($mode)*] $name $kind [/* args out */] $($args)*
+            ), ]
+            $($rest)*
+        )
+    };
+    (
+        @stmt [$($mode:tt)*]
+        [$($out:tt)*]
+        use default;
+        $($rest:tt)*
+    ) => {
+        __declare_properties!(@stmt [default] [ $($out)* ] $($rest)*)
+    };
+    (
+        @stmt [$($mode:tt)*]
+        [$($out:tt)*]
+        use fn $($path:tt)::+;
+        $($rest:tt)*
+    ) => {
+        __declare_properties!(@stmt [fn $($path)::+] [ $($out)* ] $($rest)*)
+    };
+
+    // Property args TT-muncher loop: we want to parse until the first ';'.
+    // The $args need to be kept as tt's all the way to the end, where they
+    // will be matched as an expr or an ident depending on the $mode.
+    (
+        @prop [$($mode:tt)*] $name:literal $kind:ident
+        [$($args:tt)*] $(; $($attributes:ident)|*)?
+    ) => {
+        $crate::avm1::property_decl::Declaration {
             name: __assert_ascii($name),
-            kind: declare_properties!(@__kind $kind ($($args),*)),
-            attributes: crate::avm1::property::Attribute::from_bits_truncate(
-                0 $(| crate::avm1::property::Attribute::$attributes.bits())*
+            kind: __declare_properties!(@kind [$($mode)*] $kind ($($args)*)),
+            attributes: $crate::avm1::property::Attribute::from_bits_truncate(
+                0 $($(| $crate::avm1::property::Attribute::$attributes.bits())*)?
             ),
         }
     };
-    (@__kind property($getter:expr)) => {
-        crate::avm1::property_decl::DeclKind::Property {
-            getter: $getter,
-            setter: None,
-        }
+    (
+        @prop [$($mode:tt)*] $name:literal $kind:ident
+        [$($args:tt)*] $tt:tt $($rest:tt)*
+    ) => {
+        __declare_properties!(
+            @prop [$($mode)*] $name $kind [$($args)* $tt] $($rest)*
+        )
     };
-    (@__kind property($getter:expr, $setter:expr)) => {
-        crate::avm1::property_decl::DeclKind::Property {
+
+    // The various kinds of declarations.
+    (@kind [default] property($getter:expr, $setter:expr)) => {
+        $crate::avm1::property_decl::DeclKind::Property {
             getter: $getter,
             setter: Some($setter),
         }
     };
-    (@__kind method($method:expr)) => {
-        crate::avm1::property_decl::DeclKind::Method($method)
+    (@kind [default] property($getter:expr)) => {
+        $crate::avm1::property_decl::DeclKind::Property {
+            getter: $getter,
+            setter: None,
+        }
     };
-    (@__kind function($function:expr)) => {
-        crate::avm1::property_decl::DeclKind::Function($function)
+    (@kind [fn $($path:ident)::+] property($getter:ident, $setter:ident)) => {
+        $crate::avm1::property_decl::DeclKind::TableProperty {
+            native: $($path)::+,
+            getter: $($path::)+$getter,
+            setter: Some($($path::)+$setter),
+        }
     };
-    (@__kind string($string:expr)) => {
-        crate::avm1::property_decl::DeclKind::String(__assert_ascii($string))
+    (@kind [fn $($path:ident)::+] property($getter:ident)) => {
+        $crate::avm1::property_decl::DeclKind::TableProperty {
+            native: $($path)::+,
+            getter: $($path::)+$getter,
+            setter: None,
+        }
     };
-    (@__kind bool($boolean:expr)) => {
-        crate::avm1::property_decl::DeclKind::Bool($boolean)
+    (@kind [default] method($method:expr)) => {
+        $crate::avm1::property_decl::DeclKind::Method($method)
     };
-    (@__kind int($int:expr)) => {
-        crate::avm1::property_decl::DeclKind::Int($int)
+    (@kind [fn $($path:ident)::+] method($method:ident)) => {
+        $crate::avm1::property_decl::DeclKind::TableMethod($($path)::+, $($path::)+$method)
     };
-    (@__kind float($float:expr)) => {
-        crate::avm1::property_decl::DeclKind::Float($float)
+    (@kind [default] function($function:expr)) => {
+        $crate::avm1::property_decl::DeclKind::Function($function)
+    };
+    (@kind [fn $($path:ident)::+] function($function:ident)) => {
+        $crate::avm1::property_decl::DeclKind::TableFunction($($path)::+, $($path::)+$method)
+    };
+    (@kind $_mode:tt string($string:expr)) => {
+        $crate::avm1::property_decl::DeclKind::String(__assert_ascii($string))
+    };
+    (@kind $_mode:tt bool($boolean:expr)) => {
+        $crate::avm1::property_decl::DeclKind::Bool($boolean)
+    };
+    (@kind $_mode:tt int($int:expr)) => {
+        $crate::avm1::property_decl::DeclKind::Int($int)
+    };
+    (@kind $_mode:tt float($float:expr)) => {
+        $crate::avm1::property_decl::DeclKind::Float($float)
+    };
+}
+
+macro_rules! table_constructor {
+    ($($method:ident)::+) => {
+        table_constructor!($($method)::*, CONSTRUCTOR)
+    };
+    ($($method:ident)::+, $index:ident) => {
+        // TODO: add support to ASnative-style table constructors to FunctionObject.
+        |activation, this, args| $($method)::+(activation, this, args, ($($method::)+$index))
     };
 }

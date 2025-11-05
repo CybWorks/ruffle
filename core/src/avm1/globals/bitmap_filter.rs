@@ -11,16 +11,24 @@ use crate::avm1::globals::drop_shadow_filter::DropShadowFilter;
 use crate::avm1::globals::glow_filter::GlowFilter;
 use crate::avm1::globals::gradient_filter::GradientFilter;
 use crate::avm1::object::NativeObject;
-use crate::avm1::property_decl::{define_properties_on, Declaration};
+use crate::avm1::property_decl::{DeclContext, Declaration, SystemClass};
 use crate::avm1::{Attribute, Object, Value};
 use crate::context::UpdateContext;
-use crate::string::StringContext;
 use ruffle_macros::istr;
 use ruffle_render::filters::Filter;
 
 const PROTO_DECLS: &[Declaration] = declare_properties! {
     "clone" => method(clone);
 };
+
+pub fn create_class<'gc>(
+    context: &mut DeclContext<'_, 'gc>,
+    super_proto: Object<'gc>,
+) -> SystemClass<'gc> {
+    let class = context.empty_class(super_proto);
+    context.define_properties_on(class.proto, PROTO_DECLS);
+    class
+}
 
 pub fn clone<'gc>(
     activation: &mut Activation<'_, 'gc>,
@@ -92,48 +100,48 @@ pub fn filter_to_avm1<'gc>(activation: &mut Activation<'_, 'gc>, filter: Filter)
     let (native, proto) = match filter {
         Filter::BevelFilter(filter) => (
             NativeObject::BevelFilter(BevelFilter::from_filter(activation.gc(), filter)),
-            activation.context.avm1.prototypes().bevel_filter,
+            activation.prototypes().bevel_filter,
         ),
         Filter::BlurFilter(filter) => (
             NativeObject::BlurFilter(BlurFilter::from_filter(activation.gc(), filter)),
-            activation.context.avm1.prototypes().blur_filter,
+            activation.prototypes().blur_filter,
         ),
         Filter::ColorMatrixFilter(filter) => (
             NativeObject::ColorMatrixFilter(ColorMatrixFilter::from_filter(
                 activation.gc(),
                 filter,
             )),
-            activation.context.avm1.prototypes().color_matrix_filter,
+            activation.prototypes().color_matrix_filter,
         ),
         Filter::ConvolutionFilter(filter) => (
             NativeObject::ConvolutionFilter(ConvolutionFilter::from_filter(
                 activation.gc(),
                 filter,
             )),
-            activation.context.avm1.prototypes().convolution_filter,
+            activation.prototypes().convolution_filter,
         ),
         Filter::GlowFilter(filter) => (
             NativeObject::GlowFilter(GlowFilter::from_filter(activation.gc(), filter)),
-            activation.context.avm1.prototypes().glow_filter,
+            activation.prototypes().glow_filter,
         ),
         Filter::DropShadowFilter(filter) => (
             NativeObject::DropShadowFilter(DropShadowFilter::from_filter(activation.gc(), filter)),
-            activation.context.avm1.prototypes().drop_shadow_filter,
+            activation.prototypes().drop_shadow_filter,
         ),
         Filter::DisplacementMapFilter(filter) => (
             NativeObject::DisplacementMapFilter(DisplacementMapFilter::from_filter(
                 activation.gc(),
                 filter,
             )),
-            activation.context.avm1.prototypes().displacement_map_filter,
+            activation.prototypes().displacement_map_filter,
         ),
         Filter::GradientBevelFilter(filter) => (
             NativeObject::GradientBevelFilter(GradientFilter::from_filter(activation.gc(), filter)),
-            activation.context.avm1.prototypes().gradient_bevel_filter,
+            activation.prototypes().gradient_bevel_filter,
         ),
         Filter::GradientGlowFilter(filter) => (
             NativeObject::GradientGlowFilter(GradientFilter::from_filter(activation.gc(), filter)),
-            activation.context.avm1.prototypes().gradient_glow_filter,
+            activation.prototypes().gradient_glow_filter,
         ),
         Filter::ShaderFilter(_) => {
             unreachable!(
@@ -163,14 +171,4 @@ pub fn create_instance<'gc>(
     }
     result.set_native(activation.gc(), native);
     result
-}
-
-pub fn create_proto<'gc>(
-    context: &mut StringContext<'gc>,
-    proto: Object<'gc>,
-    fn_proto: Object<'gc>,
-) -> Object<'gc> {
-    let object = Object::new(context, Some(proto));
-    define_properties_on(PROTO_DECLS, context, object, fn_proto);
-    object
 }

@@ -154,7 +154,7 @@ impl VertexAttributeFormat {
     }
 
     fn extend_to_float4(
-        &self,
+        self,
         base_expr: Handle<Expression>,
         builder: &mut NagaBuilder,
     ) -> Result<Handle<Expression>> {
@@ -354,6 +354,8 @@ impl<'a> NagaBuilder<'a> {
         Ok(sampler_configs)
     }
 
+    // We're passing the reference along anyway.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
     pub fn build_module(
         agal: &[u8],
         vertex_attributes: &[Option<VertexAttributeFormat>; MAX_VERTEX_ATTRIBUTES],
@@ -1194,6 +1196,7 @@ impl<'a> NagaBuilder<'a> {
                     level: naga::SampleLevel::Auto,
                     depth_ref: None,
                     gather: None,
+                    clamp_to_edge: false,
                 });
                 self.emit_dest_store(dest, tex)?;
             }

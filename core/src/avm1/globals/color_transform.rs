@@ -1,9 +1,9 @@
 //! flash.geom.ColorTransform object
 
 use crate::avm1::object::NativeObject;
-use crate::avm1::property_decl::{define_properties_on, Declaration};
+use crate::avm1::property_decl::{DeclContext, Declaration, SystemClass};
 use crate::avm1::{Activation, Error, Object, Value};
-use crate::string::{AvmString, StringContext};
+use crate::string::AvmString;
 use gc_arena::{Collect, Gc};
 use ruffle_macros::istr;
 use std::cell::Cell;
@@ -50,11 +50,7 @@ impl<'gc> ColorTransformObject {
             color_transform.b_add.into(),
             color_transform.a_add.into(),
         ];
-        let constructor = activation
-            .context
-            .avm1
-            .prototypes()
-            .color_transform_constructor;
+        let constructor = activation.prototypes().color_transform_constructor;
         constructor.construct(activation, &args)
     }
 
@@ -97,7 +93,16 @@ const PROTO_DECLS: &[Declaration] = declare_properties! {
     "toString" => method(to_string);
 };
 
-pub fn constructor<'gc>(
+pub fn create_class<'gc>(
+    context: &mut DeclContext<'_, 'gc>,
+    super_proto: Object<'gc>,
+) -> SystemClass<'gc> {
+    let class = context.native_class(constructor, None, super_proto);
+    context.define_properties_on(class.proto, PROTO_DECLS);
+    class
+}
+
+fn constructor<'gc>(
     activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
@@ -274,14 +279,4 @@ fn concat<'gc>(
     }
 
     Ok(Value::Undefined)
-}
-
-pub fn create_proto<'gc>(
-    context: &mut StringContext<'gc>,
-    proto: Object<'gc>,
-    fn_proto: Object<'gc>,
-) -> Object<'gc> {
-    let object = Object::new(context, Some(proto));
-    define_properties_on(PROTO_DECLS, context, object, fn_proto);
-    object
 }

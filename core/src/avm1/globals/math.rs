@@ -1,10 +1,8 @@
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
-use crate::avm1::property_decl::{define_properties_on, Declaration};
+use crate::avm1::property_decl::{DeclContext, Declaration};
 use crate::avm1::{Object, Value};
-use crate::string::StringContext;
 
-use rand::Rng;
 use std::f64::consts;
 
 macro_rules! wrap_std {
@@ -47,6 +45,12 @@ const OBJECT_DECLS: &[Declaration] = declare_properties! {
     "random" => method(random; DONT_ENUM | DONT_DELETE | READ_ONLY);
     "round" => method(round; DONT_ENUM | DONT_DELETE | READ_ONLY);
 };
+
+pub fn create<'gc>(context: &mut DeclContext<'_, 'gc>) -> Object<'gc> {
+    let math = Object::new(context.strings, Some(context.object_proto));
+    context.define_properties_on(math, OBJECT_DECLS);
+    math
+}
 
 fn atan2<'gc>(
     activation: &mut Activation<'_, 'gc>,
@@ -156,18 +160,8 @@ pub fn random<'gc>(
     // See https://github.com/adobe/avmplus/blob/858d034a3bd3a54d9b70909386435cf4aec81d21/core/MathUtils.cpp#L1731C24-L1731C44
     // This generated a restricted set of 'f64' values, which some SWFs implicitly rely on.
     const MAX_VAL: u32 = 0x7FFFFFFF;
-    let rand = activation.context.rng.random_range(0..MAX_VAL);
+    let rand = activation.context.rng.generate_random_number();
     Ok(((rand as f64) / (MAX_VAL as f64 + 1f64)).into())
-}
-
-pub fn create<'gc>(
-    context: &mut StringContext<'gc>,
-    proto: Object<'gc>,
-    fn_proto: Object<'gc>,
-) -> Object<'gc> {
-    let math = Object::new(context, Some(proto));
-    define_properties_on(OBJECT_DECLS, context, math, fn_proto);
-    math
 }
 
 #[cfg(test)]
@@ -176,9 +170,11 @@ mod tests {
     use crate::avm1::test_utils::with_avm;
 
     fn setup<'gc>(activation: &mut Activation<'_, 'gc>) -> Object<'gc> {
-        let object_proto = activation.context.avm1.prototypes().object;
-        let function_proto = activation.context.avm1.prototypes().function;
-        create(activation.strings(), object_proto, function_proto)
+        create(&mut DeclContext {
+            object_proto: activation.prototypes().object,
+            fn_proto: activation.prototypes().function,
+            strings: activation.strings(),
+        })
     }
 
     test_method!(test_abs, "abs", setup,

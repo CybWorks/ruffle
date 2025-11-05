@@ -55,7 +55,7 @@ impl<'gc> LoaderDisplay<'gc> {
             },
         ));
 
-        obj.set_placed_by_script(true);
+        obj.set_placed_by_avm2_script(true);
         activation.context.orphan_manager.add_orphan_obj(obj.into());
         obj
     }
@@ -86,12 +86,12 @@ impl<'gc> TDisplayObject<'gc> for LoaderDisplay<'gc> {
         Default::default()
     }
 
-    fn object2(self) -> Avm2Value<'gc> {
-        self.0
-            .avm2_object
-            .get()
-            .map(Avm2Value::from)
-            .unwrap_or(Avm2Value::Null)
+    fn object1(self) -> Option<crate::avm1::Object<'gc>> {
+        None
+    }
+
+    fn object2(self) -> Option<Avm2StageObject<'gc>> {
+        self.0.avm2_object.get()
     }
 
     fn set_object2(self, context: &mut UpdateContext<'gc>, to: Avm2StageObject<'gc>) {

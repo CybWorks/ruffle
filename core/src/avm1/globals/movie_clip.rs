@@ -5,14 +5,14 @@ use crate::avm1::error::Error;
 use crate::avm1::globals::matrix::gradient_object_to_matrix;
 use crate::avm1::globals::{self, bitmap_filter, AVM_DEPTH_BIAS, AVM_MAX_DEPTH};
 use crate::avm1::object::NativeObject;
-use crate::avm1::property_decl::{define_properties_on, Declaration};
+use crate::avm1::property_decl::{DeclContext, Declaration, SystemClass};
 use crate::avm1::{self, ArrayBuilder, Object, Value};
 use crate::backend::navigator::NavigationMethod;
 use crate::context::UpdateContext;
 use crate::display_object::{Bitmap, EditText, MovieClip, TInteractiveObject};
 use crate::ecma_conversions::f64_to_wrapping_i32;
 use crate::prelude::*;
-use crate::string::{AvmString, StringContext};
+use crate::string::AvmString;
 use crate::vminterface::Instantiator;
 use crate::{avm1_stub, avm_error, avm_warn};
 use ruffle_macros::istr;
@@ -123,6 +123,15 @@ const PROTO_DECLS: &[Declaration] = declare_properties! {
     // NOTE: `tabChildren` is not a built-in property of MovieClip.
 };
 
+pub fn create_class<'gc>(
+    context: &mut DeclContext<'_, 'gc>,
+    super_proto: Object<'gc>,
+) -> SystemClass<'gc> {
+    let class = context.empty_class(super_proto);
+    context.define_properties_on(class.proto, PROTO_DECLS);
+    class
+}
+
 pub fn new_rectangle<'gc>(
     activation: &mut Activation<'_, 'gc>,
     rectangle: Rectangle<Twips>,
@@ -132,7 +141,7 @@ pub fn new_rectangle<'gc>(
     let width = rectangle.width().to_pixels();
     let height = rectangle.height().to_pixels();
     let args = &[x.into(), y.into(), width.into(), height.into()];
-    let proto = activation.context.avm1.prototypes().rectangle_constructor;
+    let proto = activation.prototypes().rectangle_constructor;
     proto.construct(activation, args)
 }
 
@@ -250,16 +259,6 @@ pub fn hit_test<'gc>(
     }
 
     Ok(false.into())
-}
-
-pub fn create_proto<'gc>(
-    context: &mut StringContext<'gc>,
-    proto: Object<'gc>,
-    fn_proto: Object<'gc>,
-) -> Object<'gc> {
-    let object = Object::new(context, Some(proto));
-    define_properties_on(PROTO_DECLS, context, object, fn_proto);
-    object
 }
 
 fn attach_bitmap<'gc>(
@@ -430,7 +429,7 @@ fn line_gradient_style<'gc>(
         let alphas = alphas.coerce_to_object(activation);
         let ratios = ratios.coerce_to_object(activation);
         let records = if let Some(records) =
-            build_gradient_records(activation, "lineGradientStyle()", &colors, &alphas, &ratios)?
+            build_gradient_records(activation, "lineGradientStyle()", colors, alphas, ratios)?
         {
             records
         } else {
@@ -481,9 +480,9 @@ fn line_gradient_style<'gc>(
 fn build_gradient_records<'gc>(
     activation: &mut Activation<'_, 'gc>,
     fname: &str,
-    colors: &Object<'gc>,
-    alphas: &Object<'gc>,
-    ratios: &Object<'gc>,
+    colors: Object<'gc>,
+    alphas: Object<'gc>,
+    ratios: Object<'gc>,
 ) -> Result<Option<Vec<GradientRecord>>, Error<'gc>> {
     let colors_length = colors.length(activation)?;
     let alphas_length = alphas.length(activation)?;
@@ -659,7 +658,7 @@ fn begin_gradient_fill<'gc>(
         let alphas = alphas.coerce_to_object(activation);
         let ratios = ratios.coerce_to_object(activation);
         let records = if let Some(records) =
-            build_gradient_records(activation, "beginGradientFill()", &colors, &alphas, &ratios)?
+            build_gradient_records(activation, "beginGradientFill()", colors, alphas, ratios)?
         {
             records
         } else {
@@ -799,6 +798,7 @@ fn attach_movie<'gc>(
         .library_for_movie(movie_clip.movie())
         .and_then(|l| l.instantiate_by_export_name(export_name, activation.gc()))
     {
+        new_clip.set_placed_by_avm1_script(true);
         // Set name and attach to parent.
         new_clip.set_name(activation.gc(), new_instance_name);
         movie_clip.replace_at_depth(activation.context, new_clip, depth);
@@ -809,7 +809,7 @@ fn attach_movie<'gc>(
         };
         new_clip.post_instantiation(activation.context, init_object, Instantiator::Avm1, true);
 
-        Ok(new_clip.object().coerce_to_object(activation).into())
+        Ok(new_clip.object1_or_undef())
     } else {
         avm_warn!(activation, "Unable to attach '{}'", export_name);
         Ok(Value::Undefined)
@@ -840,13 +840,14 @@ fn create_empty_movie_clip<'gc>(
     // Create empty movie clip.
     let swf_movie = movie_clip.movie();
     let new_clip = MovieClip::new(swf_movie, activation.gc());
+    new_clip.set_placed_by_avm1_script(true);
 
     // Set name and attach to parent.
     new_clip.set_name(activation.gc(), new_instance_name);
     movie_clip.replace_at_depth(activation.context, new_clip.into(), depth);
     new_clip.post_instantiation(activation.context, None, Instantiator::Avm1, true);
 
-    Ok(new_clip.object())
+    Ok(new_clip.object1_or_undef())
 }
 
 fn create_text_field<'gc>(
@@ -896,7 +897,7 @@ fn create_text_field<'gc>(
 
     if activation.swf_version() >= 8 {
         //SWF8+ returns the `TextField` instance here
-        Ok(text_field.object())
+        Ok(text_field.object1_or_undef())
     } else {
         Ok(Value::Undefined)
     }
@@ -935,7 +936,9 @@ fn duplicate_movie_clip<'gc>(
         return Ok(Value::Undefined);
     }
 
-    Ok(new_clip.map_or(Value::Undefined, |clip| clip.object()))
+    Ok(new_clip
+        .and_then(|clip| clip.object1())
+        .map_or(Value::Undefined, |o| o.into()))
 }
 
 pub fn clone_sprite<'gc>(
@@ -969,6 +972,7 @@ pub fn clone_sprite<'gc>(
         // Dynamically created clip; create a new empty movie clip.
         MovieClip::new(movie, context.gc())
     };
+    new_clip.set_placed_by_avm1_script(true);
 
     // Set name and attach to parent.
     new_clip.set_name(context.gc(), target);
@@ -1030,9 +1034,9 @@ fn get_instance_at_depth<'gc>(
                 // NOTE: this behavior was guessed from observing behavior for Text and Graphic;
                 // I didn't test other variants like Bitmap, MorphSpahe, Video
                 // or objects that weren't fully initialized yet.
-                match child.object() {
-                    Value::Undefined => Ok(movie_clip.object()),
-                    obj => Ok(obj),
+                match child.object1() {
+                    None => Ok(movie_clip.object1_or_undef()),
+                    Some(obj) => Ok(obj.into()),
                 }
             }
             None => Ok(Value::Undefined),
@@ -1457,7 +1461,7 @@ fn get_bounds<'gc>(
 
         let out = Object::new(
             &activation.context.strings,
-            Some(activation.context.avm1.prototypes().object),
+            Some(activation.prototypes().object),
         );
         out.set(
             istr!("xMin"),
@@ -1591,10 +1595,10 @@ fn load_movie<'gc>(
     let url = url_val.coerce_to_string(activation)?;
     let method = args.get(1).cloned().unwrap_or(Value::Undefined);
     let method = NavigationMethod::from_method_str(&method.coerce_to_string(activation)?);
-    let target_obj = target.object().coerce_to_object(activation);
+    let target_obj = target.object1_or_undef().coerce_to_object(activation);
     let request = activation.object_into_request(target_obj, url, method);
     let future = activation.context.load_manager.load_movie_into_clip(
-        activation.context.player.clone(),
+        activation.context.player_handle(),
         DisplayObject::MovieClip(target),
         request,
         None,
@@ -1614,13 +1618,9 @@ fn load_variables<'gc>(
     let url = url_val.coerce_to_string(activation)?;
     let method = args.get(1).cloned().unwrap_or(Value::Undefined);
     let method = NavigationMethod::from_method_str(&method.coerce_to_string(activation)?);
-    let target = target.object().coerce_to_object(activation);
+    let target = target.object1_or_undef().coerce_to_object(activation);
     let request = activation.object_into_request(target, url, method);
-    let future = activation.context.load_manager.load_form_into_object(
-        activation.context.player.clone(),
-        target,
-        request,
-    );
+    let future = crate::loader::load_form_into_object(activation.context, target, request);
     activation.context.navigator.spawn_future(future);
 
     Ok(Value::Undefined)
@@ -1640,8 +1640,8 @@ fn transform<'gc>(
     this: MovieClip<'gc>,
     activation: &mut Activation<'_, 'gc>,
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let constructor = activation.context.avm1.prototypes().transform_constructor;
-    let cloned = constructor.construct(activation, &[this.object()])?;
+    let constructor = activation.prototypes().transform_constructor;
+    let cloned = constructor.construct(activation, &[this.object1_or_undef()])?;
     Ok(cloned)
 }
 

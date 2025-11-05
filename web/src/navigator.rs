@@ -190,17 +190,7 @@ impl NavigatorBackend for WebNavigatorBackend {
         }
 
         let url = match self.resolve_url(url) {
-            Ok(url) => {
-                if url.scheme() == "file" {
-                    tracing::error!(
-                        "Can't open the local URL {} on WASM target",
-                        url.to_string()
-                    );
-                    return;
-                } else {
-                    url
-                }
-            }
+            Ok(url) => url,
             Err(e) => {
                 tracing::error!(
                     "Could not parse URL because of {}, the corrupt URL was: {}",
@@ -307,19 +297,9 @@ impl NavigatorBackend for WebNavigatorBackend {
 
     fn fetch(&self, request: Request) -> OwnedFuture<Box<dyn SuccessResponse>, ErrorResponse> {
         let url = match self.resolve_url(request.url()) {
-            Ok(url) => {
-                if url.scheme() == "file" {
-                    return async_return(create_specific_fetch_error(
-                        "WASM target can't fetch local URL",
-                        url.as_str(),
-                        "",
-                    ));
-                } else {
-                    url
-                }
-            }
+            Ok(url) => url,
             Err(e) => {
-                return async_return(create_fetch_error(request.url(), e));
+                return async_return(Err(create_fetch_error(request.url(), e)));
             }
         };
 
@@ -366,11 +346,11 @@ impl NavigatorBackend for WebNavigatorBackend {
             let web_request = match WebRequest::new_with_str_and_init(url.as_str(), &init) {
                 Ok(web_request) => web_request,
                 Err(_) => {
-                    return create_specific_fetch_error(
+                    return Err(create_specific_fetch_error(
                         "Unable to create request for",
                         url.as_str(),
                         "",
-                    );
+                    ));
                 }
             };
 
@@ -388,9 +368,19 @@ impl NavigatorBackend for WebNavigatorBackend {
             let window = web_sys::window().expect("window()");
             let fetchval = JsFuture::from(window.fetch_with_request(&web_request))
                 .await
-                .map_err(|_| ErrorResponse {
-                    url: url.to_string(),
-                    error: Error::FetchError("Got JS error".to_string()),
+                .map_err(|_| {
+                    if url.scheme() == "file" {
+                        create_specific_fetch_error(
+                            "WASM target can't fetch local URL",
+                            url.as_str(),
+                            "",
+                        )
+                    } else {
+                        ErrorResponse {
+                            url: url.to_string(),
+                            error: Error::FetchError("Got JS error".to_string()),
+                        }
+                    }
                 })?;
 
             let response: WebResponse = fetchval.dyn_into().map_err(|_| ErrorResponse {

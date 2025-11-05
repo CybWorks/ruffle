@@ -211,7 +211,7 @@ impl MainWindow {
                     ElementState::Pressed => {
                         self.player.handle_event(PlayerEvent::KeyDown { key });
                         if let Some(control_code) =
-                            winit_to_ruffle_text_control(&event, &self.modifiers)
+                            winit_to_ruffle_text_control(&event, self.modifiers)
                         {
                             self.player
                                 .handle_event(PlayerEvent::TextControl { code: control_code });
@@ -575,6 +575,10 @@ impl ApplicationHandler<RuffleEvent> for App {
             (Some(main_window), RuffleEvent::CloseFile) => {
                 main_window.gui.window().set_title("Ruffle"); // Reset title since file has been closed.
                 main_window.gui.close_movie(&mut main_window.player);
+            }
+
+            (Some(main_window), RuffleEvent::ExportBundle) => {
+                main_window.gui.export_bundle();
             }
 
             (Some(main_window), RuffleEvent::EnterFullScreen) => {

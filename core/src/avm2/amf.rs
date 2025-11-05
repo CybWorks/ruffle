@@ -25,23 +25,15 @@ pub fn serialize_value<'gc>(
     amf_version: AMFVersion,
     object_table: &mut ObjectTable<'gc>,
 ) -> Option<AmfValue> {
-    match elem {
+    match elem.normalize() {
         Value::Undefined => Some(AmfValue::Undefined),
         Value::Null => Some(AmfValue::Null),
         Value::Bool(b) => Some(AmfValue::Bool(b)),
         Value::Number(f) => Some(AmfValue::Number(f)),
-        Value::Integer(num) => {
-            // NOTE - we should really be converting `Value::Integer` to `Value::Number`
-            // whenever it's outside this range, instead of performing this during AMF serialization.
-            // Integers are unsupported in AMF0, and must be converted to Number regardless of whether
-            // it can be represented as an integer.
-            // FIXME - handle coercion floats like '1.0' to integers
-            if amf_version == AMFVersion::AMF0 || num >= (1 << 28) || num < -(1 << 28) {
-                Some(AmfValue::Number(num as f64))
-            } else {
-                Some(AmfValue::Integer(num))
-            }
-        }
+        // Integers are unsupported in AMF0, and must be converted to Number regardless of whether
+        // it can be represented as an integer.
+        Value::Integer(i) if amf_version == AMFVersion::AMF0 => Some(AmfValue::Number(i as f64)),
+        Value::Integer(i) => Some(AmfValue::Integer(i)),
         Value::String(s) => Some(AmfValue::String(s.to_string())),
         Value::Object(o) => {
             // TODO: Find a more general rule for which object types should be skipped,
@@ -442,7 +434,7 @@ pub fn deserialize_value_impl<'gc>(
                 *is_fixed,
                 Some(activation.avm2().class_defs().number),
             );
-            VectorObject::from_vector(storage, activation)?.into()
+            VectorObject::from_vector(storage, activation).into()
         }
         AmfValue::VectorUInt(vec, is_fixed) => {
             let storage = VectorStorage::from_values(
@@ -450,7 +442,7 @@ pub fn deserialize_value_impl<'gc>(
                 *is_fixed,
                 Some(activation.avm2().class_defs().uint),
             );
-            VectorObject::from_vector(storage, activation)?.into()
+            VectorObject::from_vector(storage, activation).into()
         }
         AmfValue::VectorInt(vec, is_fixed) => {
             let storage = VectorStorage::from_values(
@@ -458,7 +450,7 @@ pub fn deserialize_value_impl<'gc>(
                 *is_fixed,
                 Some(activation.avm2().class_defs().int),
             );
-            VectorObject::from_vector(storage, activation)?.into()
+            VectorObject::from_vector(storage, activation).into()
         }
         AmfValue::VectorObject(id, vec, ty_name, is_fixed) => {
             let name = AvmString::new_utf8(activation.gc(), ty_name);
@@ -467,8 +459,8 @@ pub fn deserialize_value_impl<'gc>(
             // Create an empty vector, as it has to exist in the map before reading children, in case they reference it
             let empty_storage =
                 VectorStorage::new(0, *is_fixed, Some(class.inner_class_definition()));
-            let obj = VectorObject::from_vector(empty_storage, activation)?;
-            object_map.insert(*id, obj);
+            let obj = VectorObject::from_vector(empty_storage, activation);
+            object_map.insert(*id, obj.into());
 
             let new_values = vec
                 .iter()
@@ -486,9 +478,7 @@ pub fn deserialize_value_impl<'gc>(
                 .collect::<Result<Vec<_>, _>>()?;
 
             // Swap in the actual values
-            obj.as_vector_storage_mut(activation.gc())
-                .expect("Failed to get vector storage from VectorObject")
-                .replace_storage(new_values);
+            obj.storage_mut(activation.gc()).replace_storage(new_values);
 
             obj.into()
         }

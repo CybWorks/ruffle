@@ -14,6 +14,8 @@ use ruffle_render_wgpu::backend::{request_adapter_and_device, WgpuRenderBackend}
 use ruffle_render_wgpu::descriptors::Descriptors;
 use ruffle_render_wgpu::utils::{format_list, get_backend_names};
 use std::any::Any;
+use std::fs::File;
+use std::path::Path;
 use std::sync::{Arc, MutexGuard};
 use std::time::{Duration, Instant};
 use url::Url;
@@ -24,6 +26,7 @@ use winit::event_loop::EventLoopProxy;
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{ImePurpose as WinitImePurpose, Theme, Window};
 
+use super::dialogs::export_bundle_dialog::ExportBundleDialogConfiguration;
 use super::{DialogDescriptor, FilePicker};
 
 /// Integration layer connecting wgpu+winit to egui.
@@ -73,12 +76,23 @@ impl GuiController {
             adapter_info.name,
             adapter_info.device_type
         );
-        let surface_format = surface
-            .get_capabilities(&adapter)
-            .formats
-            .first()
-            .cloned()
-            .expect("At least one format should be supported");
+        let preferred_formats = [
+            // by egui
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureFormat::Bgra8Unorm,
+        ];
+        let supported_formats = surface.get_capabilities(&adapter).formats;
+        let surface_format = preferred_formats
+            .iter()
+            .find(|format| supported_formats.contains(format))
+            .copied()
+            .unwrap_or_else(|| {
+                supported_formats
+                    .first()
+                    .copied()
+                    .expect("At least one format should be supported")
+            });
+        tracing::info!("Using surface format {:?}", surface_format);
         let size = window.inner_size();
         surface.configure(
             &device,
@@ -394,6 +408,7 @@ impl GuiController {
                             load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                             store: wgpu::StoreOp::Store,
                         },
+                        depth_slice: None,
                     })],
                     label: Some("egui_render"),
                     ..Default::default()
@@ -458,6 +473,20 @@ impl GuiController {
             self.movie_to_window_position(cursor_area.x, cursor_area.y),
             PhysicalSize::new(cursor_area.width, cursor_area.height),
         );
+    }
+
+    pub fn export_bundle(&mut self) {
+        let Some(movie_url) = self.gui.dialogs.saved_movie_url() else {
+            return;
+        };
+
+        let player_options = self.gui.dialogs.saved_launch_options().player.clone();
+        self.gui
+            .dialogs
+            .open_dialog(DialogDescriptor::ExportBundle(Box::new(
+                ExportBundleDialogConfiguration::new(movie_url.clone(), player_options),
+            )));
+        self.gui.on_player_destroyed();
     }
 }
 
@@ -578,6 +607,7 @@ fn load_system_fonts(
         4,
         vec![
             Family::Name("Noto Sans Hebrew"), // Open font
+            Family::Name("Tahoma"),           // Windows
         ],
     ));
 
@@ -586,6 +616,16 @@ fn load_system_fonts(
         5,
         vec![
             Family::Name("Noto Sans Arabic"), // Open font
+            Family::Name("Tahoma"),           // Windows
+        ],
+    ));
+
+    // Thai
+    queries.push((
+        6,
+        vec![
+            Family::Name("Noto Sans Thai"), // Open font
+            Family::Name("Tahoma"),         // Windows
         ],
     ));
 
@@ -652,11 +692,16 @@ fn load_system_font(
         .expect("id not found in font database");
 
     let mut fontdata = match src {
-        Source::File(path) => {
-            let data = std::fs::read(path)?;
-            egui::FontData::from_owned(data)
+        Source::File(path) | Source::SharedFile(path, _) => {
+            let data = mmap_system_font(&path)?;
+
+            // egui accepts only static data, so we have to leak mmapped fonts.
+            // This is acceptable, as we're doing it only once.
+            let data = Box::leak(Box::new(data));
+
+            egui::FontData::from_static(data)
         }
-        Source::Binary(bin) | Source::SharedFile(_, bin) => {
+        Source::Binary(bin) => {
             let data = bin.as_ref().as_ref().to_vec();
             egui::FontData::from_owned(data)
         }
@@ -664,4 +709,15 @@ fn load_system_font(
     fontdata.index = index;
 
     Ok((name, fontdata))
+}
+
+fn mmap_system_font(path: &Path) -> anyhow::Result<memmap2::Mmap> {
+    let file = File::open(path).map_err(|e| anyhow!("Couldn't open font file at {path:?}: {e}"))?;
+
+    // SAFETY: We have to assume that the font file won't change.
+    // This assumption is realistic, as we're using system fonts only.
+    let mmap = unsafe { memmap2::Mmap::map(&file) };
+
+    let mmap = mmap.map_err(|e| anyhow!("Failed to mmap font file at {path:?}: {e}"))?;
+    Ok(mmap)
 }

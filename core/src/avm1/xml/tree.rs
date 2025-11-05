@@ -357,7 +357,7 @@ impl<'gc> XmlNode<'gc> {
         match self.get_script_object() {
             Some(object) => object,
             None => {
-                let xml_node = activation.context.avm1.prototypes().xml_node_constructor;
+                let xml_node = activation.prototypes().xml_node_constructor;
                 let prototype = xml_node
                     .get(istr!("prototype"), activation)
                     .map(|p| p.coerce_to_object(activation))
@@ -371,7 +371,7 @@ impl<'gc> XmlNode<'gc> {
     }
 
     /// Obtain the script object for a given XML tree node's attributes.
-    pub fn attributes(&self) -> Object<'gc> {
+    pub fn attributes(self) -> Object<'gc> {
         self.0.attributes
     }
 
@@ -398,7 +398,7 @@ impl<'gc> XmlNode<'gc> {
 
     /// Refreshes the .childNodes array. Call this after every child list mutation.
     pub fn refresh_cached_child_nodes(
-        &self,
+        self,
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<(), Error<'gc>> {
         let array = self.0.cached_child_nodes.get();
