@@ -5,6 +5,7 @@ use crate::socket::{ConnectionState, SocketAction, SocketHandle};
 use crate::string::WStr;
 use async_channel::{Receiver, Sender};
 use encoding_rs::Encoding;
+use enumset::EnumSetType;
 use indexmap::IndexMap;
 use std::any::Any;
 use std::borrow::Cow;
@@ -54,6 +55,13 @@ pub enum SocketMode {
 
     /// Ask the user every time a socket connection is requested
     Ask,
+}
+
+#[derive(EnumSetType, Debug)]
+pub enum FetchReason {
+    LoadSwf,
+    UrlLoader,
+    Other,
 }
 
 impl NavigationMethod {
@@ -148,6 +156,10 @@ impl Request {
         &self.url
     }
 
+    pub fn set_url(&mut self, url: String) {
+        self.url = url;
+    }
+
     /// Retrieve the navigation method for this request.
     pub fn method(&self) -> NavigationMethod {
         self.method
@@ -175,6 +187,9 @@ impl Request {
 pub trait SuccessResponse {
     /// The final URL obtained after any redirects.
     fn url(&self) -> Cow<'_, str>;
+
+    /// Rewrite the URL to a different one.
+    fn set_url(&mut self, url: String);
 
     /// Retrieve the contents of the response body.
     ///
@@ -565,6 +580,10 @@ pub fn fetch_path<NavigatorType: NavigatorBackend>(
     impl SuccessResponse for LocalResponse {
         fn url(&self) -> Cow<'_, str> {
             Cow::Borrowed(&self.url)
+        }
+
+        fn set_url(&mut self, url: String) {
+            self.url = url;
         }
 
         fn body(self: Box<Self>) -> OwnedFuture<Vec<u8>, Error> {

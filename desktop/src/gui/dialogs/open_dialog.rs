@@ -1,13 +1,16 @@
 use crate::custom_event::RuffleEvent;
 use crate::gui::widgets::PathOrUrlField;
-use crate::gui::{text, FilePicker, LocalizableText};
+use crate::gui::{FilePicker, LocalizableText, text};
 use crate::player::LaunchOptions;
 use egui::{
-    emath, Align2, Button, Checkbox, ComboBox, Grid, Layout, Slider, TextEdit, Ui, Widget, Window,
+    Align2, Button, Checkbox, ComboBox, Grid, Layout, Slider, TextEdit, Ui, Widget, Window, emath,
 };
 use ruffle_core::backend::navigator::SocketMode;
 use ruffle_core::config::Letterbox;
-use ruffle_core::{LoadBehavior, PlayerRuntime, StageAlign, StageScaleMode};
+use ruffle_core::{
+    DEFAULT_PLAYER_VERSION, LoadBehavior, NEWEST_PLAYER_VERSION, PlayerRuntime, StageAlign,
+    StageScaleMode,
+};
 use ruffle_render::quality::StageQuality;
 use std::borrow::Cow;
 use std::ops::RangeInclusive;
@@ -222,8 +225,10 @@ impl OpenDialog {
                 }),
             ),
         );
-        let player_version =
-            OptionalField::new(defaults.player.player_version, NumberField::new(1..=32, 32));
+        let player_version = OptionalField::new(
+            defaults.player.player_version,
+            NumberField::new(1..=NEWEST_PLAYER_VERSION, DEFAULT_PLAYER_VERSION),
+        );
         let player_runtime = OptionalField::new(
             defaults.player.player_runtime,
             EnumDropdownField::new(
@@ -295,17 +300,16 @@ impl OpenDialog {
         } else {
             self.options.player.frame_rate = None;
         }
-        if let Some(url) = self.path.result() {
-            if self
+        if let Some(url) = self.path.result()
+            && self
                 .event_loop
                 .send_event(RuffleEvent::Open(
                     url.clone(),
                     Box::new(self.options.clone()),
                 ))
                 .is_ok()
-            {
-                return true;
-            }
+        {
+            return true;
         }
 
         false

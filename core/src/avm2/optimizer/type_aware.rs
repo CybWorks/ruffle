@@ -1,5 +1,7 @@
 use crate::avm2::error::{
-    make_error_1026, make_error_1035, make_error_1051, make_error_1058, verify_error,
+    make_error_1013, make_error_1017, make_error_1018, make_error_1019, make_error_1023,
+    make_error_1024, make_error_1026, make_error_1030, make_error_1031, make_error_1035,
+    make_error_1051, make_error_1058, make_error_1068,
 };
 use crate::avm2::method::{Method, MethodAssociation, MethodKind, ResolvedParamConfig};
 use crate::avm2::multiname::Multiname;
@@ -87,6 +89,12 @@ impl<'gc> OptValue<'gc> {
 
     pub fn vtable(self) -> Option<VTable<'gc>> {
         self.class.filter(|c| !c.is_interface()).map(|c| c.vtable())
+    }
+
+    pub fn vtable_and_class(self) -> Option<(VTable<'gc>, Class<'gc>)> {
+        self.class
+            .filter(|c| !c.is_interface())
+            .map(|c| (c.vtable(), c))
     }
 
     pub fn is_null(self) -> bool {
@@ -331,11 +339,7 @@ impl<'gc> Stack<'gc> {
         value: OptValue<'gc>,
     ) -> Result<(), Error<'gc>> {
         if self.len() >= self.max_height() {
-            return Err(Error::avm_error(verify_error(
-                activation,
-                "Error #1023: Stack overflow occurred.",
-                1023,
-            )?));
+            return Err(make_error_1023(activation));
         }
 
         self.0.push(value);
@@ -345,11 +349,7 @@ impl<'gc> Stack<'gc> {
 
     fn pop(&mut self, activation: &mut Activation<'_, 'gc>) -> Result<OptValue<'gc>, Error<'gc>> {
         if self.0.is_empty() {
-            return Err(Error::avm_error(verify_error(
-                activation,
-                "Error #1024: Stack underflow occurred.",
-                1024,
-            )?));
+            return Err(make_error_1024(activation));
         }
 
         Ok(self.0.pop().unwrap())
@@ -414,11 +414,7 @@ impl<'gc> ScopeStack<'gc> {
         value: OptValue<'gc>,
     ) -> Result<(), Error<'gc>> {
         if self.len() >= self.max_height() {
-            return Err(Error::avm_error(verify_error(
-                activation,
-                "Error #1017: Scope stack overflow occurred.",
-                1017,
-            )?));
+            return Err(make_error_1017(activation));
         }
 
         self.0.push((value, false));
@@ -432,11 +428,7 @@ impl<'gc> ScopeStack<'gc> {
         value: OptValue<'gc>,
     ) -> Result<(), Error<'gc>> {
         if self.len() >= self.max_height() {
-            return Err(Error::avm_error(verify_error(
-                activation,
-                "Error #1017: Scope stack overflow occurred.",
-                1017,
-            )?));
+            return Err(make_error_1017(activation));
         }
 
         self.0.push((value, true));
@@ -446,11 +438,7 @@ impl<'gc> ScopeStack<'gc> {
 
     fn pop(&mut self, activation: &mut Activation<'_, 'gc>) -> Result<(), Error<'gc>> {
         if self.0.is_empty() {
-            return Err(Error::avm_error(verify_error(
-                activation,
-                "Error #1018: Scope stack underflow occurred.",
-                1018,
-            )?));
+            return Err(make_error_1018(activation));
         }
 
         self.0.pop().unwrap();
@@ -527,15 +515,11 @@ impl<'gc> AbstractState<'gc> {
 
         // Merge stack
         if self.stack.len() != other.stack.len() {
-            return Err(Error::avm_error(verify_error(
+            return Err(make_error_1030(
                 activation,
-                &format!(
-                    "Error #1030: Stack depth is unbalanced. {} != {}.",
-                    other.stack.len(),
-                    self.stack.len(),
-                ),
-                1030,
-            )?));
+                other.stack.len(),
+                self.stack.len(),
+            ));
         }
 
         for i in 0..self.stack.len() {
@@ -551,15 +535,11 @@ impl<'gc> AbstractState<'gc> {
 
         // Merge scope stack
         if self.scope_stack.len() != other.scope_stack.len() {
-            return Err(Error::avm_error(verify_error(
+            return Err(make_error_1031(
                 activation,
-                &format!(
-                    "Error #1031: Scope depth is unbalanced. {} != {}.",
-                    other.scope_stack.len(),
-                    self.scope_stack.len(),
-                ),
-                1031,
-            )?));
+                other.scope_stack.len(),
+                self.scope_stack.len(),
+            ));
         }
 
         for i in 0..self.scope_stack.len() {
@@ -567,11 +547,7 @@ impl<'gc> AbstractState<'gc> {
             let other_scope = other.scope_stack.at(i);
 
             if our_scope.1 != other_scope.1 {
-                return Err(Error::avm_error(verify_error(
-                    activation,
-                    "Error #1068: Scope values cannot be reconciled.",
-                    1068,
-                )?));
+                return Err(make_error_1068(activation));
             }
 
             let merged = our_scope.0.merged_with(other_scope.0);
@@ -1230,11 +1206,7 @@ fn abstract_interpret_ops<'gc>(
             }
             Op::GetScopeObject { index } => {
                 if index >= scope_stack.len() {
-                    return Err(Error::avm_error(verify_error(
-                        activation,
-                        "Error #1019: Getscopeobject  is out of bounds.",
-                        1019,
-                    )?));
+                    return Err(make_error_1019(activation, Some(index)));
                 }
 
                 stack.push(activation, scope_stack.at(index).0)?;
@@ -1279,11 +1251,7 @@ fn abstract_interpret_ops<'gc>(
             Op::FindPropStrict { multiname } | Op::FindProperty { multiname } => {
                 let outer_scope = activation.outer();
                 if outer_scope.is_empty() && scope_stack.is_empty() {
-                    return Err(Error::avm_error(verify_error(
-                        activation,
-                        "Error #1013: Cannot call OP_findproperty when scopeDepth is 0.",
-                        1013,
-                    )?));
+                    return Err(make_error_1013(activation));
                 }
 
                 let mut stack_push_done = false;
@@ -1424,7 +1392,7 @@ fn abstract_interpret_ops<'gc>(
                 let stack_value = stack.pop(activation)?;
 
                 // The value must have a vtable
-                let Some(vtable) = stack_value.vtable() else {
+                let Some((vtable, class)) = stack_value.vtable_and_class() else {
                     return Err(make_error_1051(activation));
                 };
 
@@ -1435,7 +1403,8 @@ fn abstract_interpret_ops<'gc>(
                     return Err(make_error_1026(
                         activation,
                         slot_id + 1,
-                        vtable.default_slots().len(),
+                        Some(vtable.default_slots().len()),
+                        Some(class),
                     ));
                 };
 
@@ -1454,7 +1423,7 @@ fn abstract_interpret_ops<'gc>(
                 let stack_value = stack.pop(activation)?;
 
                 // The value must have a vtable
-                let Some(vtable) = stack_value.vtable() else {
+                let Some((vtable, class)) = stack_value.vtable_and_class() else {
                     return Err(make_error_1051(activation));
                 };
 
@@ -1465,7 +1434,8 @@ fn abstract_interpret_ops<'gc>(
                     return Err(make_error_1026(
                         activation,
                         slot_id + 1,
-                        vtable.default_slots().len(),
+                        Some(vtable.default_slots().len()),
+                        Some(class),
                     ));
                 };
 
@@ -1739,17 +1709,17 @@ fn abstract_interpret_ops<'gc>(
                         match vtable.get_trait(&multiname) {
                             Some(Property::Slot { slot_id })
                             | Some(Property::ConstSlot { slot_id }) => {
-                                optimize_op_to!(Op::ConstructSlot {
-                                    index: slot_id,
-                                    num_args
-                                });
-
                                 let mut value_class =
                                     vtable.slot_class(slot_id).expect("Slot should exist");
                                 let resolved_value_class = value_class.get_class(activation)?;
 
                                 if let Some(slot_class) = resolved_value_class {
                                     if let Some(instance_class) = slot_class.i_class() {
+                                        optimize_op_to!(Op::ConstructSlot {
+                                            index: slot_id,
+                                            num_args
+                                        });
+
                                         // ConstructProp on a c_class will construct its i_class
                                         stack_push_done = true;
                                         stack.push_class_not_null(activation, instance_class)?;
@@ -1977,11 +1947,7 @@ fn abstract_interpret_ops<'gc>(
             Op::SetGlobalSlot { .. } => {
                 let outer_scope = activation.outer();
                 if outer_scope.is_empty() && scope_stack.is_empty() {
-                    return Err(Error::avm_error(verify_error(
-                        activation,
-                        "Error #1019: Getscopeobject  is out of bounds.",
-                        1019,
-                    )?));
+                    return Err(make_error_1019(activation, Some(0)));
                 }
 
                 stack.pop(activation)?;

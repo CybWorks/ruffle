@@ -8,7 +8,7 @@ use crate::avm2::script::Script;
 use crate::avm2::Activation as Avm2Activation;
 use crate::avm2::{
     Avm2, ClassObject as Avm2ClassObject, FunctionArgs as Avm2FunctionArgs, LoaderInfoObject,
-    Object as Avm2Object, StageObject as Avm2StageObject,
+    Object as Avm2Object, StageObject as Avm2StageObject, Value as Avm2Value,
 };
 use crate::backend::audio::{AudioManager, SoundInstanceHandle};
 use crate::backend::navigator::Request;
@@ -35,14 +35,14 @@ use crate::loader::{self, ContentType};
 use crate::prelude::*;
 use crate::streams::NetStream;
 use crate::string::{AvmString, SwfStrExt as _, WStr, WString};
-use crate::tag_utils::{self, ControlFlow, DecodeResult, Error, SwfMovie, SwfSlice, SwfStream};
-use crate::utils::HasPrefixField;
+use crate::tag_utils::{self, ControlFlow, Error, SwfMovie, SwfSlice, SwfStream};
 use crate::vminterface::Instantiator;
 use bitflags::bitflags;
 use core::fmt;
 use gc_arena::barrier::unlock;
 use gc_arena::lock::{Lock, RefLock};
 use gc_arena::{Collect, DynamicRoot, Gc, GcWeak, Mutation, Rootable};
+use ruffle_common::utils::HasPrefixField;
 use ruffle_macros::istr;
 use ruffle_render::perspective_projection::PerspectiveProjection;
 use smallvec::SmallVec;
@@ -349,6 +349,7 @@ impl<'gc> MovieClip<'gc> {
         let data = MovieClipData::new(shared, activation.gc());
         data.flags.set(MovieClipFlags::PLAYING);
         data.base.base.set_is_root(true);
+        data.base.base.set_instantiated_by_timeline(true);
 
         let mc = MovieClip(Gc::new(activation.gc(), data));
         if let Some(loader_info) = loader_info {
@@ -661,18 +662,26 @@ impl<'gc> MovieClip<'gc> {
             let movie = self.movie();
             let domain = context.library.library_for_movie_mut(movie).avm2_domain();
 
-            // DoAbc tag seems to be equivalent to a DoAbc2 with Lazy flag set
+            // DoAbc tag seems to be equivalent to a DoAbc2 with no flags (eager)
             match Avm2::do_abc(
                 context,
                 data,
                 None,
-                swf::DoAbc2Flag::LAZY_INITIALIZE,
+                swf::DoAbc2Flag::empty(),
                 domain,
                 self.movie(),
             ) {
                 Ok(res) => return Ok(res),
-                Err(e) => {
-                    tracing::warn!("Error loading ABC file: {e:?}");
+                Err(err) => {
+                    // TODO can we skip this Activation construction?
+                    let mut temp_activation = Avm2Activation::from_nothing(context);
+
+                    Avm2::uncaught_error(
+                        &mut temp_activation,
+                        Some(self.into()),
+                        err,
+                        "Error loading AVM2 ABC",
+                    );
                     return Ok(None);
                 }
             }
@@ -707,8 +716,16 @@ impl<'gc> MovieClip<'gc> {
                 self.movie(),
             ) {
                 Ok(res) => return Ok(res),
-                Err(e) => {
-                    tracing::warn!("Error loading ABC file: {e:?}");
+                Err(err) => {
+                    // TODO can we skip this Activation construction?
+                    let mut temp_activation = Avm2Activation::from_nothing(context);
+
+                    Avm2::uncaught_error(
+                        &mut temp_activation,
+                        Some(self.into()),
+                        err,
+                        "Error loading AVM2 ABC",
+                    );
                 }
             }
         }
@@ -837,6 +854,13 @@ impl<'gc> MovieClip<'gc> {
                 // AVM2 does not allow a clip to see while it is executing a frame script.
                 // The goto is instead queued and run once the frame script is completed.
                 self.0.queued_goto_frame.set(Some(frame));
+
+                // If we have a frame script on that frame, add ourselves to the
+                // frame script cleanup queue so that that frame script is
+                // correctly run.
+                if self.has_frame_script(frame) {
+                    context.frame_script_cleanup_queue.push_back(self);
+                }
             } else {
                 self.run_goto(context, frame, false);
             }
@@ -1409,6 +1433,12 @@ impl<'gc> MovieClip<'gc> {
                     child.set_parent(context, Some(self.into()));
                     child.set_place_frame(self.current_frame());
 
+                    // If this MC hasn't had an `object2` allocated yet, this
+                    // child will be constructed by `Sprite.constructChildren`,
+                    // not by the timeline
+                    let has_object2_allocated = self.object2().is_none();
+                    child.set_manual_frame_construct(has_object2_allocated);
+
                     // Apply PlaceObject parameters.
                     child.apply_place_object(context, place_object);
                     if let Some(name) = &place_object.name {
@@ -1513,12 +1543,7 @@ impl<'gc> MovieClip<'gc> {
         }
     }
 
-    pub fn run_goto(
-        mut self,
-        context: &mut UpdateContext<'gc>,
-        frame: FrameNumber,
-        is_implicit: bool,
-    ) {
+    fn run_goto(mut self, context: &mut UpdateContext<'gc>, frame: FrameNumber, is_implicit: bool) {
         if cfg!(feature = "timeline_debug") {
             tracing::debug!(
                 "[{}]: {} from frame {} to frame {}",
@@ -1771,13 +1796,13 @@ impl<'gc> MovieClip<'gc> {
             .filter(|params| params.frame >= frame)
             .for_each(|goto| run_goto_command(self, context, goto));
 
-        // On AVM2, all explicit gotos act the same way as a normal new frame,
-        // save for the lack of an enterFrame event. Since this must happen
-        // before AS3 continues execution, this is effectively a "recursive
-        // frame".
-        //
-        // Our queued place tags will now run at this time, too.
         if !is_implicit {
+            // On AVM2, all explicit gotos act the same way as a normal new frame,
+            // save for the lack of an enterFrame event. Since this must happen
+            // before AS3 continues execution, this is effectively a "recursive
+            // frame".
+            //
+            // Our queued place tags will now run at this time, too.
             run_inner_goto_frame(context, &removed_frame_scripts, self);
         }
 
@@ -1881,8 +1906,9 @@ impl<'gc> MovieClip<'gc> {
                 );
 
                 if let Ok(prototype) = constructor
+                    // TODO(moulins): should this use `Object::prototype`?
                     .get(istr!("prototype"), &mut activation)
-                    .map(|v| v.coerce_to_object(&mut activation))
+                    .and_then(|v| v.coerce_to_object_or_bare(&mut activation))
                 {
                     let object = Avm1Object::new_with_native(
                         &activation.context.strings,
@@ -2014,13 +2040,11 @@ impl<'gc> MovieClip<'gc> {
                 class_object.call_init(object.into(), Avm2FunctionArgs::empty(), &mut activation);
 
             if let Err(e) = result {
-                tracing::error!(
-                    "Got \"{:?}\" when constructing AVM2 side of movie clip of type {}",
+                Avm2::uncaught_error(
+                    &mut activation,
+                    Some(self.into()),
                     e,
-                    class_object
-                        .inner_class_definition()
-                        .name()
-                        .to_qualified_name(context.gc())
+                    "Error running AVM2 construction for movie clip",
                 );
             }
         }
@@ -2346,6 +2370,8 @@ impl<'gc> MovieClip<'gc> {
 
                     if is_fresh_frame {
                         if let Some(callable) = self.frame_script(frame_id) {
+                            let callable = Avm2Value::from(callable);
+
                             self.0.last_queued_script_frame.set(Some(frame_id));
                             self.0.has_pending_script.set(false);
                             self.0
@@ -2358,15 +2384,18 @@ impl<'gc> MovieClip<'gc> {
                                 .unwrap()
                                 .avm2_domain();
 
-                            if let Err(e) = Avm2::run_stack_frame_for_callable(
-                                callable,
+                            let mut activation = Avm2Activation::from_domain(context, domain);
+
+                            if let Err(e) = callable.call(
+                                &mut activation,
                                 avm2_object.into(),
-                                domain,
-                                context,
+                                Avm2FunctionArgs::empty(),
                             ) {
-                                tracing::error!(
-                                    "Error occurred when running AVM2 frame script: {}",
-                                    e
+                                Avm2::uncaught_error(
+                                    &mut activation,
+                                    Some(self.into()),
+                                    e,
+                                    "Error running AVM2 frame script",
                                 );
                             }
 
@@ -2382,6 +2411,11 @@ impl<'gc> MovieClip<'gc> {
         if let Some(frame) = goto_frame {
             self.run_goto(context, frame, false);
         }
+    }
+
+    fn check_has_pending_script(self) {
+        let has_pending_script = self.has_frame_script(self.0.current_frame.get());
+        self.0.has_pending_script.set(has_pending_script);
     }
 }
 
@@ -2475,7 +2509,7 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
                 self.construct_as_avm2_object(context);
                 self.on_construction_complete(context);
                 // If we're in the load frame and we were constructed by ActionScript,
-                // then we want to wait for the DisplayObject constructor to run
+                // then we want to wait for the Sprite constructor to run
                 // 'construct_frame' on children. This is observable by ActionScript -
                 // before calling super(), 'this.numChildren' will show a non-zero number
                 // when we have children placed on the load frame, but 'this.getChildAt(0)'
@@ -2485,12 +2519,28 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
                 let running_construct_frame = self
                     .0
                     .contains_flag(MovieClipFlags::RUNNING_CONSTRUCT_FRAME);
-                // The supercall constructor for display objects is responsible
-                // for triggering construct_frame on frame 1.
                 for child in self.iter_render_list() {
-                    if running_construct_frame && child.object2().is_none() {
-                        continue;
+                    // Under some conditions, we won't run `construct_frame` on
+                    // a not-yet-constructed child
+                    if child.object2().is_none() {
+                        // Avoid running recursively- if `Sprite.constructChildren`
+                        // was constructing this clip's children, and somehow
+                        // a child's construction triggered another `construct_frame`
+                        // on this clip, Flash avoids running `construct_frame` on
+                        // the non-constructed children of this clip.
+                        if running_construct_frame {
+                            continue;
+                        }
+
+                        // The supercall constructor for display objects is responsible
+                        // for triggering construct_frame on frame 1 (see above comment).
+                        // However, if the child has already been constructed, we run
+                        // `construct_frame` like normal.
+                        if child.manual_frame_construct() {
+                            continue;
+                        }
                     }
+
                     child.construct_frame(context);
                 }
             }
@@ -2499,8 +2549,7 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
         if *context.frame_phase == FramePhase::Construct {
             // Check for frame-scripts before starting the frame-script phase,
             // to differentiate the pre-existing scripts from those introduced during frame-script phase.
-            let has_pending_script = self.has_frame_script(self.0.current_frame.get());
-            self.0.has_pending_script.set(has_pending_script);
+            self.check_has_pending_script();
         }
     }
 
@@ -3732,7 +3781,7 @@ impl<'gc, 'a> MovieClipShared<'gc> {
         reader: &mut SwfStream<'a>,
         tag_len: usize,
         chunk_limit: &mut ExecutionLimit,
-    ) -> DecodeResult {
+    ) -> Result<ControlFlow, Error> {
         let start = reader.as_slice();
         let id = reader.read_character_id()?;
         let num_frames = reader.read_u16()?;
@@ -4056,7 +4105,10 @@ impl<'gc, 'a> MovieClipShared<'gc> {
 
         for _ in 0..num_symbols {
             let id = reader.read_u16()?;
-            let class_name = reader.read_str()?.decode(reader.encoding());
+
+            // Ensure invalid UTF-8 sequences are treated as raw bytes (matching AVM2 behavior)
+            // rather than being replaced with the Unicode replacement character.
+            let class_name = ruffle_wstr::from_utf8_bytes(reader.read_str()?.as_bytes());
 
             // Store the name and symbol with in the global data for this frame. The first time
             // we execute this frame (for any instance of this MovieClip), we will load the symbolclass
@@ -4227,15 +4279,28 @@ impl<'gc, 'a> MovieClip<'gc> {
                             }
                         }
                     }
-                    Err(e) => tracing::error!(
-                        "Got AVM2 error when attempting to lookup symbol class: {e:?}",
-                    ),
+                    Err(err) => {
+                        Avm2::uncaught_error(
+                            &mut activation,
+                            Some(self.into()),
+                            err,
+                            "Error attempting to lookup AVM2 symbol class",
+                        );
+                    }
                 }
             }
         }
         for script in eager_scripts {
-            if let Err(e) = script.globals(context) {
-                tracing::error!("Error running eager script: {:?}", e);
+            if let Err(err) = script.globals(context) {
+                // TODO can we skip this Activation construction?
+                let mut temp_activation = Avm2Activation::from_nothing(context);
+
+                Avm2::uncaught_error(
+                    &mut temp_activation,
+                    Some(self.into()),
+                    err,
+                    "Error running AVM2 eager script",
+                );
             }
         }
         Ok(())

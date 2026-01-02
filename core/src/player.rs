@@ -4,9 +4,13 @@ use crate::avm1::Object;
 use crate::avm1::Value;
 use crate::avm1::VariableDumper;
 use crate::avm1::{Activation, ActivationIdentifier};
-use crate::avm2::object::{EventObject as Avm2EventObject, Object as Avm2Object};
-use crate::avm2::{Activation as Avm2Activation, Avm2, CallStack};
+use crate::avm2::object::EventObject as Avm2EventObject;
+use crate::avm2::{Activation as Avm2Activation, Avm2, CallStack, SharedObjectObject};
 use crate::avm_rng::AvmRng;
+use crate::backend::navigator::ErrorResponse;
+use crate::backend::navigator::FetchReason;
+use crate::backend::navigator::OwnedFuture;
+use crate::backend::navigator::SuccessResponse;
 use crate::backend::ui::FontDefinition;
 use crate::backend::{
     audio::{AudioBackend, AudioManager},
@@ -16,6 +20,7 @@ use crate::backend::{
     ui::{MouseCursor, UiBackend},
 };
 use crate::compatibility_rules::CompatibilityRules;
+use crate::compatibility_rules::UrlRewriteStage;
 use crate::config::Letterbox;
 use crate::context::{ActionQueue, ActionType, RenderContext, UpdateContext};
 use crate::context_menu::{
@@ -32,6 +37,7 @@ use crate::events::{ButtonKeyCode, ClipEvent, ClipEventResult, KeyCode, MouseBut
 use crate::external::{ExternalInterface, ExternalInterfaceProvider, NullFsCommandProvider};
 use crate::external::{FsCommandProvider, Value as ExternalValue};
 use crate::focus_tracker::NavigationDirection;
+use crate::font::DefaultFont;
 use crate::frame_lifecycle::{run_all_phases_avm2, FramePhase};
 use crate::input::InputEvent;
 use crate::input::InputManager;
@@ -50,8 +56,9 @@ use crate::system_properties::SystemProperties;
 use crate::tag_utils::SwfMovie;
 use crate::timer::Timers;
 use crate::vminterface::Instantiator;
-use crate::DefaultFont;
+use crate::DEFAULT_PLAYER_VERSION;
 use async_channel::Sender;
+use enumset::EnumSet;
 use gc_arena::lock::GcRefLock;
 use gc_arena::{Collect, DynamicRootSet, Mutation, Rootable};
 use ruffle_macros::istr;
@@ -61,7 +68,7 @@ use ruffle_render::quality::StageQuality;
 use ruffle_render::transform::TransformStack;
 use ruffle_video::backend::VideoBackend;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::rc::{Rc, Weak as RcWeak};
@@ -70,10 +77,6 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use tracing::instrument;
 use web_time::Instant;
-
-/// The newest known Flash Player version, serves as a default to
-/// `player_version`.
-pub const NEWEST_PLAYER_VERSION: u8 = 32;
 
 #[cfg(feature = "default_font")]
 pub const FALLBACK_DEVICE_FONT: &[u8] = include_bytes!("../assets/notosans.subset.ttf.gz");
@@ -168,7 +171,7 @@ struct GcRootData<'gc> {
 
     avm1_shared_objects: HashMap<String, Object<'gc>>,
 
-    avm2_shared_objects: HashMap<String, Avm2Object<'gc>>,
+    avm2_shared_objects: HashMap<String, SharedObjectObject<'gc>>,
 
     /// Text fields with unbound variable bindings.
     unbound_text_fields: Vec<EditText<'gc>>,
@@ -227,7 +230,7 @@ impl<'gc> GcRootData<'gc> {
         &mut Option<DragObject<'gc>>,
         &mut LoadManager<'gc>,
         &mut HashMap<String, Object<'gc>>,
-        &mut HashMap<String, Avm2Object<'gc>>,
+        &mut HashMap<String, SharedObjectObject<'gc>>,
         &mut Vec<EditText<'gc>>,
         &mut Timers<'gc>,
         &mut Option<ContextMenuState<'gc>>,
@@ -1061,9 +1064,7 @@ impl Player {
         let changed_mouse_buttons = self
             .input
             .get_mouse_down_buttons()
-            .symmetric_difference(&prev_mouse_buttons)
-            .cloned()
-            .collect();
+            .symmetrical_difference(prev_mouse_buttons);
 
         if cfg!(feature = "avm_debug") {
             match event {
@@ -1380,7 +1381,7 @@ impl Player {
 
             // This fires button rollover/press events, which should run after the above mouseMove events.
             if self.update_mouse_state(
-                &changed_mouse_buttons,
+                changed_mouse_buttons,
                 is_mouse_moved,
                 &mut player_event_handled,
             ) {
@@ -1414,7 +1415,7 @@ impl Player {
         }
 
         if let InputEvent::MouseLeave = event {
-            if self.update_mouse_state(&changed_mouse_buttons, true, &mut player_event_handled) {
+            if self.update_mouse_state(changed_mouse_buttons, true, &mut player_event_handled) {
                 self.needs_render = true;
             }
         }
@@ -1516,7 +1517,7 @@ impl Player {
     /// Updates the hover state of buttons.
     fn update_mouse_state(
         &mut self,
-        changed_mouse_buttons: &HashSet<MouseButton>,
+        changed_mouse_buttons: EnumSet<MouseButton>,
         is_mouse_moved: bool,
         player_event_handled: &mut bool,
     ) -> bool {
@@ -1605,7 +1606,7 @@ impl Player {
                     context.mouse_data.hovered.is_none() && context.mouse_data.pressed.is_none();
                 if !object_removed {
                     mouse_cursor_needs_check = false;
-                    if changed_mouse_buttons.contains(&MouseButton::Left) {
+                    if changed_mouse_buttons.contains(MouseButton::Left) {
                         // The object is pressed/released and may be removed immediately, we need to check
                         // in the next frame if it still exists. If it doesn't, we'll update the cursor.
                         mouse_cursor_needs_check = true;
@@ -1614,7 +1615,7 @@ impl Player {
                     mouse_cursor_needs_check = false;
                     new_cursor = MouseCursor::Arrow;
                 } else if !context.input.is_mouse_down(MouseButton::Left)
-                    && (is_mouse_moved || changed_mouse_buttons.contains(&MouseButton::Left))
+                    && (is_mouse_moved || changed_mouse_buttons.contains(MouseButton::Left))
                 {
                     // In every other case, the cursor remains until the user interacts with the mouse again.
                     new_cursor = MouseCursor::Arrow;
@@ -1658,33 +1659,64 @@ impl Player {
                         }
                     }
 
-                    // While dragging, dispatch hover roll events only for AVM2 targets.
-                    if let Some(cur_over_object) = cur_over_object {
-                        if cur_over_object
-                            .as_displayobject()
-                            .movie()
-                            .is_action_script_3()
-                        {
-                            events.push((
-                                cur_over_object,
-                                ClipEvent::RollOut {
-                                    to: new_over_object,
-                                },
-                            ));
+                    // While dragging, dispatch hover roll/drag events.
+                    // Suppress RollOver/RollOut and DragOver/DragOut events to hovered objects while AVM1 startDrag is active
+                    let suppress_hover_events = context.drag_object.is_some()
+                        && !context.stage.movie().is_action_script_3();
+
+                    if !suppress_hover_events {
+                        // For AVM1, avoid roll events while dragging; only drag events should be emitted.
+                        let allow_roll_while_dragging = context.stage.movie().is_action_script_3();
+
+                        if let Some(cur_over_object) = cur_over_object {
+                            if allow_roll_while_dragging {
+                                events.push((
+                                    cur_over_object,
+                                    ClipEvent::RollOut {
+                                        to: new_over_object,
+                                    },
+                                ));
+                            }
+                            if !InteractiveObject::option_ptr_eq(
+                                context.mouse_data.pressed,
+                                Some(cur_over_object),
+                            ) && !cur_over_object
+                                .as_displayobject()
+                                .movie()
+                                .is_action_script_3()
+                            {
+                                events.push((
+                                    cur_over_object,
+                                    ClipEvent::DragOut {
+                                        to: new_over_object,
+                                    },
+                                ));
+                            }
                         }
-                    }
-                    if let Some(new_over_object) = new_over_object {
-                        if new_over_object
-                            .as_displayobject()
-                            .movie()
-                            .is_action_script_3()
-                        {
-                            events.push((
-                                new_over_object,
-                                ClipEvent::RollOver {
-                                    from: cur_over_object,
-                                },
-                            ));
+                        if let Some(new_over_object) = new_over_object {
+                            if allow_roll_while_dragging {
+                                events.push((
+                                    new_over_object,
+                                    ClipEvent::RollOver {
+                                        from: cur_over_object,
+                                    },
+                                ));
+                            }
+                            if !InteractiveObject::option_ptr_eq(
+                                context.mouse_data.pressed,
+                                Some(new_over_object),
+                            ) && !new_over_object
+                                .as_displayobject()
+                                .movie()
+                                .is_action_script_3()
+                            {
+                                events.push((
+                                    new_over_object,
+                                    ClipEvent::DragOver {
+                                        from: cur_over_object,
+                                    },
+                                ));
+                            }
                         }
                     }
                 } else {
@@ -1717,7 +1749,7 @@ impl Player {
             }
             // Handle presses and releases.
             for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
-                if !changed_mouse_buttons.contains(&button) {
+                if !changed_mouse_buttons.contains(button) {
                     continue;
                 }
 
@@ -2142,6 +2174,7 @@ impl Player {
                         ActivationIdentifier::root("[Construct]"),
                         action.clip,
                     );
+                    // TODO(moulins): should this use `Object::prototype`?
                     if let Ok(prototype) = constructor.get(istr!("prototype"), &mut activation) {
                         if let Some(object) = action.clip.object1() {
                             object.define_value(
@@ -2352,7 +2385,7 @@ impl Player {
         self.mutate_with_update_context(|context| {
             Self::update_drag(context);
         });
-        self.update_mouse_state(&HashSet::new(), false, &mut false);
+        self.update_mouse_state(EnumSet::empty(), false, &mut false);
 
         // GC
         self.gc_arena.borrow_mut().collect_debt();
@@ -2376,12 +2409,14 @@ impl Player {
 
             let mut avm2_activation = Avm2Activation::from_nothing(context);
             for so in avm2_activation.context.avm2_shared_objects.clone().values() {
-                if let Err(e) = crate::avm2::globals::flash::net::shared_object::flush(
+                if crate::avm2::globals::flash::net::shared_object::flush_impl(
                     &mut avm2_activation,
-                    Avm2Value::Object(*so),
-                    &[],
-                ) {
-                    tracing::error!("Error flushing AVM2 shared object `{:?}`: {:?}", so, e);
+                    *so,
+                    0,
+                )
+                .is_err()
+                {
+                    tracing::error!("Error flushing AVM2 shared object");
                 }
             }
         });
@@ -2478,6 +2513,51 @@ impl Player {
         self.mutate_with_update_context(|context| {
             context.library.set_default_font(font, names);
         });
+    }
+
+    pub fn fetch(
+        &self,
+        mut request: Request,
+        fetch_reason: FetchReason,
+    ) -> OwnedFuture<Box<dyn SuccessResponse>, ErrorResponse> {
+        match self.compatibility_rules.block_or_rewrite_swf_url(
+            request.url().into(),
+            UrlRewriteStage::BeforeRequest,
+            fetch_reason,
+        ) {
+            Ok(Some(new_url)) => request.set_url(new_url),
+            Ok(None) => {}
+            Err(error) => return Box::pin(async move { Err(error) }),
+        }
+
+        let self_reference = self.self_reference.clone();
+        let fetch = self.navigator.fetch(request);
+        Box::pin(async move {
+            let response = fetch.await;
+
+            let Ok(mut response) = response else {
+                return response;
+            };
+
+            let Some(player) = self_reference.upgrade() else {
+                return Ok(response);
+            };
+
+            let new_url = player
+                .lock()
+                .unwrap()
+                .compatibility_rules
+                .block_or_rewrite_swf_url(
+                    response.url(),
+                    UrlRewriteStage::AfterResponse,
+                    fetch_reason,
+                )?;
+            if let Some(new_url) = new_url {
+                response.set_url(new_url);
+            }
+
+            Ok(response)
+        })
     }
 }
 
@@ -2907,7 +2987,7 @@ impl PlayerBuilder {
             .video
             .unwrap_or_else(|| Box::new(null::NullVideoBackend::new()));
 
-        let player_version = self.player_version.unwrap_or(NEWEST_PLAYER_VERSION);
+        let player_version = self.player_version.unwrap_or(DEFAULT_PLAYER_VERSION);
         let language = ui.language();
 
         // Instantiate the player.

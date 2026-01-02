@@ -5,7 +5,7 @@ use std::cell::{Ref, RefMut};
 use crate::avm2::activation::Activation;
 use crate::avm2::bytearray::ByteArrayStorage;
 use crate::avm2::class::Class;
-use crate::avm2::error::{error, reference_error, Error};
+use crate::avm2::error::{make_error_1065, make_error_1504, Error};
 use crate::avm2::object::{ByteArrayObject, TObject};
 use crate::avm2::property_map::PropertyMap;
 use crate::avm2::script::Script;
@@ -16,7 +16,6 @@ use crate::string::AvmString;
 use gc_arena::barrier::unlock;
 use gc_arena::lock::{Lock, OnceLock, RefLock};
 use gc_arena::{Collect, Gc, GcWeak, Mutation};
-use ruffle_macros::istr;
 use ruffle_wstr::WStr;
 
 /// Represents a set of scripts and movies that share traits across different
@@ -139,10 +138,10 @@ impl<'gc> Domain<'gc> {
     ///
     /// This function must not be called before the player globals have been
     /// fully allocated.
-    pub fn movie_domain(activation: &mut Activation<'_, 'gc>, parent: Domain<'gc>) -> Domain<'gc> {
-        let domain_memory = Self::create_default_domain_memory(activation);
+    pub fn movie_domain(context: &mut UpdateContext<'gc>, parent: Domain<'gc>) -> Domain<'gc> {
+        let domain_memory = Self::create_default_domain_memory(context);
         let this = Self(Gc::new(
-            activation.gc(),
+            context.gc(),
             DomainData {
                 cell: RefLock::new(DomainDataMut {
                     defs: PropertyMap::new(),
@@ -159,7 +158,7 @@ impl<'gc> Domain<'gc> {
         #[cfg(feature = "egui")]
         {
             parent
-                .cell_mut(activation.gc())
+                .cell_mut(context.gc())
                 .children
                 .push(DomainWeak(Gc::downgrade(this.0)));
         }
@@ -264,14 +263,7 @@ impl<'gc> Domain<'gc> {
     ) -> Result<(QName<'gc>, Script<'gc>), Error<'gc>> {
         match self.get_defining_script(multiname) {
             Some(val) => Ok(val),
-            None => Err(Error::avm_error(reference_error(
-                activation,
-                &format!(
-                    "Error #1065: Variable {} is not defined.",
-                    multiname.local_name().unwrap_or(istr!("*"))
-                ),
-                1065,
-            )?)),
+            None => Err(make_error_1065(activation, multiname)),
         }
     }
 
@@ -384,11 +376,7 @@ impl<'gc> Domain<'gc> {
     ) -> Result<(), Error<'gc>> {
         let memory = if let Some(domain_memory) = domain_memory {
             if domain_memory.storage().len() < MIN_DOMAIN_MEMORY_LENGTH {
-                return Err(Error::avm_error(error(
-                    activation,
-                    "Error #1504: End of file.",
-                    1504,
-                )?));
+                return Err(make_error_1504(activation));
             }
             domain_memory
         } else {
@@ -400,10 +388,10 @@ impl<'gc> Domain<'gc> {
         Ok(())
     }
 
-    fn create_default_domain_memory(activation: &mut Activation<'_, 'gc>) -> ByteArrayObject<'gc> {
+    fn create_default_domain_memory(context: &mut UpdateContext<'gc>) -> ByteArrayObject<'gc> {
         let initial_data = vec![0; MIN_DOMAIN_MEMORY_LENGTH];
-        let storage = ByteArrayStorage::from_vec(activation.context, initial_data);
-        ByteArrayObject::from_storage(activation, storage)
+        let storage = ByteArrayStorage::from_vec(context, initial_data);
+        ByteArrayObject::from_storage(context, storage)
     }
 
     /// Allocate the default domain memory for this domain, if it does not
@@ -411,10 +399,10 @@ impl<'gc> Domain<'gc> {
     ///
     /// This function is only necessary to be called for domains created via
     /// `global_domain`. It will panic on already fully-initialized domains.
-    pub fn init_default_domain_memory(self, activation: &mut Activation<'_, 'gc>) {
-        let memory = Self::create_default_domain_memory(activation);
+    pub fn init_default_domain_memory(self, context: &mut UpdateContext<'gc>) {
+        let memory = Self::create_default_domain_memory(context);
 
-        let write = Gc::write(activation.gc(), self.0);
+        let write = Gc::write(context.gc(), self.0);
         match unlock!(write, DomainData, default_domain_memory).set(memory) {
             Ok(_) => unlock!(write, DomainData, domain_memory).set(Some(memory)),
             Err(_) => panic!("Already initialized domain memory!"),

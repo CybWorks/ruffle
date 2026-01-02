@@ -6,7 +6,6 @@ use crate::environment::NativeEnvironment;
 use crate::external_interface::tests::{external_interface_avm1, external_interface_avm2};
 use crate::shared_object::{shared_object_avm1, shared_object_avm2, shared_object_self_ref_avm1};
 use anyhow::Context;
-use anyhow::Result;
 use clap::Parser;
 use libtest_mimic::Trial;
 use ruffle_fs_tests_runner::FsTestsRunner;
@@ -15,7 +14,6 @@ use ruffle_test_framework::runner::TestStatus;
 use ruffle_test_framework::test::Test;
 use ruffle_test_framework::vfs::VfsPath;
 use std::borrow::Cow;
-use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::thread::sleep;
 
@@ -104,45 +102,28 @@ fn load_test_dir<'a>(test_dir: &'a VfsPath, name: &'a str) -> impl Iterator<Item
 
 fn trial_for_test(opts: &RuffleTestOpts, test: Test, list_only: bool) -> Trial {
     let ignore = !test.should_run(opts.ignore_known_failures, !list_only, &NativeEnvironment);
-    let subtest_name = test.options.subtest_name.clone();
 
-    let mut trial = Trial::test(test.name.clone(), move || {
-        let test = AssertUnwindSafe(test);
-        let unwind_result = catch_unwind(|| {
-            let mut runner = test.create_test_runner(&NativeEnvironment)?;
+    // Put extra info into the test 'kind' instead of appending it to the test name,
+    // to not break `cargo test some/test -- --exact` and `cargo test -- --list`.
+    let mut test_kind = String::new();
+    if test.options.has_known_failure() {
+        test_kind.push('!');
+    }
+    if let Some(name) = &test.options.subtest_name {
+        test_kind.push_str(name);
+    }
 
-            loop {
-                runner.tick();
-                match runner.test()? {
-                    TestStatus::Continue => {}
-                    TestStatus::Sleep(duration) => sleep(duration),
-                    TestStatus::Finished => break,
-                }
-            }
+    let trial = Trial::test(test.name.clone(), move || {
+        let mut runner = test.create_test_runner(&NativeEnvironment)?;
 
-            Result::<_>::Ok(())
-        });
-        if test.options.known_failure {
-            match unwind_result {
-                Ok(Ok(())) => Err(
-                    format!("{} was known to be failing, but now passes successfully. Please update it and remove `known_failure = true`!", test.name).into()
-                ),
-                Ok(Err(_)) | Err(_) => Ok(()),
-            }
-        } else {
-            match unwind_result {
-                Ok(r) => Ok(r?),
-                Err(e) => resume_unwind(e),
+        loop {
+            match runner.tick()? {
+                TestStatus::Continue => (),
+                TestStatus::Sleep(duration) => sleep(duration),
+                TestStatus::Finished => break Ok(()),
             }
         }
     });
-    if ignore {
-        trial = trial.with_ignored_flag(true);
-    }
-    if let Some(name) = subtest_name {
-        // Put the subtest name as the test 'kind' instead of appending it to the test name,
-        // to not break `cargo test some/test -- --exact` and `cargo test -- --list`.
-        trial = trial.with_kind(name);
-    }
-    trial
+
+    trial.with_ignored_flag(ignore).with_kind(test_kind)
 }

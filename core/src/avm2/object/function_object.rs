@@ -1,6 +1,7 @@
 //! Function object impl
 
 use crate::avm2::activation::Activation;
+use crate::avm2::error::make_error_1064;
 use crate::avm2::function::{BoundMethod, FunctionArgs};
 use crate::avm2::method::Method;
 use crate::avm2::object::script_object::{ScriptObject, ScriptObjectData};
@@ -8,11 +9,12 @@ use crate::avm2::object::{ClassObject, Object, TObject};
 use crate::avm2::scope::ScopeChain;
 use crate::avm2::value::Value;
 use crate::avm2::Error;
+use crate::context::UpdateContext;
 use crate::string::AvmString;
-use crate::utils::HasPrefixField;
 use core::fmt;
 use gc_arena::barrier::unlock;
 use gc_arena::{lock::Lock, Collect, Gc, GcWeak, Mutation};
+use ruffle_common::utils::HasPrefixField;
 use ruffle_macros::istr;
 
 /// An Object which can be called to execute its function code.
@@ -57,19 +59,19 @@ impl<'gc> FunctionObject<'gc> {
     /// It is the caller's responsibility to ensure that the `receiver` passed
     /// to this method is not Value::Null or Value::Undefined.
     pub fn from_method(
-        activation: &mut Activation<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         method: Method<'gc>,
         scope: ScopeChain<'gc>,
         receiver: Option<Value<'gc>>,
         bound_superclass_object: Option<ClassObject<'gc>>,
     ) -> FunctionObject<'gc> {
-        let fn_class = activation.avm2().classes().function;
+        let fn_class = context.avm2.classes().function;
         let exec = BoundMethod::from_method(method, scope, receiver, bound_superclass_object);
 
-        let es3_proto = ScriptObject::new_object(activation);
+        let es3_proto = ScriptObject::new_object(context);
 
         let function_object = FunctionObject(Gc::new(
-            activation.gc(),
+            context.gc(),
             FunctionObjectData {
                 base: ScriptObjectData::new(fn_class),
                 exec,
@@ -77,11 +79,11 @@ impl<'gc> FunctionObject<'gc> {
             },
         ));
 
-        let constructor_prop = istr!("constructor");
+        let constructor_prop = istr!(context, "constructor");
 
         // Set the constructor property on the prototype to point back to this function
-        es3_proto.set_dynamic_property(constructor_prop, function_object.into(), activation.gc());
-        es3_proto.set_local_property_is_enumerable(activation.gc(), constructor_prop, false);
+        es3_proto.set_dynamic_property(constructor_prop, function_object.into(), context.gc());
+        es3_proto.set_local_property_is_enumerable(context.gc(), constructor_prop, false);
 
         function_object
     }
@@ -102,6 +104,13 @@ impl<'gc> FunctionObject<'gc> {
         activation: &mut Activation<'_, 'gc>,
         arguments: FunctionArgs<'_, 'gc>,
     ) -> Result<Object<'gc>, Error<'gc>> {
+        let method = self.0.exec.as_method();
+        if method.bound_class().is_some() {
+            // If the Method is class-bound, attempting to construct it throws
+            // an error
+            return Err(make_error_1064(activation, method));
+        }
+
         let object_class = activation.avm2().classes().object;
 
         let prototype = if let Some(proto) = self.prototype() {

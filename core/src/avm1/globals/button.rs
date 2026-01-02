@@ -4,7 +4,7 @@ use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::globals::bitmap_filter;
 use crate::avm1::globals::movie_clip::{new_rectangle, object_to_rectangle};
-use crate::avm1::property_decl::{DeclContext, Declaration, SystemClass};
+use crate::avm1::property_decl::{DeclContext, StaticDeclarations, SystemClass};
 use crate::avm1::ArrayBuilder;
 use crate::avm1::{globals, Object, Value};
 use crate::avm1_stub;
@@ -38,15 +38,16 @@ macro_rules! button_setter {
     };
 }
 
-const PROTO_DECLS: &[Declaration] = declare_properties! {
-    "enabled" => bool(true);
+const PROTO_DECLS: StaticDeclarations = declare_static_properties! {
     "useHandCursor" => bool(true);
-    "getDepth" => method(globals::get_depth; DONT_DELETE | READ_ONLY | VERSION_6);
-    "blendMode" => property(button_getter!(blend_mode), button_setter!(set_blend_mode); DONT_DELETE | VERSION_8);
-    "scale9Grid" => property(button_getter!(scale_9_grid), button_setter!(set_scale_9_grid); DONT_DELETE | DONT_ENUM | VERSION_8);
-    "filters" => property(button_getter!(filters), button_setter!(set_filters); DONT_DELETE | DONT_ENUM | VERSION_8);
-    "cacheAsBitmap" => property(button_getter!(cache_as_bitmap), button_setter!(set_cache_as_bitmap); DONT_DELETE | DONT_ENUM | VERSION_8);
+    "enabled" => bool(true);
+    "getDepth" => method(globals::get_depth; VERSION_6);
+    "scale9Grid" => property(button_getter!(scale_9_grid), button_setter!(set_scale_9_grid); READ_ONLY | VERSION_8);
+    "filters" => property(button_getter!(filters), button_setter!(set_filters); READ_ONLY | VERSION_8);
+    "cacheAsBitmap" => property(button_getter!(cache_as_bitmap), button_setter!(set_cache_as_bitmap); READ_ONLY | VERSION_8);
+    "blendMode" => property(button_getter!(blend_mode), button_setter!(set_blend_mode); READ_ONLY | VERSION_8);
     // NOTE: `tabEnabled` is not a built-in property of Button.
+    // TODO tabIndex shouldn't be defined here
     "tabIndex" => property(button_getter!(tab_index), button_setter!(set_tab_index); VERSION_6);
 };
 
@@ -55,7 +56,7 @@ pub fn create_class<'gc>(
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
     let class = context.empty_class(super_proto);
-    context.define_properties_on(class.proto, PROTO_DECLS);
+    context.define_properties_on(class.proto, PROTO_DECLS(context));
     class
 }
 
@@ -102,7 +103,9 @@ fn set_filters<'gc>(
     let mut filters = vec![];
     if let Value::Object(value) = value {
         for index in value.get_keys(activation, false).into_iter().rev() {
-            let filter_object = value.get(index, activation)?.coerce_to_object(activation);
+            let filter_object = value
+                .get(index, activation)?
+                .coerce_to_object_or_bare(activation)?;
             if let Some(filter) = bitmap_filter::avm1_to_filter(filter_object, activation.context) {
                 filters.push(filter);
             }

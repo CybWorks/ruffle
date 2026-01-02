@@ -6,6 +6,7 @@ package flash.display {
         public function MovieClip() {}
 
         public native function get currentFrame():int;
+        [API("662")]
         public native function get currentFrameLabel():String;
         public native function get currentLabel():String;
         public native function get currentLabels():Array;
@@ -17,6 +18,7 @@ package flash.display {
         public native function get isPlaying():Boolean;
         public native function get scenes():Array;
         public native function get totalFrames():int;
+
         public function get trackAsMenu():Boolean {
             stub_getter("flash.display.MovieClip", "trackAsMenu");
             return false;

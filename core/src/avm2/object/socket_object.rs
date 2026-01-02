@@ -4,10 +4,11 @@ use crate::avm2::object::script_object::ScriptObjectData;
 use crate::avm2::object::{ClassObject, Object, TObject};
 use crate::avm2::Activation;
 use crate::socket::SocketHandle;
-use crate::utils::HasPrefixField;
 use gc_arena::GcWeak;
 use gc_arena::{Collect, Gc};
+use ruffle_common::utils::HasPrefixField;
 use std::cell::{Cell, RefCell, RefMut};
+use std::collections::VecDeque;
 use std::fmt;
 
 /// A class instance allocator that allocates ShaderData objects.
@@ -26,7 +27,7 @@ pub fn socket_allocator<'gc>(
             object_encoding: Cell::new(ObjectEncoding::Amf3),
             timeout: Cell::new(0),
             handle: Cell::new(None),
-            read_buffer: RefCell::new(vec![]),
+            read_buffer: RefCell::new(VecDeque::new()),
             write_buffer: RefCell::new(vec![]),
         },
     ))
@@ -82,7 +83,7 @@ impl<'gc> SocketObject<'gc> {
         self.0.handle.replace(Some(handle))
     }
 
-    pub fn read_buffer(&self) -> RefMut<'_, Vec<u8>> {
+    pub fn read_buffer(&self) -> RefMut<'_, VecDeque<u8>> {
         self.0.read_buffer.borrow_mut()
     }
 
@@ -199,7 +200,7 @@ pub struct SocketObjectData<'gc> {
     /// Socket connection timeout in milliseconds.
     timeout: Cell<u32>,
 
-    read_buffer: RefCell<Vec<u8>>,
+    read_buffer: RefCell<VecDeque<u8>>,
     write_buffer: RefCell<Vec<u8>>,
 }
 

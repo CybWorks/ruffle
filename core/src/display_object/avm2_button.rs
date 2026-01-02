@@ -3,8 +3,8 @@ use super::dispatch_added_event_only;
 use super::interactive::Avm2MousePick;
 use crate::avm1::Object as Avm1Object;
 use crate::avm2::{
-    Activation as Avm2Activation, ClassObject as Avm2ClassObject, FunctionArgs as Avm2FunctionArgs,
-    StageObject as Avm2StageObject,
+    Activation as Avm2Activation, Avm2, ClassObject as Avm2ClassObject,
+    FunctionArgs as Avm2FunctionArgs, StageObject as Avm2StageObject,
 };
 use crate::backend::audio::AudioManager;
 use crate::backend::ui::MouseCursor;
@@ -14,16 +14,18 @@ use crate::display_object::container::{dispatch_added_event, dispatch_removed_ev
 use crate::display_object::interactive::{InteractiveObjectBase, TInteractiveObject};
 use crate::display_object::{DisplayObjectBase, MovieClip};
 use crate::events::{ClipEvent, ClipEventResult};
-use crate::frame_lifecycle::catchup_display_object_to_frame;
+use crate::frame_lifecycle::{
+    broadcast_frame_constructed, broadcast_frame_exited, catchup_display_object_to_frame,
+};
 use crate::prelude::*;
 use crate::tag_utils::{SwfMovie, SwfSlice};
-use crate::utils::HasPrefixField;
 use crate::vminterface::Instantiator;
 use core::fmt;
 use either::Either;
 use gc_arena::barrier::unlock;
 use gc_arena::lock::Lock;
 use gc_arena::{Collect, Gc, Mutation};
+use ruffle_common::utils::HasPrefixField;
 use ruffle_render::filters::Filter;
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
@@ -363,15 +365,17 @@ impl<'gc> Avm2Button<'gc> {
                 dispatch_removed_event(old_state_child, context);
             }
 
-            if let Some(child) = child {
-                child.frame_constructed(context);
+            // FIXME is this correct?
+            if child.is_some() {
+                broadcast_frame_constructed(context);
             }
         }
 
         if is_cur_state {
             if let Some(child) = child {
                 child.run_frame_scripts(context);
-                child.exit_frame(context);
+                // FIXME is this correct?
+                broadcast_frame_exited(context);
             }
         }
     }
@@ -527,10 +531,10 @@ impl<'gc> TDisplayObject<'gc> for Avm2Button<'gc> {
 
                     let stage = context.stage;
                     stage.construct_frame(context);
-                    stage.frame_constructed(context);
+                    broadcast_frame_constructed(context);
                     self.set_state(context, ButtonState::Up);
                     stage.run_frame_scripts(context);
-                    stage.exit_frame(context);
+                    broadcast_frame_exited(context);
                 }
 
                 if let Some(avm2_object) = self.0.object.get() {
@@ -541,8 +545,13 @@ impl<'gc> TDisplayObject<'gc> for Avm2Button<'gc> {
                         &mut activation,
                     );
 
-                    if let Err(e) = result {
-                        tracing::error!("Got {} when constructing AVM2 side of button", e);
+                    if let Err(err) = result {
+                        Avm2::uncaught_error(
+                            &mut activation,
+                            Some(self.into()),
+                            err,
+                            "Error running AVM2 construction for button",
+                        );
                     }
                 }
 

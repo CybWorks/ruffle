@@ -3,7 +3,7 @@
 use crate::avm1::clamp::Clamp;
 use crate::avm1::globals::bevel_filter::BevelFilterType;
 use crate::avm1::object::NativeObject;
-use crate::avm1::property_decl::{DeclContext, Declaration, SystemClass};
+use crate::avm1::property_decl::{DeclContext, StaticDeclarations, SystemClass};
 use crate::avm1::{Activation, ArrayBuilder, Error, Object, Value};
 use gc_arena::{Collect, Gc, Mutation};
 use ruffle_macros::istr;
@@ -187,7 +187,7 @@ impl<'gc> GradientFilter<'gc> {
         // FP 11 and FP 32 behave differently here: in FP 11, only "true" objects resize
         // the matrix, but in FP 32 strings will too (and so fill the matrix with `NaN`
         // values, as they have a `length` but no actual elements).
-        let object = value.coerce_to_object(activation);
+        let object = value.coerce_to_object_or_bare(activation)?;
         let length = usize::try_from(object.length(activation)?).unwrap_or_default();
         let num_colors = length.min(MAX_COLORS);
 
@@ -385,7 +385,7 @@ impl<'gc> GradientFilter<'gc> {
     }
 }
 
-const PROTO_DECLS: &[Declaration] = declare_properties! {
+const PROTO_DECLS: StaticDeclarations = declare_static_properties! {
     use fn method;
     "distance" => property(GET_DISTANCE, SET_DISTANCE; VERSION_8);
     "angle" => property(GET_ANGLE, SET_ANGLE; VERSION_8);
@@ -409,7 +409,7 @@ pub fn create_bevel_class<'gc>(
         None,
         super_proto,
     );
-    context.define_properties_on(class.proto, PROTO_DECLS);
+    context.define_properties_on(class.proto, PROTO_DECLS(context));
     class
 }
 
@@ -422,7 +422,7 @@ pub fn create_glow_class<'gc>(
         None,
         super_proto,
     );
-    context.define_properties_on(class.proto, PROTO_DECLS);
+    context.define_properties_on(class.proto, PROTO_DECLS(context));
     class
 }
 

@@ -19,7 +19,7 @@ use crate::events::{
     ClipEvent, ClipEventResult, ImeCursorArea, ImeEvent, ImeNotification, ImePurpose,
     PlayerNotification, TextControlCode,
 };
-use crate::font::{FontLike, FontType, Glyph, TextRenderSettings};
+use crate::font::{FontLike, FontType, TextRenderSettings};
 use crate::html;
 use crate::html::StyleSheet;
 use crate::html::{
@@ -28,7 +28,6 @@ use crate::html::{
 use crate::prelude::*;
 use crate::string::{utils as string_utils, AvmString, SwfStrExt as _, WStr, WString};
 use crate::tag_utils::SwfMovie;
-use crate::utils::HasPrefixField;
 use crate::vminterface::{AvmObject, Instantiator};
 use chrono::DateTime;
 use chrono::Utc;
@@ -36,6 +35,7 @@ use core::fmt;
 use gc_arena::barrier::unlock;
 use gc_arena::lock::{Lock, RefLock};
 use gc_arena::{Collect, Gc, Mutation};
+use ruffle_common::utils::HasPrefixField;
 use ruffle_macros::istr;
 use ruffle_render::commands::Command as RenderCommand;
 use ruffle_render::commands::CommandHandler;
@@ -826,16 +826,9 @@ impl<'gc> EditText<'gc> {
     /// This `text_transform` is separate from and relative to the base
     /// transform that this `EditText` automatically gets by virtue of being a
     /// `DisplayObject`.
-    pub fn text_transform(self, color: Color, baseline_adjustment: Twips) -> Transform {
+    pub fn text_transform(self, color: Color) -> Transform {
         let mut transform: Transform = Default::default();
         transform.color_transform.set_mult_color(color);
-
-        // TODO MIKE: This feels incorrect here but is necessary for correct vertical position;
-        // the glyphs are rendered relative to the baseline. This should be taken into account either
-        // by the layout code earlier (cursor should start at the baseline, not 0,0) and/or by
-        // font.evaluate (should return transforms relative to the baseline).
-        transform.matrix.ty = baseline_adjustment;
-
         transform
     }
 
@@ -1273,15 +1266,14 @@ impl<'gc> EditText<'gc> {
         {
             let baseline = font.get_baseline_for_height(params.height());
             let descent = font.get_descent_for_height(params.height());
-            let baseline_adjustment = baseline - params.height();
             let caret_height = baseline + descent;
             let mut caret_x = Twips::ZERO;
             font.evaluate(
                 text,
-                self.text_transform(color, baseline_adjustment),
+                self.text_transform(color),
                 params,
-                |pos, transform, glyph: &Glyph, advance, x| {
-                    if let Some(glyph_shape_handle) = glyph.shape_handle(context.renderer) {
+                |pos, transform, glyph, advance, x| {
+                    if glyph.renderable(context) {
                         // If it's highlighted, override the color.
                         if matches!(visible_selection, Some(visible_selection) if visible_selection.contains(start + pos)) {
                             // Set text color to white
@@ -1293,11 +1285,7 @@ impl<'gc> EditText<'gc> {
                         } else {
                             context.transform_stack.push(transform);
                         }
-
-                        // Render glyph.
-                        context
-                            .commands
-                            .render_shape(glyph_shape_handle, context.transform_stack.transform());
+                        glyph.render(context);
                         context.transform_stack.pop();
                     }
 
@@ -1633,13 +1621,11 @@ impl<'gc> EditText<'gc> {
                 layout_box.as_renderable_text(self.0.text_spans.borrow().text())
             {
                 let mut result = 0;
-                let baseline_adjustment =
-                    font.get_baseline_for_height(params.height()) - params.height();
                 font.evaluate(
                     text,
-                    self.text_transform(color, baseline_adjustment),
+                    self.text_transform(color),
                     params,
-                    |pos, _transform, _glyph: &Glyph, advance, x| {
+                    |pos, _transform, _glyph, advance, x| {
                         if local_position.x >= x {
                             if local_position.x > x + (advance / 2) {
                                 result = string_utils::next_char_boundary(text, pos);
@@ -2205,10 +2191,14 @@ impl<'gc> EditText<'gc> {
             Ok(object) => {
                 self.set_object(Some(object.into()), context.gc());
             }
-            Err(e) => tracing::error!(
-                "Got error when constructing AVM2 side of dynamic text field: {}",
-                e
-            ),
+            Err(err) => {
+                Avm2::uncaught_error(
+                    &mut activation,
+                    Some(self.into()),
+                    err,
+                    "Error running AVM2 construction for dynamic text",
+                );
+            }
         }
     }
 
@@ -2409,10 +2399,25 @@ impl<'gc> EditText<'gc> {
         Some(index - start_index)
     }
 
-    pub fn char_bounds(self, index: usize) -> Option<Rectangle<Twips>> {
-        let bounds = self.0.layout.borrow().char_bounds(index)?;
-        let padding = Self::GUTTER;
-        let bounds = Matrix::translate(padding, padding) * bounds;
+    pub fn char_bounds(self, position: usize) -> Option<Rectangle<Twips>> {
+        let layout = self.0.layout.borrow();
+
+        let line_index = layout.find_line_index_by_position(position)?;
+        if line_index + 1 < self.scroll() {
+            // Return null for lines above the viewport.
+            // TODO It also should return null for lines below the viewport,
+            //      but the logic is not trivial.
+            return None;
+        }
+
+        let line = layout.lines().get(line_index)?;
+        let bounds = line.char_bounds(position)?;
+        let bounds = self.layout_to_local_matrix() * bounds;
+
+        // FP does not apply hscroll to char boundaries, so just revert it.
+        // TODO Check if that's fixed in versions newer than 32.
+        let bounds =
+            Matrix::translate(Twips::from_pixels(self.0.hscroll.get()), Twips::ZERO) * bounds;
         Some(bounds)
     }
 

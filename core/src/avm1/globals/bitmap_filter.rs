@@ -11,13 +11,13 @@ use crate::avm1::globals::drop_shadow_filter::DropShadowFilter;
 use crate::avm1::globals::glow_filter::GlowFilter;
 use crate::avm1::globals::gradient_filter::GradientFilter;
 use crate::avm1::object::NativeObject;
-use crate::avm1::property_decl::{DeclContext, Declaration, SystemClass};
-use crate::avm1::{Attribute, Object, Value};
+use crate::avm1::property_decl::{DeclContext, StaticDeclarations, SystemClass};
+use crate::avm1::{Object, Value};
 use crate::context::UpdateContext;
 use ruffle_macros::istr;
 use ruffle_render::filters::Filter;
 
-const PROTO_DECLS: &[Declaration] = declare_properties! {
+const PROTO_DECLS: StaticDeclarations = declare_static_properties! {
     "clone" => method(clone);
 };
 
@@ -26,7 +26,7 @@ pub fn create_class<'gc>(
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
     let class = context.empty_class(super_proto);
-    context.define_properties_on(class.proto, PROTO_DECLS);
+    context.define_properties_on(class.proto, PROTO_DECLS(context));
     class
 }
 
@@ -65,8 +65,8 @@ pub fn clone<'gc>(
         }
         _ => return Ok(Value::Undefined),
     };
-    let proto = this.get_local_stored(istr!("__proto__"), activation, false);
-    Ok(create_instance(activation, native, proto).into())
+    let proto = this.get_local_stored(istr!("__proto__"), activation);
+    Ok(Object::new_with_native(activation.strings(), proto, native).into())
 }
 
 pub fn avm1_to_filter<'gc>(
@@ -149,26 +149,5 @@ pub fn filter_to_avm1<'gc>(activation: &mut Activation<'_, 'gc>, filter: Filter)
             )
         }
     };
-
-    create_instance(activation, native, Some(proto.into())).into()
-}
-
-pub fn create_instance<'gc>(
-    activation: &mut Activation<'_, 'gc>,
-    native: NativeObject<'gc>,
-    proto: Option<Value<'gc>>,
-) -> Object<'gc> {
-    let result = Object::new(activation.strings(), None);
-    // Set `__proto__` manually since `Object::new()` doesn't support primitive prototypes.
-    // TODO: Pass `proto` to `Object::new()` once possible.
-    if let Some(proto) = proto {
-        result.define_value(
-            activation.gc(),
-            istr!("__proto__"),
-            proto,
-            Attribute::DONT_ENUM | Attribute::DONT_DELETE,
-        );
-    }
-    result.set_native(activation.gc(), native);
-    result
+    Object::new_with_native(activation.strings(), Some(proto), native).into()
 }

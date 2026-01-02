@@ -22,32 +22,30 @@ pub trait ParametersExt<'gc> {
 
     /// Gets the value at the given index as an Object.
     /// The value will be coerced to an Object, even if it's undefined/missing.
-    fn get_object(&self, activation: &mut Activation<'_, 'gc>, index: usize) -> Object<'gc> {
-        self.get_value(index).coerce_to_object(activation)
+    fn get_object(
+        &self,
+        activation: &mut Activation<'_, 'gc>,
+        index: usize,
+    ) -> Result<Object<'gc>, Error<'gc>> {
+        self.get_value(index).coerce_to_object_or_bare(activation)
     }
 
     /// Tries to get the value at the given index as an Object.
-    /// The value will be coerced to an Object if it exists.
-    #[expect(dead_code)]
+    /// The value will be coerced to an Object if it exists and is coercible.
     fn try_get_object(
         &self,
         activation: &mut Activation<'_, 'gc>,
         index: usize,
-        undefined_behaviour: UndefinedAs,
-    ) -> Option<Object<'gc>> {
+    ) -> Result<Option<Object<'gc>>, Error<'gc>> {
         if let Some(value) = self.get_optional(index) {
-            if undefined_behaviour == UndefinedAs::None && value == Value::Undefined {
-                return None;
-            }
-            Some(value.coerce_to_object(activation))
+            value.coerce_to_object(activation)
         } else {
-            None
+            Ok(None)
         }
     }
 
     /// Get the value at the given index as a String.
     /// The value will be coerced to a String, even if it's undefined/missing.
-    #[expect(dead_code)]
     fn get_string(
         &self,
         activation: &mut Activation<'_, 'gc>,
@@ -76,14 +74,12 @@ pub trait ParametersExt<'gc> {
 
     /// Get the value at the given index as a bool.
     /// The value will be coerced to a bool, even if it's undefined/missing.
-    #[expect(dead_code)]
     fn get_bool(&self, activation: &mut Activation<'_, 'gc>, index: usize) -> bool {
         self.get_value(index).as_bool(activation.swf_version())
     }
 
     /// Tries to get the value at the given index as a bool.
     /// The value will be coerced to a bool if it exists.
-    #[expect(dead_code)]
     fn try_get_bool(
         &self,
         activation: &mut Activation<'_, 'gc>,
@@ -169,7 +165,6 @@ pub trait ParametersExt<'gc> {
 
     /// Gets the value at the given index as an u8.
     /// The value will be coerced to an u8 if it exists.
-    #[expect(dead_code)]
     fn try_get_u8(
         &self,
         activation: &mut Activation<'_, 'gc>,
@@ -226,7 +221,6 @@ pub trait ParametersExt<'gc> {
 
     /// Gets the value at the given index as an u32.
     /// The value will be coerced to an u32 if it exists.
-    #[expect(dead_code)]
     fn try_get_u32(
         &self,
         activation: &mut Activation<'_, 'gc>,
@@ -245,7 +239,6 @@ pub trait ParametersExt<'gc> {
 
     /// Gets the value at the given index as an f64.
     /// The value will be coerced to an f64, even if it's undefined/missing.
-    #[expect(dead_code)]
     fn get_f64(
         &self,
         activation: &mut Activation<'_, 'gc>,

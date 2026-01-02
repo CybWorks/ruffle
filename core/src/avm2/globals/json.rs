@@ -2,7 +2,7 @@
 
 use crate::avm2::activation::Activation;
 use crate::avm2::array::ArrayStorage;
-use crate::avm2::error::{make_error_1132, type_error};
+use crate::avm2::error::{make_error_1129, make_error_1131, make_error_1132};
 use crate::avm2::function::FunctionArgs;
 use crate::avm2::globals::array::ArrayIter;
 use crate::avm2::object::{ArrayObject, FunctionObject, Object, ScriptObject, TObject};
@@ -35,7 +35,7 @@ fn deserialize_json_inner<'gc>(
             }
         }
         JsonValue::Object(js_obj) => {
-            let obj = ScriptObject::new_object(activation);
+            let obj = ScriptObject::new_object(activation.context);
             for entry in js_obj.iter() {
                 let key = AvmString::new_utf8(activation.gc(), entry.0);
                 let val = deserialize_json_inner(activation, entry.1.clone(), reviver)?;
@@ -72,7 +72,7 @@ fn deserialize_json_inner<'gc>(
                 arr.push(Some(mapped_val));
             }
             let storage = ArrayStorage::from_storage(arr);
-            let array = ArrayObject::from_storage(activation, storage);
+            let array = ArrayObject::from_storage(activation.context, storage);
             array.into()
         }
     })
@@ -238,15 +238,10 @@ impl<'gc> AvmSerializer<'gc> {
             Value::String(s) => JsonValue::from(s.to_utf8_lossy().deref()),
             Value::Object(obj) => {
                 if self.obj_stack.contains(&obj) {
-                    return Err(Error::avm_error(type_error(
-                        activation,
-                        "Error #1129: Cyclic structure cannot be converted to JSON string.",
-                        1129,
-                    )?));
+                    return Err(make_error_1129(activation));
                 }
                 self.obj_stack.push(obj);
-                let value = if obj.is_of_type(activation.avm2().class_defs().array) {
-                    // TODO: Vectors
+                let value = if obj.as_array_object().is_some() || obj.as_vector_object().is_some() {
                     self.serialize_iterable(activation, obj)?
                 } else {
                     self.serialize_object(activation, obj)?
@@ -304,26 +299,20 @@ pub fn stringify<'gc>(
 
     // If the replacer is None, that means it was either undefined or null.
     if replacer.is_none() && !matches!(args.get_value(1), Value::Null) {
-        return Err(Error::avm_error(type_error(
-            activation,
-            "Error #1131: Replacer argument to JSON stringifier must be an array or a two parameter function.",
-            1131,
-        )?));
+        return Err(make_error_1131(activation));
     }
 
-    let replacer = replacer.map(|replacer| {
-        if let Some(func) = replacer.as_function_object() {
-            Ok(Replacer::Function(func))
-        } else if let Some(arr) = replacer.as_array_object() {
-            Ok(Replacer::PropList(arr))
-        } else {
-            Err(Error::avm_error(type_error(
-                activation,
-                "Error #1131: Replacer argument to JSON stringifier must be an array or a two parameter function.",
-                1131,
-            )?))
-        }
-    }).transpose()?;
+    let replacer = replacer
+        .map(|replacer| {
+            if let Some(func) = replacer.as_function_object() {
+                Ok(Replacer::Function(func))
+            } else if let Some(arr) = replacer.as_array_object() {
+                Ok(Replacer::PropList(arr))
+            } else {
+                Err(make_error_1131(activation))
+            }
+        })
+        .transpose()?;
 
     // NOTE: We do not coerce to a string or to a number, the value must already be a string or number.
     let indent = if let Value::String(s) = &spaces {

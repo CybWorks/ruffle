@@ -2,7 +2,7 @@
 
 use crate::avm2::activation::Activation;
 use crate::avm2::class::{Class, ClassAttributes};
-use crate::avm2::error::{argument_error, make_error_1034, type_error};
+use crate::avm2::error::{make_error_1007, make_error_1034, make_error_1112};
 use crate::avm2::function::FunctionArgs;
 use crate::avm2::globals::array::{
     compare_numeric_slow, compare_string_case_insensitive, compare_string_case_sensitive,
@@ -22,11 +22,7 @@ pub fn vector_allocator<'gc>(
     _class: ClassObject<'gc>,
     activation: &mut Activation<'_, 'gc>,
 ) -> Result<Object<'gc>, Error<'gc>> {
-    return Err(Error::avm_error(type_error(
-        activation,
-        "Error #1007: Instantiation attempted on a non-constructor.",
-        1007,
-    )?));
+    Err(make_error_1007(activation))
 }
 
 /// Implements `Vector`'s instance constructor.
@@ -54,14 +50,7 @@ pub fn call_handler<'gc>(
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if args.len() != 1 {
-        return Err(Error::avm_error(argument_error(
-            activation,
-            &format!(
-                "Error #1112: Argument count mismatch on class coercion.  Expected 1, got {}.",
-                args.len()
-            ),
-            1112,
-        )?));
+        return Err(make_error_1112(activation, args.len()));
     }
 
     let this_class = this

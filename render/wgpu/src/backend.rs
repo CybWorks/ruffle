@@ -4,14 +4,14 @@ use crate::context3d::WgpuContext3D;
 use crate::dynamic_transforms::DynamicTransforms;
 use crate::filters::FilterSource;
 use crate::mesh::{CommonGradient, Mesh, PendingDraw};
-use crate::pixel_bender::{run_pixelbender_shader_impl, ShaderMode};
+use crate::pixel_bender::{ShaderMode, run_pixelbender_shader_impl};
 use crate::surface::{LayerRef, Surface};
 use crate::target::{MaybeOwnedBuffer, TextureTarget};
 use crate::target::{RenderTargetFrame, TextureBufferInfo};
-use crate::utils::{run_copy_pipeline, BufferDimensions};
+use crate::utils::{BufferDimensions, run_copy_pipeline};
 use crate::{
-    as_texture, format_list, get_backend_names, Descriptors, Error, QueueSyncHandle, RenderTarget,
-    SwapChainTarget, Texture,
+    Descriptors, Error, QueueSyncHandle, RenderTarget, SwapChainTarget, Texture, as_texture,
+    format_list, get_backend_names,
 };
 use image::imageops::FilterType;
 use ruffle_render::backend::{
@@ -109,7 +109,7 @@ impl WgpuRenderBackend<SwapChainTarget> {
             backends: backend,
             ..Default::default()
         });
-        let surface = instance.create_surface_unsafe(window)?;
+        let surface = unsafe { instance.create_surface_unsafe(window)? };
         let (adapter, device, queue) = futures::executor::block_on(request_adapter_and_device(
             backend,
             &instance,
@@ -130,7 +130,7 @@ impl WgpuRenderBackend<SwapChainTarget> {
         size: (u32, u32),
     ) -> Result<(), Error> {
         let descriptors = &self.descriptors;
-        let surface = descriptors.wgpu_instance.create_surface_unsafe(window)?;
+        let surface = unsafe { descriptors.wgpu_instance.create_surface_unsafe(window)? };
         self.target =
             SwapChainTarget::new(surface, &descriptors.adapter, size, &descriptors.device);
         Ok(())
@@ -975,22 +975,18 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                 self.resolve_sync_handle(
                     sync_handle,
                     Box::new(|raw_pixels, buffer_width| {
-                        if buffer_width as usize
-                            != *width as usize * output_channels * std::mem::size_of::<f32>()
-                        {
-                            let channels_in_raw_pixels = if has_padding { 4usize } else { 3usize };
+                        let width = *width as usize;
 
+                        if buffer_width as usize
+                            != width * output_channels * std::mem::size_of::<f32>()
+                        {
                             let mut new_pixels = Vec::new();
                             for row in raw_pixels.chunks(buffer_width as usize) {
-                                // Ignore any wgpu-added padding (this is distinct from the alpha-channel padding
-                                // that we add for pixelbender)
-                                let actual_row = &row[0..(*width as usize
-                                    * channels_in_raw_pixels
-                                    * std::mem::size_of::<f32>())];
+                                let actual_row = &row[0..(width * std::mem::size_of::<[f32; 4]>())];
 
-                                for pixel in actual_row.chunks_exact(
-                                    channels_in_raw_pixels * std::mem::size_of::<f32>(),
-                                ) {
+                                for pixel in
+                                    actual_row.chunks_exact(std::mem::size_of::<[f32; 4]>())
+                                {
                                     if has_padding {
                                         // Take the first three channels
                                         new_pixels.extend_from_slice(
@@ -1132,6 +1128,7 @@ async fn request_device(
             required_limits: limits,
             memory_hints: Default::default(),
             trace: wgpu::Trace::Off,
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
         })
         .await
 }

@@ -1,0 +1,11 @@
+context-menu-rewind = Премотај уназад
+context-menu-forward = Напред
+context-menu-back = Назад
+context-menu-quality-low = Квалитет: Низак
+context-menu-quality-medium = Квалитет: Средњи
+context-menu-quality-high = Квалитет: Висок
+context-menu-cut = Исеци
+context-menu-copy = Копија
+context-menu-paste = Залепи
+context-menu-delete = Обриши
+context-menu-select-all = Изабери све

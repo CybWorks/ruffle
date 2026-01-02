@@ -20,7 +20,6 @@ pub fn get_property<'gc>(
     dobj: DisplayObject<'gc>,
     name: AvmString<'gc>,
     activation: &mut Activation<'_, 'gc>,
-    is_slash_path: bool,
 ) -> Option<Value<'gc>> {
     // Property search order for DisplayObjects:
 
@@ -37,15 +36,13 @@ pub fn get_property<'gc>(
         .as_container()
         .and_then(|o| o.child_by_name(&name, activation.is_case_sensitive()))
     {
-        return if is_slash_path {
-            Some(child.object1_or_undef())
-        // If an object doesn't have an object representation, e.g. Graphic, then trying to access it
-        // Returns the parent instead
-        } else if let crate::display_object::DisplayObject::Graphic(_) = child {
-            child.parent().map(|p| p.object1_or_undef())
-        } else {
-            Some(child.object1_or_undef())
-        };
+        let value = child
+            .object1()
+            // If an object doesn't have an object representation, e.g. Graphic,
+            // then trying to access it returns the parent instead
+            .or_else(|| child.parent().and_then(|p| p.object1()))
+            .map_or(Value::Undefined, Value::from);
+        return Some(value);
     }
 
     // 3) Display object properties such as `_x`, `_y` (never case sensitive)
@@ -136,8 +133,10 @@ pub fn enumerate_keys<'gc>(dobj: DisplayObject<'gc>, keys: &mut Vec<AvmString<'g
     if let Some(ctr) = dobj.as_container() {
         // Button/MovieClip children are included in key list.
         for child in ctr.iter_render_list().rev() {
-            if child.as_interactive().is_some() {
-                keys.push(child.name().expect("Interactive DisplayObjects have names"));
+            // All named DOs are included in the list, even if they're not
+            // accessible by AVM1 code (e.g. `MorphShape`)
+            if let Some(name) = child.name() {
+                keys.push(name);
             }
         }
     }
@@ -154,7 +153,7 @@ fn resolve_path_property<'gc>(
     } else if name.eq_with_case(b"_parent", case_sensitive) {
         return Some(
             dobj.avm1_parent()
-                .map(|dn| dn.object1_or_undef().coerce_to_object(activation))
+                .map(|dn| dn.object1_or_bare(activation.gc()))
                 .map(Value::Object)
                 .unwrap_or(Value::Undefined),
         );

@@ -11,7 +11,6 @@ use crate::backend::audio::{AudioManager, SoundHandle};
 use crate::context::UpdateContext;
 use crate::display_object::SoundTransform;
 use crate::string::AvmString;
-use crate::utils::HasPrefixField;
 use core::fmt;
 use gc_arena::barrier::unlock;
 use gc_arena::{
@@ -19,6 +18,7 @@ use gc_arena::{
     Collect, DynamicRoot, Gc, GcWeak, Mutation, Rootable,
 };
 use id3::{Tag, TagLike};
+use ruffle_common::utils::HasPrefixField;
 use std::cell::Cell;
 use std::io::Cursor;
 use swf::SoundInfo;
@@ -140,11 +140,7 @@ impl<'gc> SoundObject<'gc> {
     }
 
     /// Returns `true` if a `SoundChannel` should be returned back to the AVM2 caller.
-    pub fn play(
-        self,
-        queued: QueuedPlay<'gc>,
-        activation: &mut Activation<'_, 'gc>,
-    ) -> Result<bool, Error<'gc>> {
+    pub fn play(self, queued: QueuedPlay<'gc>, activation: &mut Activation<'_, 'gc>) -> bool {
         let mut sound_data = unlock!(
             Gc::write(activation.gc(), self.0),
             SoundObjectData,
@@ -156,29 +152,26 @@ impl<'gc> SoundObject<'gc> {
                 // Avoid to enqueue more unloaded sounds than the maximum allowed to be played
                 if queued_plays.len() >= AudioManager::MAX_SOUNDS {
                     tracing::warn!("Sound.play: too many unloaded sounds queued");
-                    return Ok(false);
+                    return false;
                 }
 
                 queued_plays.push(queued);
+
                 // We don't know the length yet, so return the `SoundChannel`
-                Ok(true)
+                true
             }
-            SoundData::Loaded { sound } => play_queued(queued, *sound, activation),
+            SoundData::Loaded { sound } => play_queued(queued, *sound, activation.context),
         }
     }
 
-    pub fn set_sound(
-        self,
-        context: &mut UpdateContext<'gc>,
-        sound: SoundHandle,
-    ) -> Result<(), Error<'gc>> {
+    pub fn set_sound(self, context: &mut UpdateContext<'gc>, sound: SoundHandle) {
         let mut sound_data =
             unlock!(Gc::write(context.gc(), self.0), SoundObjectData, sound_data).borrow_mut();
-        let mut activation = Activation::from_nothing(context);
+
         match &mut *sound_data {
             SoundData::NotLoaded { queued_plays } => {
                 for queued in std::mem::take(queued_plays) {
-                    play_queued(queued, sound, &mut activation)?;
+                    play_queued(queued, sound, context);
                 }
                 *sound_data = SoundData::Loaded { sound };
             }
@@ -187,7 +180,6 @@ impl<'gc> SoundObject<'gc> {
             }
         }
         self.set_loading_state(SoundLoadingState::Loaded);
-        Ok(())
     }
 
     pub fn id3(self) -> Option<Object<'gc>> {
@@ -279,38 +271,32 @@ impl<'gc> SoundObject<'gc> {
 fn play_queued<'gc>(
     queued: QueuedPlay<'gc>,
     sound: SoundHandle,
-    activation: &mut Activation<'_, 'gc>,
-) -> Result<bool, Error<'gc>> {
-    if let Some(duration) = activation.context.audio.get_sound_duration(sound) {
+    context: &mut UpdateContext<'gc>,
+) -> bool {
+    if let Some(duration) = context.audio.get_sound_duration(sound) {
         if queued.position > duration {
             tracing::error!(
                 "Sound.play: position={} is greater than duration={}",
                 queued.position,
                 duration
             );
-            return Ok(false);
+            return false;
         }
     }
 
-    if let Some(instance) = activation
-        .context
-        .start_sound(sound, &queued.sound_info, None, None)
-    {
-        if let Some(sound_transform) = queued.sound_transform {
-            activation
-                .context
-                .set_local_sound_transform(instance, sound_transform);
-        }
+    if let Some(instance) = context.start_sound(
+        sound,
+        &queued.sound_info,
+        queued.sound_transform,
+        None,
+        None,
+    ) {
+        queued.sound_channel.set_sound_instance(context, instance);
 
-        queued
-            .sound_channel
-            .set_sound_instance(activation, instance);
-
-        activation
-            .context
-            .attach_avm2_sound_channel(instance, queued.sound_channel);
+        context.attach_avm2_sound_channel(instance, queued.sound_channel);
     }
-    Ok(true)
+
+    true
 }
 
 impl<'gc> TObject<'gc> for SoundObject<'gc> {

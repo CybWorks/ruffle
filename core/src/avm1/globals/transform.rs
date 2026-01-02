@@ -4,7 +4,7 @@ use crate::avm1::globals::color_transform::ColorTransformObject;
 use crate::avm1::globals::matrix::{matrix_to_value, object_to_matrix};
 use crate::avm1::object::NativeObject;
 use crate::avm1::object_reference::MovieClipReference;
-use crate::avm1::property_decl::{DeclContext, Declaration, SystemClass};
+use crate::avm1::property_decl::{DeclContext, StaticDeclarations, SystemClass};
 use crate::avm1::{Activation, Error, Object, Value};
 use crate::display_object::{DisplayObject, TDisplayObject};
 use crate::string::AvmString;
@@ -35,7 +35,7 @@ impl<'gc> TransformObject<'gc> {
     }
 }
 
-const PROTO_DECLS: &[Declaration] = declare_properties! {
+const PROTO_DECLS: StaticDeclarations = declare_static_properties! {
     use fn method;
     "matrix" => property(GET_MATRIX, SET_MATRIX; VERSION_8);
     "concatenatedMatrix" => property(GET_CONCATENATED_MATRIX; VERSION_8);
@@ -49,7 +49,7 @@ pub fn create_class<'gc>(
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
     let class = context.native_class(table_constructor!(method), None, super_proto);
-    context.define_properties_on(class.proto, PROTO_DECLS);
+    context.define_properties_on(class.proto, PROTO_DECLS(context));
     class
 }
 
@@ -100,7 +100,7 @@ pub fn method<'gc>(
             ];
 
             if let [value] = args {
-                let object = value.coerce_to_object(activation);
+                let object = value.coerce_to_object_or_bare(activation)?;
                 // Assignment only occurs for an object with Matrix properties (a, b, c, d, tx, ty).
                 let is_matrix = matrix_props
                     .iter()

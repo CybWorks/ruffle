@@ -1,7 +1,7 @@
 //! `flash.media.Sound` builtin/prototype
 
 use crate::avm2::activation::Activation;
-use crate::avm2::error::{argument_error, make_error_2037};
+use crate::avm2::error::{make_error_2037, make_error_2084};
 use crate::avm2::globals::methods::flash_media_sound as sound_methods;
 use crate::avm2::globals::slots::flash_net_url_request as url_request_slots;
 use crate::avm2::object::{
@@ -40,7 +40,7 @@ pub fn init<'gc>(
                 .library_for_movie_mut(movie)
                 .character_by_id(symbol)
             {
-                sound_object.set_sound(activation.context, sound)?;
+                sound_object.set_sound(activation.context, sound);
             } else {
                 tracing::warn!("Attempted to construct subclass of Sound, {}, which is associated with non-Sound character {}", class_def.name().local_name(), symbol);
             }
@@ -178,7 +178,7 @@ pub fn play<'gc>(
             sound_transform,
             sound_channel,
         };
-        if sound_object.play(queued_play, activation)? {
+        if sound_object.play(queued_play, activation) {
             return Ok(sound_channel.into());
         }
         // If we start playing a loaded sound with an invalid position,
@@ -283,11 +283,7 @@ pub fn load_compressed_data_from_byte_array<'gc>(
         bytes
     } else {
         // This is the error Flash throws
-        return Err(Error::avm_error(argument_error(
-            activation,
-            "Error #2084: The AMF encoding of the arguments cannot exceed 40K.",
-            2084,
-        )?));
+        return Err(make_error_2084(activation));
     };
 
     // FIXME - determine the actual error thrown by Flash Player
@@ -301,7 +297,7 @@ pub fn load_compressed_data_from_byte_array<'gc>(
     Avm2::dispatch_event(activation.context, progress_evt, this_object);
 
     this.read_and_call_id3_event(activation, bytes);
-    this.set_sound(activation.context, handle)?;
+    this.set_sound(activation.context, handle);
 
     Ok(Value::Undefined)
 }

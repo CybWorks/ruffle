@@ -1,16 +1,16 @@
+use crate::avm1::Object as Avm1Object;
 use crate::avm2::StageObject as Avm2StageObject;
 use crate::context::{RenderContext, UpdateContext};
 use crate::display_object::DisplayObjectBase;
 use crate::font::{FontLike, TextRenderSettings};
 use crate::prelude::*;
 use crate::tag_utils::SwfMovie;
-use crate::utils::HasPrefixField;
 use crate::vminterface::Instantiator;
 use core::fmt;
 use gc_arena::barrier::unlock;
 use gc_arena::Lock;
 use gc_arena::{Collect, Gc, Mutation};
-use ruffle_render::commands::CommandHandler;
+use ruffle_common::utils::HasPrefixField;
 use ruffle_render::transform::Transform;
 use ruffle_wstr::WString;
 use std::cell::RefCell;
@@ -165,12 +165,9 @@ impl<'gc> TDisplayObject<'gc> for Text<'gc> {
                 transform.color_transform.set_mult_color(color);
                 for c in &block.glyphs {
                     if let Some(glyph) = font.get_glyph(c.index as usize) {
-                        if let Some(glyph_shape_handle) = glyph.shape_handle(context.renderer) {
+                        if glyph.renderable(context) {
                             context.transform_stack.push(&transform);
-                            context.commands.render_shape(
-                                glyph_shape_handle,
-                                context.transform_stack.transform(),
-                            );
+                            glyph.render(context);
                             context.transform_stack.pop();
                         }
 
@@ -254,15 +251,10 @@ impl<'gc> TDisplayObject<'gc> for Text<'gc> {
         false
     }
 
-    fn post_instantiation(
-        self,
-        context: &mut UpdateContext<'gc>,
-        _init_object: Option<crate::avm1::Object<'gc>>,
-        _instantiated_by: Instantiator,
-        _run_frame: bool,
-    ) {
-        if self.movie().is_action_script_3() {
+    fn construct_frame(self, context: &mut UpdateContext<'gc>) {
+        if self.movie().is_action_script_3() && self.object2().is_none() {
             let statictext = context.avm2.classes().statictext;
+
             let object = Avm2StageObject::for_display_object(context.gc(), self.into(), statictext);
             // We don't need to call the initializer method, as AVM2 can't link
             // a custom class to a StaticText, and the initializer method for
@@ -270,6 +262,18 @@ impl<'gc> TDisplayObject<'gc> for Text<'gc> {
             self.set_object2(context, object);
 
             self.on_construction_complete(context);
+        }
+    }
+
+    fn post_instantiation(
+        self,
+        context: &mut UpdateContext<'gc>,
+        _init_object: Option<Avm1Object<'gc>>,
+        _instantiated_by: Instantiator,
+        _run_frame: bool,
+    ) {
+        if self.movie().is_action_script_3() {
+            self.set_default_instance_name(context);
         }
     }
 

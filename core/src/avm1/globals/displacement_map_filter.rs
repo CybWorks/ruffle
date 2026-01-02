@@ -2,7 +2,7 @@
 
 use crate::avm1::clamp::Clamp;
 use crate::avm1::object::NativeObject;
-use crate::avm1::property_decl::{DeclContext, Declaration, SystemClass};
+use crate::avm1::property_decl::{DeclContext, StaticDeclarations, SystemClass};
 use crate::avm1::{Activation, Error, Object, Value};
 use crate::bitmap::bitmap_data::BitmapData;
 use crate::context::UpdateContext;
@@ -120,9 +120,9 @@ impl<'gc> DisplacementMapFilter<'gc> {
         let Some(value) = value else { return Ok(()) };
 
         if let Value::Object(object) = value {
-            if let Some(x) = object.get_local_stored(istr!("x"), activation, false) {
+            if let Some(x) = object.get_local_stored(istr!("x"), activation) {
                 let x = x.coerce_to_f64(activation)?.clamp_to_i32();
-                if let Some(y) = object.get_local_stored(istr!("y"), activation, false) {
+                if let Some(y) = object.get_local_stored(istr!("y"), activation) {
                     let y = y.coerce_to_f64(activation)?.clamp_to_i32();
                     self.0.map_point.set(Point::new(x, y));
                     return Ok(());
@@ -284,7 +284,7 @@ impl<'gc> DisplacementMapFilter<'gc> {
     }
 }
 
-const PROTO_DECLS: &[Declaration] = declare_properties! {
+const PROTO_DECLS: StaticDeclarations = declare_static_properties! {
     use fn method;
     "mapBitmap" => property(GET_MAP_BITMAP, SET_MAP_BITMAP; VERSION_8);
     "mapPoint" => property(GET_MAP_POINT, SET_MAP_POINT; VERSION_8);
@@ -302,7 +302,7 @@ pub fn create_class<'gc>(
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
     let class = context.native_class(table_constructor!(method), None, super_proto);
-    context.define_properties_on(class.proto, PROTO_DECLS);
+    context.define_properties_on(class.proto, PROTO_DECLS(context));
     class
 }
 

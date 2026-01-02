@@ -4,7 +4,8 @@ use crate::avm2::bytearray::ObjectEncoding;
 use crate::avm2::class::{AllocatorFn, CustomConstructorFn};
 use crate::avm2::e4x::XmlSettings;
 use crate::avm2::error::{
-    make_error_1014, make_error_1107, type_error, verify_error, Error1014Type,
+    make_error_1014, make_error_1047, make_error_1107, make_error_2022, make_error_2023,
+    Error1014Type,
 };
 use crate::avm2::function::exec;
 use crate::avm2::globals::{
@@ -18,7 +19,7 @@ use crate::avm2::script::{Script, TranslationUnit};
 use crate::avm2::stack::Stack;
 use crate::character::Character;
 use crate::context::UpdateContext;
-use crate::display_object::{MovieClip, TDisplayObject};
+use crate::display_object::{DisplayObject, MovieClip, TDisplayObject};
 use crate::string::{AvmString, StringContext};
 use crate::tag_utils::SwfMovie;
 use crate::PlayerRuntime;
@@ -94,7 +95,7 @@ pub use crate::avm2::multiname::Multiname;
 pub use crate::avm2::namespace::{CommonNamespaces, Namespace};
 pub use crate::avm2::object::{
     ArrayObject, BitmapDataObject, ClassObject, EventObject, LoaderInfoObject, Object,
-    SoundChannelObject, StageObject, TObject,
+    SharedObjectObject, SoundChannelObject, StageObject, TObject,
 };
 pub use crate::avm2::qname::QName;
 pub use crate::avm2::value::Value;
@@ -243,8 +244,7 @@ impl<'gc> Avm2<'gc> {
 
     pub fn load_player_globals(context: &mut UpdateContext<'gc>) {
         let globals = context.avm2.playerglobals_domain;
-        let mut activation = Activation::from_domain(context, globals);
-        globals::load_playerglobal(&mut activation, globals);
+        globals::load_playerglobal(context, globals);
     }
 
     pub fn playerglobals_domain(&self) -> Domain<'gc> {
@@ -289,19 +289,16 @@ impl<'gc> Avm2<'gc> {
         script: Script<'gc>,
         context: &mut UpdateContext<'gc>,
     ) -> Result<(), Error<'gc>> {
-        // TODO can we skip creating this temporary Activation?
-        let mut activation = Activation::from_nothing(context);
-
         let (method, global_object, domain) = script.init();
 
         let scope = ScopeChain::new(domain);
         // Script `global` classes extend Object
-        let bound_superclass = Some(activation.avm2().classes().object);
+        let bound_superclass = Some(context.avm2.classes().object);
 
         // Provide a callee object if necessary
         let callee = if method.needs_arguments_object() {
             Some(FunctionObject::from_method(
-                &mut activation,
+                context,
                 method,
                 scope,
                 Some(global_object.into()),
@@ -310,6 +307,9 @@ impl<'gc> Avm2<'gc> {
         } else {
             None
         };
+
+        // TODO can we skip creating this temporary Activation?
+        let mut activation = Activation::from_nothing(context);
 
         exec(
             method,
@@ -361,20 +361,8 @@ impl<'gc> Avm2<'gc> {
         simulate_dispatch: bool,
     ) -> bool {
         let mut activation = Activation::from_nothing(context);
-        match events::dispatch_event(&mut activation, target, event, simulate_dispatch) {
-            Err(err) => {
-                let event_name = event.event().event_type();
 
-                tracing::error!(
-                    "Encountered AVM2 error when dispatching `{}` event: {:?}",
-                    event_name,
-                    err,
-                );
-                // TODO: push the error onto `loaderInfo.uncaughtErrorEvents`
-                false
-            }
-            Ok(handled) => handled,
-        }
+        events::dispatch_event(&mut activation, target, event, simulate_dispatch)
     }
 
     /// Add an object to the broadcast list.
@@ -447,17 +435,10 @@ impl<'gc> Avm2<'gc> {
                 .copied();
 
             if let Some(object) = object.and_then(|obj| obj.upgrade(context.gc())) {
-                let mut activation = Activation::from_nothing(context);
-
                 if object.is_of_type(on_type.inner_class_definition()) {
-                    if let Err(err) = events::broadcast_event(&mut activation, object, event) {
-                        tracing::error!(
-                            "Encountered AVM2 error when broadcasting `{}` event: {:?}",
-                            event_name,
-                            err,
-                        );
-                        // TODO: push the error onto `loaderInfo.uncaughtErrorEvents`
-                    }
+                    let mut activation = Activation::from_nothing(context);
+
+                    events::broadcast_event(&mut activation, object, event);
                 }
             }
         }
@@ -470,20 +451,6 @@ impl<'gc> Avm2<'gc> {
             .retain(|x| x.upgrade(context.gc_context).is_some());
     }
 
-    pub fn run_stack_frame_for_callable(
-        callable: Object<'gc>,
-        receiver: Value<'gc>,
-        domain: Domain<'gc>,
-        context: &mut UpdateContext<'gc>,
-    ) -> Result<(), String> {
-        let mut evt_activation = Activation::from_domain(context, domain);
-        Value::from(callable)
-            .call(&mut evt_activation, receiver, FunctionArgs::empty())
-            .map_err(|e| format!("{e:?}"))?;
-
-        Ok(())
-    }
-
     pub fn lookup_class_for_character(
         activation: &mut Activation<'_, 'gc>,
         movie_clip: MovieClip<'gc>,
@@ -491,7 +458,7 @@ impl<'gc> Avm2<'gc> {
         name: AvmString<'gc>,
         id: u16,
     ) -> Result<ClassObject<'gc>, Error<'gc>> {
-        let movie = movie_clip.movie().clone();
+        let movie = movie_clip.movie();
 
         let class_object = domain
             .get_defined_value_handling_vector(activation, name)?
@@ -515,11 +482,7 @@ impl<'gc> Avm2<'gc> {
                 // The class must extend DisplayObject to ensure that events
                 // can properly be dispatched to them
                 if !class.has_class_in_chain(activation.avm2().class_defs().display_object) {
-                    return Err(Error::avm_error(type_error(
-                        activation,
-                        &format!("Error #2022: Class {}$ must inherit from DisplayObject to link to a symbol.", class.name().local_name()),
-                        2022,
-                    )?));
+                    return Err(make_error_2022(activation, class));
                 }
             }
         } else if movie_clip.avm2_class().is_none() {
@@ -528,14 +491,7 @@ impl<'gc> Avm2<'gc> {
             // ClassObject is going to be the class of the MC. Ensure it
             // subclasses Sprite.
             if !class.has_class_in_chain(activation.avm2().class_defs().sprite) {
-                return Err(Error::avm_error(type_error(
-                    activation,
-                    &format!(
-                        "Error #2023: Class {}$ must inherit from Sprite to link to the root.",
-                        class.name().local_name(),
-                    ),
-                    2023,
-                )?));
+                return Err(make_error_2023(activation, class));
             }
         }
 
@@ -566,11 +522,7 @@ impl<'gc> Avm2<'gc> {
         activation.set_outer(ScopeChain::new(domain));
 
         if abc.scripts.is_empty() {
-            return Err(Error::avm_error(verify_error(
-                &mut activation,
-                "Error #1047: No entry point was found.",
-                1047,
-            )?));
+            return Err(make_error_1047(&mut activation));
         }
 
         let num_scripts = abc.scripts.len();
@@ -673,6 +625,10 @@ impl<'gc> Avm2<'gc> {
         self.call_stack
     }
 
+    pub fn capture_call_stack(&self) -> CallStack<'gc> {
+        self.call_stack.borrow().clone()
+    }
+
     fn push_scope(&mut self, scope: Scope<'gc>) {
         self.scope_stack.push(scope);
     }
@@ -713,5 +669,20 @@ impl<'gc> Avm2<'gc> {
 
     pub fn set_optimizer_enabled(&mut self, value: bool) {
         self.optimizer_enabled = value;
+    }
+
+    // Report an uncaught AVM2 error.
+    // TODO should the `display_object` parameter be optional or not?
+    #[cold]
+    #[inline(never)]
+    pub fn uncaught_error(
+        _activation: &mut Activation<'_, 'gc>,
+        _display_object: Option<DisplayObject<'gc>>,
+        error: Error<'gc>,
+        info: &str,
+    ) {
+        tracing::error!("{}: {:?}", info, error);
+
+        // TODO: push the error onto `loaderInfo.uncaughtErrorEvents`
     }
 }

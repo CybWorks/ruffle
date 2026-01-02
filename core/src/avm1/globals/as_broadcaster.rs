@@ -4,13 +4,13 @@ use crate::avm1::error::Error;
 use crate::avm1::function::ExecutionReason;
 use crate::avm1::parameters::{ParametersExt, UndefinedAs};
 use crate::avm1::property::Attribute;
-use crate::avm1::property_decl::{DeclContext, Declaration, SystemClass};
+use crate::avm1::property_decl::{DeclContext, StaticDeclarations, SystemClass};
 use crate::avm1::{Activation, ArrayBuilder, Object, Value};
 use crate::string::{AvmString, StringContext};
 use gc_arena::Collect;
 use ruffle_macros::istr;
 
-const OBJECT_DECLS: &[Declaration] = declare_properties! {
+const OBJECT_DECLS: StaticDeclarations = declare_static_properties! {
     "initialize" => method(initialize; DONT_ENUM | DONT_DELETE);
     "addListener" => function(add_listener; DONT_ENUM | DONT_DELETE);
     "removeListener" => function(remove_listener; DONT_ENUM | DONT_DELETE);
@@ -26,8 +26,9 @@ pub fn create_class<'gc>(
     // returned in such cases.
     let class = context.empty_class(super_proto);
 
+    let decls = OBJECT_DECLS(context);
     let mut define_as_object = |index: usize| -> Object<'gc> {
-        match OBJECT_DECLS[index].define_on(context.strings, class.constr, context.fn_proto) {
+        match decls[index].define_on(context.strings, class.constr, context.fn_proto) {
             Value::Object(o) => o,
             _ => panic!("expected object for broadcaster function"),
         }
@@ -155,21 +156,12 @@ pub fn broadcast_internal<'gc>(
         let length = listeners.length(activation)?;
         for i in 0..length {
             let listener = listeners.get_element(activation, i);
-
-            if let Value::Object(listener_obj) = listener {
+            if let Some(obj) = listener.as_object(activation) {
                 if method_name.is_empty() {
-                    listener_obj.call(method_name, activation, listener, call_args)?;
+                    obj.call(method_name, activation, listener, call_args)?;
                 } else {
-                    listener_obj.call_method(
-                        method_name,
-                        call_args,
-                        activation,
-                        ExecutionReason::Special,
-                    )?;
+                    obj.call_method(method_name, call_args, activation, ExecutionReason::Special)?;
                 }
-            } else if let Value::MovieClip(_) = listener {
-                let object = listener.coerce_to_object(activation);
-                object.call_method(method_name, call_args, activation, ExecutionReason::Special)?;
             }
         }
 
@@ -184,7 +176,7 @@ fn initialize<'gc>(
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let broadcaster = args.get_object(activation, 0);
+    let broadcaster = args.get_object(activation, 0)?;
     initialize_internal(
         &activation.context.strings,
         broadcaster,

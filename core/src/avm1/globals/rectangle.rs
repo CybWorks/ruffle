@@ -3,34 +3,34 @@
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::globals::point::{construct_new_point, point_to_object, value_to_point};
-use crate::avm1::property_decl::{DeclContext, Declaration, SystemClass};
+use crate::avm1::property_decl::{DeclContext, StaticDeclarations, SystemClass};
 use crate::avm1::{Object, Value};
 use crate::string::AvmString;
 use ruffle_macros::istr;
 
-const PROTO_DECLS: &[Declaration] = declare_properties! {
-    "toString" => method(to_string);
-    "isEmpty" => method(is_empty);
-    "setEmpty" => method(set_empty);
+const PROTO_DECLS: StaticDeclarations = declare_static_properties! {
     "clone" => method(clone);
-    "contains" => method(contains);
-    "containsPoint" => method(contains_point);
-    "containsRectangle" => method(contains_rectangle);
-    "intersects" => method(intersects);
-    "union" => method(union);
+    "setEmpty" => method(set_empty);
+    "isEmpty" => method(is_empty);
+    "left" => property(get_left, set_left);
+    "right" => property(get_right, set_right);
+    "top" => property(get_top, set_top);
+    "bottom" => property(get_bottom, set_bottom);
+    "topLeft" => property(get_top_left, set_top_left);
+    "bottomRight" => property(get_bottom_right, set_bottom_right);
+    "size" => property(get_size, set_size);
     "inflate" => method(inflate);
     "inflatePoint" => method(inflate_point);
     "offset" => method(offset);
     "offsetPoint" => method(offset_point);
+    "contains" => method(contains);
+    "containsPoint" => method(contains_point);
+    "containsRectangle" => method(contains_rectangle);
     "intersection" => method(intersection);
+    "intersects" => method(intersects);
+    "union" => method(union);
     "equals" => method(equals);
-    "left" => property(get_left, set_left);
-    "top" => property(get_top, set_top);
-    "right" => property(get_right, set_right);
-    "bottom" => property(get_bottom, set_bottom);
-    "size" => property(get_size, set_size);
-    "topLeft" => property(get_top_left, set_top_left);
-    "bottomRight" => property(get_bottom_right, set_bottom_right);
+    "toString" => method(to_string);
 };
 
 pub fn create_class<'gc>(
@@ -38,7 +38,7 @@ pub fn create_class<'gc>(
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
     let class = context.class(constructor, super_proto);
-    context.define_properties_on(class.proto, PROTO_DECLS);
+    context.define_properties_on(class.proto, PROTO_DECLS(context));
     class
 }
 
@@ -48,10 +48,10 @@ fn constructor<'gc>(
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if args.is_empty() {
-        this.set(istr!("x"), 0.into(), activation)?;
-        this.set(istr!("y"), 0.into(), activation)?;
-        this.set(istr!("width"), 0.into(), activation)?;
         this.set(istr!("height"), 0.into(), activation)?;
+        this.set(istr!("width"), 0.into(), activation)?;
+        this.set(istr!("y"), 0.into(), activation)?;
+        this.set(istr!("x"), 0.into(), activation)?;
     } else {
         this.set(
             istr!("x"),
@@ -620,12 +620,11 @@ fn equals<'gc>(
         let other_width = other.get(istr!("width"), activation)?;
         let other_height = other.get(istr!("height"), activation)?;
         let proto = activation.prototypes().rectangle;
-        let constructor = activation.prototypes().rectangle_constructor;
         return Ok((this_x == other_x
             && this_y == other_y
             && this_width == other_width
             && this_height == other_height
-            && other.is_instance_of(activation, constructor, proto)?)
+            && other.is_instance_of(activation, proto)?)
         .into());
     }
 

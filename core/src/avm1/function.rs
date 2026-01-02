@@ -231,7 +231,7 @@ impl<'gc> Avm1Function<'gc> {
         // `f[""]()` emits a CallMethod op, causing `this` to be undefined, but `super` is a function; what is it?
         let zuper = this.filter(|_| !suppress).map(|this| {
             let zuper = NativeObject::Super(SuperObject::new(this, depth));
-            Object::new_with_native(frame.strings(), None, zuper).into()
+            Object::new_with_native(frame.strings(), None::<Value<'_>>, zuper).into()
         });
 
         if preload {
@@ -490,7 +490,7 @@ impl<'gc> FunctionObject<'gc> {
                 context.gc(),
                 istr!(context, "prototype"),
                 prototype.into(),
-                Attribute::empty(),
+                Attribute::DONT_ENUM | Attribute::DONT_DELETE,
             );
         }
 
@@ -563,12 +563,12 @@ impl<'gc> FunctionObject<'gc> {
         match self.function {
             Executable::Native(nf) => {
                 // TODO: Change NativeFunction to accept `this: Value`.
-                let this = this.coerce_to_object(activation);
+                let this = this.coerce_to_object_or_bare(activation)?;
                 nf(activation, this, args)
             }
             Executable::TableNative { native, index } => {
                 // TODO: Change TableNativeFunction to accept `this: Value`.
-                let this = this.coerce_to_object(activation);
+                let this = this.coerce_to_object_or_bare(activation)?;
                 native(activation, this, args, index)
             }
             Executable::Action(af) => af.exec(name, activation, this, depth, args, reason, callee),
@@ -596,12 +596,12 @@ impl<'gc> FunctionObject<'gc> {
         match constr {
             Executable::Native(nf) => {
                 // TODO: Change NativeFunction to accept `this: Value`.
-                let this = this.coerce_to_object(activation);
+                let this = this.coerce_to_object_or_bare(activation)?;
                 nf(activation, this, args)
             }
             Executable::TableNative { native, index } => {
                 // TODO: Change TableNativeFunction to accept `this: Value`.
-                let this = this.coerce_to_object(activation);
+                let this = this.coerce_to_object_or_bare(activation)?;
                 native(activation, this, args, index)
             }
             Executable::Action(af) => af.exec(name, activation, this, depth, args, reason, callee),
@@ -656,9 +656,7 @@ impl<'gc> FunctionObject<'gc> {
         callee: Object<'gc>,
         args: &[Value<'gc>],
     ) -> Result<Value<'gc>, Error<'gc>> {
-        let prototype = callee
-            .get(istr!("prototype"), activation)?
-            .coerce_to_object(activation);
+        let prototype = callee.get(istr!("prototype"), activation)?;
         let this = Object::new(activation.strings(), Some(prototype));
 
         Self::define_constructor_props(activation, this, callee.into());

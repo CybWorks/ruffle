@@ -1,11 +1,11 @@
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
-use crate::avm1::property_decl::{DeclContext, Declaration, SystemClass};
+use crate::avm1::property_decl::{DeclContext, StaticDeclarations, SystemClass};
 use crate::avm1::{Object, Value};
 use crate::string::AvmString;
 use ruffle_macros::istr;
 
-const PROTO_DECLS: &[Declaration] = declare_properties! {
+const PROTO_DECLS: StaticDeclarations = declare_static_properties! {
     "copy" => method(copy; DONT_ENUM | DONT_DELETE);
 };
 
@@ -14,7 +14,7 @@ pub fn create_class<'gc>(
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
     let class = context.class(constructor, super_proto);
-    context.define_properties_on(class.proto, PROTO_DECLS);
+    context.define_properties_on(class.proto, PROTO_DECLS(context));
     class
 }
 
@@ -27,7 +27,7 @@ fn constructor<'gc>(
         .get(0)
         .unwrap_or(&Value::Undefined)
         .coerce_to_string(activation)?;
-    let callback = args.get(1).map(|v| v.coerce_to_object(activation));
+    let callback = args.get(1).copied();
     let separator_before = args
         .get(2)
         .unwrap_or(&false.into())
@@ -44,7 +44,7 @@ fn constructor<'gc>(
     this.set(istr!("caption"), caption.into(), activation)?;
 
     if let Some(callback) = callback {
-        this.set(istr!("onSelect"), callback.into(), activation)?;
+        this.set(istr!("onSelect"), callback, activation)?;
     }
 
     this.set(
@@ -69,7 +69,7 @@ pub fn copy<'gc>(
         .to_string();
     let callback = this
         .get(istr!("onSelect"), activation)?
-        .coerce_to_object(activation);
+        .coerce_to_object_or_bare(activation)?;
 
     let enabled = this
         .get(istr!("enabled"), activation)?

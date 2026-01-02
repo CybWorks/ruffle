@@ -80,8 +80,8 @@ pub fn begin_bitmap_fill<'gc>(
 
         let bitmap = ruffle_render::bitmap::BitmapInfo {
             handle,
-            width: bitmap.width() as u16,
-            height: bitmap.height() as u16,
+            width: bitmap.width(),
+            height: bitmap.height(),
         };
         let scale_matrix = Matrix::scale(
             (Twips::TWIPS_PER_PIXEL as i16).into(),
@@ -1322,8 +1322,8 @@ pub fn line_bitmap_style<'gc>(
 
         let bitmap = ruffle_render::bitmap::BitmapInfo {
             handle,
-            width: bitmap.width() as u16,
-            height: bitmap.height() as u16,
+            width: bitmap.width(),
+            height: bitmap.height(),
         };
         let scale_matrix = Matrix::scale(
             Fixed16::from_f64(bitmap.width as f64),
@@ -1527,7 +1527,7 @@ fn handle_igraphics_data<'gc>(
         } else {
             let caps = {
                 let caps = obj
-                    .get_slot(graphics_stroke_slots::CAPS)
+                    .get_slot(graphics_stroke_slots::_CAPS)
                     .coerce_to_string(activation);
                 caps_to_cap_style(caps.ok())
             };
@@ -1542,7 +1542,7 @@ fn handle_igraphics_data<'gc>(
             };
 
             let joints = obj
-                .get_slot(graphics_stroke_slots::JOINTS)
+                .get_slot(graphics_stroke_slots::_JOINTS)
                 .coerce_to_string(activation)
                 .ok();
             let miter_limit = obj
@@ -1552,7 +1552,7 @@ fn handle_igraphics_data<'gc>(
                 .get_slot(graphics_stroke_slots::PIXEL_HINTING)
                 .coerce_to_boolean();
             let scale_mode = obj
-                .get_slot(graphics_stroke_slots::SCALE_MODE)
+                .get_slot(graphics_stroke_slots::_SCALE_MODE)
                 .coerce_to_string(activation)?;
 
             let width = Twips::from_pixels(thickness.clamp(0.0, 255.0));
@@ -1789,8 +1789,8 @@ fn handle_bitmap_fill<'gc>(
 
     let bitmap = ruffle_render::bitmap::BitmapInfo {
         handle,
-        width: bitmap_data.width() as u16,
-        height: bitmap_data.height() as u16,
+        width: bitmap_data.width(),
+        height: bitmap_data.height(),
     };
 
     let scale_matrix = Matrix::scale(

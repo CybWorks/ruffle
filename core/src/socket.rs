@@ -284,7 +284,7 @@ impl<'gc> Sockets<'gc> {
                         }
                     }
                 }
-                SocketAction::Data(handle, mut data) => {
+                SocketAction::Data(handle, data) => {
                     let target = match context.sockets.sockets.get(handle) {
                         Some(socket) => socket.target,
                         // Socket must have been closed before we could send event.
@@ -317,51 +317,42 @@ impl<'gc> Sockets<'gc> {
                             let xml_socket =
                                 XmlSocket::cast(target.into()).expect("target should be XmlSocket");
 
-                            // Check if the current received packet includes a null byte.
-                            if let Some((index, _)) = data.iter().enumerate().find(|(_, &b)| b == 0)
-                            {
-                                // Received payload contains a null byte, so take data from sockets read buffer and append message data ontop.
-                                let mut buffer = xml_socket
-                                    .read_buffer()
-                                    .drain(..)
-                                    .chain(data.drain(..index))
-                                    .collect::<Vec<_>>();
+                            // The read buffer should never contain null bytes at this point,
+                            // since they are always processed immediately. Therefore, we
+                            // only need to check the new data for null bytes.
+                            let has_null = data.contains(&0);
+                            xml_socket.read_buffer().extend(data);
 
-                                // Now we loop to check for more null bytes.
+                            if has_null {
+                                // Process complete messages (null-terminated) one at a time.
+                                // We release the buffer borrow before each AS call to avoid
+                                // conflicts if AS code accesses the socket.
                                 loop {
-                                    // Remove null byte.
-                                    data.drain(..1);
+                                    let message = {
+                                        let buffer = &mut *xml_socket.read_buffer();
+                                        match buffer.iter().position(|&b| b == 0) {
+                                            Some(pos) => {
+                                                let msg: Vec<u8> = buffer.drain(..=pos).collect();
+                                                Some(AvmString::new_utf8_bytes(
+                                                    activation.gc(),
+                                                    &msg[..msg.len() - 1],
+                                                ))
+                                            }
+                                            None => None,
+                                        }
+                                    };
 
-                                    // Create message from the buffer.
-                                    let message =
-                                        AvmString::new_utf8_bytes(activation.gc(), &buffer);
-
-                                    // Call the event handler.
-                                    let _ = target.call_method(
-                                        istr!("onData"),
-                                        &[message.into()],
-                                        &mut activation,
-                                        ExecutionReason::Special,
-                                    );
-
-                                    // Check if we have another null byte in the same payload.
-                                    if let Some((index, _)) =
-                                        data.iter().enumerate().find(|(_, &b)| b == 0)
-                                    {
-                                        // Because data in XmlSocket::read_buffer() has already been consumed
-                                        // we do not need to access it again.
-                                        buffer = data.drain(..index).collect::<Vec<_>>();
-                                    } else {
-                                        // No more messages in the payload, so exit the loop.
-                                        break;
+                                    match message {
+                                        Some(msg) => {
+                                            let _ = target.call_method(
+                                                istr!("onData"),
+                                                &[msg.into()],
+                                                &mut activation,
+                                                ExecutionReason::Special,
+                                            );
+                                        }
+                                        None => break,
                                     }
-                                }
-
-                                // Check if we have leftover bytes.
-                                if !data.is_empty() {
-                                    // We had leftover bytes, so append them to XmlSocket internal read buffer,
-                                    // to be used when the next packet arrives.
-                                    xml_socket.read_buffer().extend(data);
                                 }
                             }
                         }
@@ -379,15 +370,12 @@ impl<'gc> Sockets<'gc> {
 
                     match target {
                         SocketKind::Avm2(target) => {
-                            let activation = Avm2Activation::from_nothing(context);
-
                             // Clear the buffers if the connection was closed.
                             target.read_buffer().clear();
                             target.write_buffer().clear();
 
-                            let close_evt =
-                                EventObject::bare_default_event(activation.context, "close");
-                            Avm2::dispatch_event(activation.context, close_evt, target.into());
+                            let close_evt = EventObject::bare_default_event(context, "close");
+                            Avm2::dispatch_event(context, close_evt, target.into());
                         }
                         SocketKind::Avm1(target) => {
                             let mut activation = Avm1Activation::from_stub(

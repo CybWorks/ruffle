@@ -5,27 +5,27 @@ use ruffle_macros::istr;
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::property::Attribute;
-use crate::avm1::property_decl::{DeclContext, Declaration, SystemClass};
+use crate::avm1::property_decl::{DeclContext, StaticDeclarations, SystemClass};
 use crate::avm1::{ArrayBuilder, NativeObject, Object, Value};
 use crate::string::{utils as string_utils, AvmString, WString};
 
-const PROTO_DECLS: &[Declaration] = declare_properties! {
-    "toString" => method(to_string_value_of; DONT_ENUM | DONT_DELETE);
+const PROTO_DECLS: StaticDeclarations = declare_static_properties! {
     "valueOf" => method(to_string_value_of; DONT_ENUM | DONT_DELETE);
+    "toString" => method(to_string_value_of; DONT_ENUM | DONT_DELETE);
+    "toUpperCase" => method(to_upper_case; DONT_ENUM | DONT_DELETE);
+    "toLowerCase" => method(to_lower_case; DONT_ENUM | DONT_DELETE);
     "charAt" => method(char_at; DONT_ENUM | DONT_DELETE);
     "charCodeAt" => method(char_code_at; DONT_ENUM | DONT_DELETE);
     "concat" => method(concat; DONT_ENUM | DONT_DELETE);
     "indexOf" => method(index_of; DONT_ENUM | DONT_DELETE);
     "lastIndexOf" => method(last_index_of; DONT_ENUM | DONT_DELETE);
     "slice" => method(slice; DONT_ENUM | DONT_DELETE);
+    "substring" => method(substring; DONT_ENUM | DONT_DELETE);
     "split" => method(split; DONT_ENUM | DONT_DELETE);
     "substr" => method(substr; DONT_ENUM | DONT_DELETE);
-    "substring" => method(substring; DONT_ENUM | DONT_DELETE);
-    "toLowerCase" => method(to_lower_case; DONT_ENUM | DONT_DELETE);
-    "toUpperCase" => method(to_upper_case; DONT_ENUM | DONT_DELETE);
 };
 
-const OBJECT_DECLS: &[Declaration] = declare_properties! {
+const OBJECT_DECLS: StaticDeclarations = declare_static_properties! {
     "fromCharCode" => method(from_char_code; DONT_ENUM | DONT_DELETE);
 };
 
@@ -34,8 +34,8 @@ pub fn create_class<'gc>(
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
     let class = context.native_class(constructor, Some(function), super_proto);
-    context.define_properties_on(class.proto, PROTO_DECLS);
-    context.define_properties_on(class.constr, OBJECT_DECLS);
+    context.define_properties_on(class.proto, PROTO_DECLS(context));
+    context.define_properties_on(class.constr, OBJECT_DECLS(context));
     class
 }
 

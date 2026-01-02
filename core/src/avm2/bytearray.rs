@@ -1,4 +1,4 @@
-use crate::avm2::error::{eof_error, make_error_2006};
+use crate::avm2::error::{make_error_2006, make_error_2030};
 use crate::avm2::Activation;
 use crate::avm2::Error;
 use crate::context::UpdateContext;
@@ -36,14 +36,7 @@ impl ByteArrayError {
     #[inline(never)]
     pub fn to_avm<'gc>(self, activation: &mut Activation<'_, 'gc>) -> Error<'gc> {
         match self {
-            ByteArrayError::EndOfFile => match eof_error(
-                activation,
-                "Error #2030: End of file was encountered.",
-                2030,
-            ) {
-                Ok(e) => Error::avm_error(e),
-                Err(e) => e,
-            },
+            ByteArrayError::EndOfFile => make_error_2030(activation),
             ByteArrayError::IndexOutOfBounds => make_error_2006(activation),
         }
     }
@@ -331,6 +324,13 @@ impl ByteArrayStorage {
         }
 
         *self.bytes.get_mut(item).unwrap() = value;
+    }
+
+    /// Swap all data stored in this bytearray with the passed `Vec<u8>`. This
+    /// method sets the bytearray's `position` to 0.
+    pub fn swap_storage_with(&mut self, new_data: &mut Vec<u8>) {
+        self.position.set(0);
+        std::mem::swap(&mut self.bytes, new_data);
     }
 
     /// Write a single byte at any offset in the bytearray, panicking if out of bounds.

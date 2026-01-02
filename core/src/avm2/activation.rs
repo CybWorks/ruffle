@@ -5,8 +5,9 @@ use crate::avm2::class::Class;
 use crate::avm2::domain::Domain;
 use crate::avm2::e4x::{escape_attribute_value, escape_element_value};
 use crate::avm2::error::{
-    make_error_1065, make_error_1127, make_error_1506, make_null_or_undefined_error, type_error,
-    verify_error,
+    make_error_1016, make_error_1040, make_error_1041, make_error_1063, make_error_1065,
+    make_error_1108, make_error_1119, make_error_1123, make_error_1127, make_error_1506,
+    make_null_or_undefined_error,
 };
 use crate::avm2::function::FunctionArgs;
 use crate::avm2::method::{Method, NativeMethodImpl, ResolvedParamConfig};
@@ -31,8 +32,6 @@ use ruffle_macros::istr;
 use std::cmp::{min, Ordering};
 use std::sync::Arc;
 use swf::avm2::types::MethodFlags as AbcMethodFlags;
-
-use super::error::make_mismatch_error;
 
 /// Represents a single activation of a given AVM2 function or keyframe.
 pub struct Activation<'a, 'gc: 'a> {
@@ -167,14 +166,22 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         } else {
             let global = self.global_scope();
 
-            if global
-                .as_object()
-                .is_some_and(|o| o.base().has_own_dynamic_property(name))
-            {
-                Ok(Some(global))
-            } else {
-                Ok(None)
+            // Check global scope and its prototypes recursively
+            // NOTE: We still have to check prototypes if the global scope is
+            // a primitive
+
+            let mut proto = Some(global);
+            while let Some(current_proto) = proto {
+                if let Some(current_proto) = current_proto.as_object() {
+                    if current_proto.base().has_own_dynamic_property(name) {
+                        return Ok(Some(global));
+                    }
+                }
+
+                proto = current_proto.proto(self).map(|o| o.into());
             }
+
+            Ok(None)
         }
     }
 
@@ -214,11 +221,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                     let arg = if let Some(default_value) = &param_config.default_value {
                         *default_value
                     } else {
-                        return Err(Error::avm_error(make_mismatch_error(
-                            self,
-                            method,
-                            user_arguments.len(),
-                        )?));
+                        return Err(make_error_1063(self, method, user_arguments.len()));
                     };
 
                     let coerced_arg = if let Some(param_class) = param_config.param_type {
@@ -281,7 +284,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             unreachable!();
         };
 
-        let args_object = ArrayObject::from_storage(self, args_array);
+        let args_object = ArrayObject::from_storage(self.context, args_array);
 
         if method
             .method()
@@ -344,11 +347,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let signature = method.resolved_param_config();
 
         if user_arguments.len() > signature.len() && !has_rest_or_args && !method.is_unchecked() {
-            return Err(Error::avm_error(make_mismatch_error(
-                self,
-                method,
-                user_arguments.len(),
-            )?));
+            return Err(make_error_1063(self, method, user_arguments.len()));
         }
 
         // Create locals
@@ -377,11 +376,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                 } else if method.is_unchecked() {
                     Value::Undefined
                 } else {
-                    return Err(Error::avm_error(make_mismatch_error(
-                        self,
-                        method,
-                        user_arguments.len(),
-                    )?));
+                    return Err(make_error_1063(self, method, user_arguments.len()));
                 };
 
                 let coerced_arg = if let Some(param_class) = param_config.param_type {
@@ -857,12 +852,12 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         &mut self,
         method: Method<'gc>,
         ip: usize,
-        error: Error<'gc>,
+        original_error: Error<'gc>,
     ) -> Result<usize, Error<'gc>> {
-        let error = if let Some(error) = error.as_avm_error() {
+        let error = if let Some(error) = original_error.as_avm_error() {
             error
         } else {
-            return Err(error);
+            return Err(original_error);
         };
 
         let verified_info = method.get_verified_info();
@@ -882,7 +877,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
                 if matches {
                     #[cfg(feature = "avm_debug")]
-                    tracing::info!(target: "avm_caught", "Caught exception: {:?}", Error::avm_error(error));
+                    tracing::info!(target: "avm_caught", "Caught exception: {:?}", original_error);
 
                     self.reset_stack();
                     self.push_stack(error);
@@ -893,7 +888,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             }
         }
 
-        Err(Error::avm_error(error))
+        Err(original_error)
     }
 
     #[inline(always)]
@@ -1124,7 +1119,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         // TODO: What scope should the function be executed with?
         let scope = self.create_scopechain();
 
-        let function = FunctionObject::from_method(self, method, scope, None, None);
+        let function = FunctionObject::from_method(self.context, method, scope, None, None);
         let value = function.call(self, receiver, args)?;
 
         self.push_stack(value);
@@ -1387,11 +1382,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             if matches!(name_value, Value::Object(Object::XmlListObject(_))) {
                 // ECMA-357 11.3.1 The delete Operator
                 // If the type of the operand is XMLList, then a TypeError exception is thrown.
-                return Err(Error::avm_error(type_error(
-                    self,
-                    "Error #1119: Delete operator is not supported with operand of type XMLList.",
-                    1119,
-                )?));
+                return Err(make_error_1119(self));
             }
         }
         let multiname = multiname.fill_with_runtime_params(self)?;
@@ -1505,7 +1496,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             ScriptObject::custom_object(self.gc(), *catch_class, None, catch_class.vtable())
         } else {
             // for `finally` scopes, FP just creates a normal object.
-            ScriptObject::new_object(self)
+            ScriptObject::new_object(self.context)
         };
 
         self.push_stack(so);
@@ -1611,18 +1602,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             self.push_stack(descendants);
         } else {
             // Even if it's an object with the "descendants" property, we won't support it.
-            let class_name = object
-                .instance_class(self)
-                .name()
-                .to_qualified_name_err_message(self.gc());
+            let class = object.instance_class(self);
 
-            return Err(Error::avm_error(type_error(
-                self,
-                &format!(
-                    "Error #1016: Descendants operator (..) not supported on type {class_name}",
-                ),
-                1016,
-            )?));
+            return Err(make_error_1016(self, class));
         }
 
         Ok(())
@@ -1704,8 +1686,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let multiname = multiname.fill_with_runtime_params(self)?;
         let source = self.pop_stack().null_check(self, Some(&multiname))?;
 
-        let ctor = source.get_property(&multiname, self)?;
-        let constructed_object = ctor.construct(self, args)?;
+        let constructed_object = source.construct_prop(self, &multiname, args)?;
 
         self.push_stack(constructed_object);
 
@@ -1754,7 +1735,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     fn op_new_object(&mut self, num_args: u32) -> Result<(), Error<'gc>> {
-        let object = ScriptObject::new_object(self);
+        let object = ScriptObject::new_object(self.context);
 
         for _ in 0..num_args {
             let value = self.pop_stack();
@@ -1771,7 +1752,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     fn op_new_function(&mut self, method: Method<'gc>) -> Result<(), Error<'gc>> {
         let scope = self.create_scopechain();
 
-        let new_fn = FunctionObject::from_method(self, method, scope, None, None);
+        let new_fn = FunctionObject::from_method(self.context, method, scope, None, None);
 
         self.push_stack(new_fn);
 
@@ -1814,11 +1795,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         if base_class.is_none() && class.super_class().is_some() {
             return Err(make_null_or_undefined_error(self, Value::Null, None));
         } else if base_class.map(|c| c.inner_class_definition()) != class.super_class() {
-            return Err(Error::avm_error(verify_error(
-                self,
-                "Error #1108: The OP_newclass opcode was used with the incorrect base class.",
-                1108,
-            )?));
+            return Err(make_error_1108(self));
         }
 
         // Finally, actually construct the ClassObject
@@ -1846,7 +1823,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     fn op_new_array(&mut self, num_args: u32) -> Result<(), Error<'gc>> {
         let args = self.pop_stack_args(num_args);
         let array = ArrayStorage::from_args(&args[..]);
-        let array_obj = ArrayObject::from_storage(self, array);
+        let array_obj = ArrayObject::from_storage(self.context, array);
 
         self.push_stack(array_obj);
 
@@ -1963,13 +1940,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         if value.is_of_type(xml) || value.is_of_type(xml_list) {
             self.push_stack(value);
         } else {
-            let class_name = value.instance_of_class_name(self);
+            let class = value.instance_class(self);
 
-            return Err(Error::avm_error(type_error(
-                self,
-                &format!("Error #1123: Filter operator not supported on type {class_name}."),
-                1123,
-            )?));
+            return Err(make_error_1123(self, class));
         }
         Ok(())
     }
@@ -2486,11 +2459,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             .as_object()
             .and_then(|o| o.as_class_object())
         else {
-            return Err(Error::avm_error(type_error(
-                self,
-                "Error #1041: The right-hand side of operator must be a class.",
-                1041,
-            )?));
+            return Err(make_error_1041(self));
         };
         let value = self.pop_stack();
 
@@ -2521,12 +2490,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
         if let Some(class) = class.as_object() {
             let Some(class) = class.as_class_object() else {
-                return Err(Error::avm_error(type_error(
-                    self,
-                    "Error #1041: The right-hand side of operator must be a class.",
-                    1041,
-                )?));
+                return Err(make_error_1041(self));
             };
+
             let value = self.pop_stack();
 
             if value.is_of_type(class.inner_class_definition()) {
@@ -2544,19 +2510,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
     fn op_instance_of(&mut self) -> Result<(), Error<'gc>> {
         let Some(type_object) = self.pop_stack().as_object() else {
-            return Err(Error::avm_error(type_error(
-                self,
-                "Error #1040: The right-hand side of instanceof must be a class or function.",
-                1040,
-            )?));
+            return Err(make_error_1040(self));
         };
 
         if type_object.as_class_object().is_none() && type_object.as_function_object().is_none() {
-            return Err(Error::avm_error(type_error(
-                self,
-                "Error #1040: The right-hand side of instanceof must be a class or function.",
-                1040,
-            )?));
+            return Err(make_error_1040(self));
         };
 
         let value = self.pop_stack();
@@ -2961,6 +2919,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
     fn op_throw(&mut self) -> Result<(), Error<'gc>> {
         let error_val = self.pop_stack();
-        Err(Error::avm_error(error_val))
+        Err(Error::from_value(self, error_val))
     }
 }

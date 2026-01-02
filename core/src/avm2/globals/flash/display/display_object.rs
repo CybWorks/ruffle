@@ -1,7 +1,7 @@
 //! `flash.display.DisplayObject` builtin/prototype
 
 use crate::avm2::activation::Activation;
-use crate::avm2::error::{illegal_operation_error, make_error_2007, make_error_2008};
+use crate::avm2::error::{make_error_2005, make_error_2007, make_error_2008, make_error_2078};
 use crate::avm2::filters::FilterAvm2Ext;
 use crate::avm2::globals::flash::geom::transform::color_transform_from_transform_object;
 use crate::avm2::globals::flash::geom::transform::has_matrix3d_from_transform_object;
@@ -22,7 +22,6 @@ use crate::string::AvmString;
 use crate::types::{Degrees, Percent};
 use crate::vminterface::Instantiator;
 use crate::{avm2_stub_getter, avm2_stub_setter};
-use ruffle_macros::istr;
 use ruffle_render::blend::ExtendedBlendMode;
 use ruffle_render::filters::Filter;
 use std::str::FromStr;
@@ -52,35 +51,6 @@ pub fn initialize_for_allocator<'gc>(
     dobj.on_construction_complete(context);
 
     obj.into()
-}
-
-/// Implements `flash.display.DisplayObject`'s native instance constructor.
-pub fn display_object_initializer<'gc>(
-    activation: &mut Activation<'_, 'gc>,
-    this: Value<'gc>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    // No need to call `super()`, it wouldn't do anything
-
-    let this = this.as_object().unwrap();
-
-    if let Some(dobj) = this.as_display_object() {
-        if let Some(clip) = dobj.as_movie_clip() {
-            clip.set_constructing_frame(true);
-        }
-
-        if let Some(container) = dobj.as_container() {
-            for child in container.iter_render_list() {
-                child.construct_frame(activation.context);
-            }
-        }
-
-        if let Some(clip) = dobj.as_movie_clip() {
-            clip.set_constructing_frame(false);
-        }
-    }
-
-    Ok(Value::Undefined)
 }
 
 /// Implements `alpha`'s getter.
@@ -296,19 +266,9 @@ pub fn get_filters<'gc>(
             .iter()
             .map(|f| f.as_avm2_object(activation))
             .collect::<Result<ArrayStorage<'gc>, Error<'gc>>>()?;
-        return Ok(ArrayObject::from_storage(activation, array).into());
+        return Ok(ArrayObject::from_storage(activation.context, array).into());
     }
-    Ok(ArrayObject::empty(activation).into())
-}
-
-fn build_argument_type_error<'gc>(
-    activation: &mut Activation<'_, 'gc>,
-) -> Result<Value<'gc>, Error<'gc>> {
-    Err(Error::avm_error(crate::avm2::error::argument_error(
-        activation,
-        "Error #2005: Parameter 0 is of the incorrect type. Should be type Filter.",
-        2005,
-    )?))
+    Ok(ArrayObject::empty(activation.context).into())
 }
 
 pub fn set_filters<'gc>(
@@ -329,7 +289,7 @@ pub fn set_filters<'gc>(
 
                 for filter in filters_storage.iter().flatten() {
                     if !filter.is_of_type(filter_class) {
-                        return build_argument_type_error(activation);
+                        return Err(make_error_2005(activation, 0, "Filter"));
                     }
 
                     let filter_object = filter
@@ -541,14 +501,21 @@ pub fn set_rotation<'gc>(
 
 /// Implements `name`'s getter.
 pub fn get_name<'gc>(
-    activation: &mut Activation<'_, 'gc>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let this = this.as_object().unwrap();
 
     if let Some(dobj) = this.as_display_object() {
-        return Ok(dobj.name().unwrap_or_else(|| istr!("")).into());
+        if let Some(name) = dobj.name() {
+            return Ok(name.into());
+        } else {
+            // The `Stage` is the only DisplayObject that can be accessed in
+            // AVM2 that has a `None` name
+            assert!(matches!(dobj, DisplayObject::Stage(_)));
+            return Ok(Value::Null);
+        }
     }
 
     Ok(Value::Undefined)
@@ -566,11 +533,7 @@ pub fn set_name<'gc>(
         let new_name = args.get_string(activation, 0);
 
         if dobj.instantiated_by_timeline() {
-            return Err(Error::avm_error(illegal_operation_error(
-                activation,
-                "Error #2078: The name property of a Timeline-placed object cannot be modified.",
-                2078,
-            )?));
+            return Err(make_error_2078(activation));
         }
 
         dobj.set_name(activation.gc(), new_name);

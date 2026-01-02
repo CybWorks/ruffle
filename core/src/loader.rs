@@ -17,7 +17,9 @@ use crate::avm2::{
     Object as Avm2Object,
 };
 use crate::avm2_stub_method_context;
-use crate::backend::navigator::{ErrorResponse, OwnedFuture, Request, SuccessResponse};
+use crate::backend::navigator::{
+    ErrorResponse, FetchReason, OwnedFuture, Request, SuccessResponse,
+};
 use crate::backend::ui::DialogResultFuture;
 use crate::bitmap::bitmap_data::BitmapData;
 use crate::bitmap::bitmap_data::Color;
@@ -175,8 +177,11 @@ pub enum Error {
     #[error("Domain resolution failure: {0}")]
     InvalidDomain(String),
 
+    #[error("Blocked host: {0}")]
+    BlockedHost(String),
+
     #[error("Invalid SWF: {0}")]
-    InvalidSwf(#[from] crate::tag_utils::Error),
+    InvalidSwf(#[from] swf::error::Error),
 
     #[error("Invalid bitmap")]
     InvalidBitmap(#[from] ruffle_render::error::Error),
@@ -195,19 +200,11 @@ pub enum Error {
     #[error("Error running avm1 script: {0}")]
     Avm1Error(String),
 
-    // TODO: We can't support lifetimes on this error object yet (or we'll need some backends inside
-    // the GC arena). We're losing info here. How do we fix that?
-    #[error("Error running avm2 script: {0}")]
-    Avm2Error(String),
-
     #[error("System I/O error: {0}")]
     IoError(#[from] std::io::Error),
 
     #[error("Cannot parse integer value: {0}")]
     ParseIntError(#[from] std::num::ParseIntError),
-
-    #[error("Header value is not a valid UTF-8 string.")]
-    InvalidHeaderValue,
 }
 
 impl From<crate::avm1::Error<'_>> for Error {
@@ -318,7 +315,7 @@ impl<'gc> LoadManager<'gc> {
         let importer_movie = MovieClipHandle::stash(uc, importer_movie);
 
         Box::pin(async move {
-            let fetch = player.lock().unwrap().navigator().fetch(request);
+            let fetch = player.lock().unwrap().fetch(request, FetchReason::LoadSwf);
 
             match wait_for_full_response(fetch).await {
                 Ok((body, url, _status, _redirected)) => {
@@ -646,7 +643,7 @@ impl<'gc> MovieLoader<'gc> {
             let request_url = request.url().to_string();
             let resolved_url = player.lock().unwrap().navigator().resolve_url(&request_url);
 
-            let fetch = player.lock().unwrap().navigator().fetch(request);
+            let fetch = player.lock().unwrap().fetch(request, FetchReason::LoadSwf);
 
             let mut replacing_root_movie = false;
             player.lock().unwrap().update(|uc| -> Result<(), Error> {
@@ -691,7 +688,7 @@ impl<'gc> MovieLoader<'gc> {
                 Ok((body, url, _status, _redirected)) if replacing_root_movie => {
                     ContentType::sniff(&body).expect(ContentType::Swf)?;
 
-                    let movie = SwfMovie::from_data(&body, url.to_string(), loader_url)?;
+                    let movie = SwfMovie::from_data(&body, url, loader_url)?;
                     player.lock().unwrap().mutate_with_update_context(|uc| {
                         // Make a copy of the properties on the root, so we can put them back after replacing it
                         let mut root_properties: IndexMap<AvmString, Value> = IndexMap::new();
@@ -835,7 +832,7 @@ pub fn load_root_movie<'gc>(
     let player = uc.player_handle();
 
     Box::pin(async move {
-        let fetch = player.lock().unwrap().navigator().fetch(request);
+        let fetch = player.lock().unwrap().fetch(request, FetchReason::LoadSwf);
         let response = fetch.await.map_err(|error| {
             player
                 .lock()
@@ -844,7 +841,7 @@ pub fn load_root_movie<'gc>(
                 .display_root_movie_download_failed_message(false, error.error.to_string());
             error.error
         })?;
-        let url = response.url().into_owned();
+        let swf_url = response.url().into_owned();
         let body = response.body().await.inspect_err(|error| {
             player
                 .lock()
@@ -854,11 +851,6 @@ pub fn load_root_movie<'gc>(
         })?;
 
         // The spoofed root movie URL takes precedence over the actual URL.
-        let swf_url = player
-            .lock()
-            .unwrap()
-            .compatibility_rules()
-            .rewrite_swf_url(url);
         let spoofed_or_swf_url = player
             .lock()
             .unwrap()
@@ -896,7 +888,7 @@ pub fn load_form_into_object<'gc>(
     let target_object = ObjectHandle::stash(uc, target_object);
 
     Box::pin(async move {
-        let fetch = player.lock().unwrap().navigator().fetch(request);
+        let fetch = player.lock().unwrap().fetch(request, FetchReason::Other);
 
         let response = fetch.await.map_err(|e| e.error)?;
         let response_encoding = response.text_encoding();
@@ -970,7 +962,7 @@ pub fn load_form_into_load_vars<'gc>(
     let target_object = ObjectHandle::stash(uc, target_object);
 
     Box::pin(async move {
-        let fetch = player.lock().unwrap().navigator().fetch(request);
+        let fetch = player.lock().unwrap().fetch(request, FetchReason::Other);
         let response = wait_for_full_response(fetch).await;
 
         // Fire the load handler.
@@ -1054,7 +1046,7 @@ pub fn load_stylesheet<'gc>(
     let target_object = ObjectHandle::stash(uc, target_object);
 
     Box::pin(async move {
-        let fetch = player.lock().unwrap().navigator().fetch(request);
+        let fetch = player.lock().unwrap().fetch(request, FetchReason::Other);
         let response = wait_for_full_response(fetch).await;
 
         // Fire the load handler.
@@ -1113,7 +1105,10 @@ pub fn load_data_into_url_loader<'gc>(
     let target = Avm2ScriptObjectHandle::stash(uc, target);
 
     Box::pin(async move {
-        let fetch = player.lock().unwrap().navigator().fetch(request);
+        let fetch = player
+            .lock()
+            .unwrap()
+            .fetch(request, FetchReason::UrlLoader);
         let response = wait_for_full_response(fetch).await;
 
         player.lock().unwrap().update(|uc| {
@@ -1145,7 +1140,7 @@ pub fn load_data_into_url_loader<'gc>(
 
                 let data_object = if &data_format == b"binary" {
                     let storage = ByteArrayStorage::from_vec(activation.context, body);
-                    let bytearray = ByteArrayObject::from_storage(activation, storage);
+                    let bytearray = ByteArrayObject::from_storage(activation.context, storage);
 
                     Some(bytearray.into())
                 } else if &data_format == b"variables" {
@@ -1269,7 +1264,7 @@ pub fn load_sound_avm1<'gc>(
     let sound_object = ObjectHandle::stash(uc, sound_object);
 
     Box::pin(async move {
-        let fetch = player.lock().unwrap().navigator().fetch(request);
+        let fetch = player.lock().unwrap().fetch(request, FetchReason::Other);
         let response = wait_for_full_response(fetch).await;
 
         // Fire the load handler.
@@ -1286,14 +1281,15 @@ pub fn load_sound_avm1<'gc>(
                 .map_err(|e| e.error)
                 .and_then(|(body, _, _, _)| {
                     let handle = activation.context.audio.register_mp3(&body)?;
-                    sound.load_sound(handle, activation.context);
+                    sound.load_sound(&mut activation, sound_object, handle);
+                    sound.set_duration(Some(0));
+                    sound.load_id3(&mut activation, sound_object, &body)?;
                     let duration = activation
                         .context
                         .audio
                         .get_sound_duration(handle)
                         .map(|d| d.round() as u32);
                     sound.set_duration(duration);
-                    sound.load_id3(&mut activation, sound_object, &body)?;
                     Ok(())
                 })
                 .is_ok();
@@ -1328,7 +1324,7 @@ pub fn load_sound_avm2<'gc>(
     let sound = SoundObjectHandle::stash(uc, sound);
 
     Box::pin(async move {
-        let fetch = player.lock().unwrap().navigator().fetch(request);
+        let fetch = player.lock().unwrap().fetch(request, FetchReason::Other);
         let response = wait_for_full_response(fetch).await;
 
         player.lock().unwrap().update(|uc| {
@@ -1343,9 +1339,7 @@ pub fn load_sound_avm2<'gc>(
             match response {
                 Ok((body, _, _, _)) => {
                     let handle = uc.audio.register_mp3(&body)?;
-                    if let Err(e) = sound.set_sound(uc, handle) {
-                        tracing::error!("Encountered AVM2 error when setting sound: {}", e);
-                    }
+                    sound.set_sound(uc, handle);
 
                     let total_len = body.len();
 
@@ -1401,7 +1395,7 @@ pub fn load_netstream<'gc>(
     let stream = NetStreamHandle::stash(uc, stream);
 
     Box::pin(async move {
-        let fetch = player.lock().unwrap().navigator().fetch(request);
+        let fetch = player.lock().unwrap().fetch(request, FetchReason::Other);
         match fetch.await {
             Ok(mut response) => {
                 let expected_length = response.expected_length();
@@ -1513,8 +1507,6 @@ impl<'gc> MovieLoader<'gc> {
             None => return Err(Error::Cancelled),
         };
 
-        let mut activation = Avm2Activation::from_nothing(uc);
-
         let domain = if let MovieLoaderVMData::Avm2 {
             context,
             default_domain,
@@ -1529,13 +1521,13 @@ impl<'gc> MovieLoader<'gc> {
                 .and_then(|o| o.as_application_domain())
                 .unwrap_or_else(|| {
                     let parent_domain = default_domain;
-                    Avm2Domain::movie_domain(&mut activation, parent_domain)
+                    Avm2Domain::movie_domain(uc, parent_domain)
                 });
             domain
         } else {
             // This is necessary when the MovieLoaderData is AVM1,
             // but loaded an AVM2 SWF (mixed AVM).
-            activation.context.avm2.stage_domain()
+            uc.avm2.stage_domain()
         };
 
         let movie = match sniffed_type {
@@ -1548,7 +1540,7 @@ impl<'gc> MovieLoader<'gc> {
             ContentType::Unknown => Arc::new(SwfMovie::error_movie(url.clone())),
         };
 
-        match activation.context.load_manager.get_loader_mut(handle) {
+        match uc.load_manager.get_loader_mut(handle) {
             Some(Self {
                 movie: old,
                 loader_status,
@@ -1563,7 +1555,7 @@ impl<'gc> MovieLoader<'gc> {
         if let MovieLoaderVMData::Avm2 { loader_info, .. } = vm_data {
             loader_info.set_content_type(sniffed_type);
             let fake_movie = Arc::new(SwfMovie::fake_with_compressed_len(
-                activation.context.root_swf.version(),
+                uc.root_swf.version(),
                 loader_url.clone(),
                 data.len(),
             ));
@@ -1573,29 +1565,26 @@ impl<'gc> MovieLoader<'gc> {
             // to their real values)
             loader_info.set_loader_stream(
                 LoaderStream::NotYetLoaded(fake_movie, Some(clip), false),
-                activation.gc(),
+                uc.gc(),
             );
 
             // Flash always fires an initial 'progress' event with
             // bytesLoaded=0 and bytesTotal set to the proper value.
             // This only seems to happen for an AVM2 event handler
-            MovieLoader::movie_loader_progress(handle, activation.context, 0, length)?;
+            MovieLoader::movie_loader_progress(handle, uc, 0, length)?;
 
             // Update the LoaderStream - we now have a real SWF movie and a real target clip
             // This is intentionally set *after* the first 'progress' event, to match Flash's behavior
             // (`LoaderInfo.parameters` is always empty during the first 'progress' event)
             loader_info.set_loader_stream(
                 LoaderStream::NotYetLoaded(movie.clone(), Some(clip), false),
-                activation.gc(),
+                uc.gc(),
             );
         }
 
         match sniffed_type {
             ContentType::Swf => {
-                let library = activation
-                    .context
-                    .library
-                    .library_for_movie_mut(movie.clone());
+                let library = uc.library.library_for_movie_mut(movie.clone());
 
                 library.set_avm2_domain(domain);
 
@@ -1609,12 +1598,10 @@ impl<'gc> MovieLoader<'gc> {
                     // Store our downloaded `SwfMovie` into our target `MovieClip`,
                     // and initialize it.
 
-                    mc.replace_with_movie(
-                        activation.context,
-                        Some(movie.clone()),
-                        true,
-                        loader_info,
-                    );
+                    mc.replace_with_movie(uc, Some(movie.clone()), true, loader_info);
+
+                    // Loaded movies are considered to be timeline-instantiated
+                    mc.set_instantiated_by_timeline(true);
 
                     if matches!(vm_data, MovieLoaderVMData::Avm2 { .. })
                         && !movie.is_action_script_3()
@@ -1663,10 +1650,9 @@ impl<'gc> MovieLoader<'gc> {
                 return Ok(());
             }
             ContentType::Gif | ContentType::Jpeg | ContentType::Png => {
-                let library = activation
-                    .context
-                    .library
-                    .library_for_movie_mut(movie.clone());
+                let mut activation = Avm2Activation::from_nothing(uc);
+
+                let library = activation.context.library.library_for_movie_mut(movie);
 
                 library.set_avm2_domain(domain);
 
@@ -1676,7 +1662,7 @@ impl<'gc> MovieLoader<'gc> {
 
                 let transparency = true;
                 let bitmapdata = BitmapData::new_with_pixels(
-                    activation.context.gc_context,
+                    activation.gc(),
                     bitmap.width(),
                     bitmap.height(),
                     transparency,
@@ -1761,22 +1747,16 @@ impl<'gc> MovieLoader<'gc> {
                     MovieLoaderVMData::Avm1 { .. } => {
                         // If the file is no valid supported file, the MovieClip enters the error state
                         if let Some(mut mc) = clip.as_movie_clip() {
-                            MovieLoader::load_error_swf(&mut mc, activation.context, url.clone());
+                            MovieLoader::load_error_swf(&mut mc, uc, url);
                         }
 
                         // AVM1 fires the event with the current and total length as 0
-                        MovieLoader::movie_loader_progress(handle, activation.context, 0, 0)?;
-                        MovieLoader::movie_loader_complete(
-                            handle,
-                            activation.context,
-                            None,
-                            status,
-                            redirected,
-                        )?;
+                        MovieLoader::movie_loader_progress(handle, uc, 0, 0)?;
+                        MovieLoader::movie_loader_complete(handle, uc, None, status, redirected)?;
                     }
                     MovieLoaderVMData::Avm2 { loader_info, .. } => {
                         let fake_movie = Arc::new(SwfMovie::fake_with_compressed_len(
-                            activation.context.root_swf.version(),
+                            uc.root_swf.version(),
                             loader_url,
                             data.len(),
                         ));
@@ -1785,15 +1765,10 @@ impl<'gc> MovieLoader<'gc> {
 
                         loader_info.set_loader_stream(
                             LoaderStream::NotYetLoaded(fake_movie, None, false),
-                            activation.gc(),
+                            uc.gc(),
                         );
 
-                        MovieLoader::movie_loader_progress(
-                            handle,
-                            activation.context,
-                            length,
-                            length,
-                        )?;
+                        MovieLoader::movie_loader_progress(handle, uc, length, length)?;
                         let mut error = "Error #2124: Loaded file is an unknown type.".to_string();
                         if !from_bytes {
                             error += &format!(" URL: {url}");
@@ -2284,27 +2259,13 @@ fn select_file_dialog<'gc>(
                             if !dialog_result.is_cancelled() {
                                 target_object.init_from_dialog_result(dialog_result);
 
-                                let activation = Avm2Activation::from_nothing(uc);
-                                let select_event = Avm2EventObject::bare_default_event(
-                                    activation.context,
-                                    "select",
-                                );
-                                Avm2::dispatch_event(
-                                    activation.context,
-                                    select_event,
-                                    target_object.into(),
-                                );
+                                let select_event =
+                                    Avm2EventObject::bare_default_event(uc, "select");
+                                Avm2::dispatch_event(uc, select_event, target_object.into());
                             } else {
-                                let activation = Avm2Activation::from_nothing(uc);
-                                let cancel_event = Avm2EventObject::bare_default_event(
-                                    activation.context,
-                                    "cancel",
-                                );
-                                Avm2::dispatch_event(
-                                    activation.context,
-                                    cancel_event,
-                                    target_object.into(),
-                                );
+                                let cancel_event =
+                                    Avm2EventObject::bare_default_event(uc, "cancel");
+                                Avm2::dispatch_event(uc, cancel_event, target_object.into());
                             }
                         }
                         Err(err) => {
@@ -2379,14 +2340,8 @@ pub fn save_file_dialog<'gc>(
                             target_object.into(),
                         );
                     } else {
-                        let activation = Avm2Activation::from_nothing(uc);
-                        let cancel_event =
-                            Avm2EventObject::bare_default_event(activation.context, "cancel");
-                        Avm2::dispatch_event(
-                            activation.context,
-                            cancel_event,
-                            target_object.into(),
-                        );
+                        let cancel_event = Avm2EventObject::bare_default_event(uc, "cancel");
+                        Avm2::dispatch_event(uc, cancel_event, target_object.into());
                     }
                 }
                 Err(err) => {
@@ -2424,7 +2379,7 @@ pub fn download_file_dialog<'gc>(
         // Download the data
         let req = Request::get(url.clone());
         // Doing this in two steps to prevent holding the player lock during fetch
-        let future = player.lock().unwrap().navigator().fetch(req);
+        let future = player.lock().unwrap().fetch(req, FetchReason::Other);
         let download_res = wait_for_full_response(future).await;
 
         // Fire the load handler.
@@ -2641,7 +2596,7 @@ pub fn upload_file<'gc>(
             )),
         );
         // Doing this in two steps to prevent holding the player lock during fetch
-        let future = player.lock().unwrap().navigator().fetch(req);
+        let future = player.lock().unwrap().fetch(req, FetchReason::Other);
         let result = future.await;
 
         // Fire the load handler.

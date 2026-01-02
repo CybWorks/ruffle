@@ -18,9 +18,9 @@ jobs:
     outputs:
       should_run: ${{ steps.filter.outputs.src }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
-      - uses: AurorNZ/paths-filter@v4
+      - uses: AurorNZ/paths-filter@v5
         id: filter
         with:
           filters: |
@@ -39,7 +39,7 @@ jobs:
         os: [ubuntu-24.04, windows-2025]
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Setup Node.js ${{ matrix.node_version }}
         uses: actions/setup-node@v6
@@ -104,7 +104,7 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -145,7 +145,7 @@ jobs:
           npm run build --workspace=ruffle-selfhosted
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: selfhosted-dist
           path: web/packages/selfhosted/dist
@@ -162,7 +162,7 @@ jobs:
         browser: ["chrome", "firefox", "edge"]
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Setup Node.js 24
         uses: actions/setup-node@v6
@@ -172,7 +172,7 @@ jobs:
           cache-dependency-path: web/package-lock.json
 
       - name: Download artifact
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           name: selfhosted-dist
           path: web/packages/selfhosted/dist

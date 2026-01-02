@@ -8,7 +8,7 @@ use crate::avm2::object::{
     ArrayObject as Avm2ArrayObject, FunctionObject as Avm2FunctionObject, Object as Avm2Object,
     ScriptObject as Avm2ScriptObject, TObject as _,
 };
-use crate::avm2::{FunctionArgs, Value as Avm2Value};
+use crate::avm2::{Avm2, FunctionArgs, Value as Avm2Value};
 use crate::context::UpdateContext;
 use crate::string::AvmString;
 use gc_arena::Collect;
@@ -235,30 +235,30 @@ impl Value {
         })
     }
 
-    pub fn into_avm2<'gc>(self, activation: &mut Avm2Activation<'_, 'gc>) -> Avm2Value<'gc> {
+    pub fn into_avm2<'gc>(self, context: &mut UpdateContext<'gc>) -> Avm2Value<'gc> {
         match self {
             Value::Undefined => Avm2Value::Undefined,
             Value::Null => Avm2Value::Null,
             Value::Bool(value) => Avm2Value::Bool(value),
             Value::Number(value) => Avm2Value::Number(value),
-            Value::String(value) => Avm2Value::String(AvmString::new_utf8(activation.gc(), value)),
+            Value::String(value) => Avm2Value::String(AvmString::new_utf8(context.gc(), value)),
             Value::Object(values) => {
-                let obj = Avm2ScriptObject::new_object(activation);
+                let obj = Avm2ScriptObject::new_object(context);
 
                 for (key, value) in values.into_iter() {
-                    let key = AvmString::new_utf8(activation.gc(), key);
-                    let value = value.into_avm2(activation);
-                    obj.set_dynamic_property(key, value, activation.gc());
+                    let key = AvmString::new_utf8(context.gc(), key);
+                    let value = value.into_avm2(context);
+                    obj.set_dynamic_property(key, value, context.gc());
                 }
                 Avm2Value::Object(obj)
             }
             Value::List(values) => {
                 let storage = values
                     .iter()
-                    .map(|value| value.to_owned().into_avm2(activation))
+                    .map(|value| value.to_owned().into_avm2(context))
                     .collect();
 
-                Avm2ArrayObject::from_storage(activation, storage).into()
+                Avm2ArrayObject::from_storage(context, storage).into()
             }
         }
     }
@@ -291,14 +291,13 @@ impl<'gc> Callback<'gc> {
                         Avm1ActivationIdentifier::root("[ExternalInterface]"),
                         base_clip,
                     );
-                    let this = this.coerce_to_object(&mut activation);
                     let args: Vec<Avm1Value> = args
                         .into_iter()
                         .map(|v| v.into_avm1(&mut activation))
                         .collect();
                     let name = AvmString::new_utf8(activation.gc(), name);
                     if let Ok(result) = method
-                        .call(name, &mut activation, this.into(), &args)
+                        .call(name, &mut activation, *this, &args)
                         .and_then(|value| Value::from_avm1(&mut activation, value))
                     {
                         return result;
@@ -315,7 +314,7 @@ impl<'gc> Callback<'gc> {
                 let mut activation = Avm2Activation::from_domain(context, domain);
                 let args: Vec<Avm2Value> = args
                     .into_iter()
-                    .map(|v| v.into_avm2(&mut activation))
+                    .map(|v| v.into_avm2(activation.context))
                     .collect();
 
                 let result = method.call(
@@ -325,10 +324,12 @@ impl<'gc> Callback<'gc> {
                 );
                 match result.and_then(|value| Value::from_avm2(&mut activation, value)) {
                     Ok(result) => result,
-                    Err(e) => {
-                        tracing::error!(
-                            "Unhandled error in External Interface callback {name}: {:?}",
-                            e
+                    Err(err) => {
+                        Avm2::uncaught_error(
+                            &mut activation,
+                            None, // TODO do we need to set this?
+                            err,
+                            "Error in AVM2 external interface callback",
                         );
                         Value::Null
                     }

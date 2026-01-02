@@ -5,7 +5,7 @@ use std::cell::{Cell, RefCell};
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::globals::as_broadcaster::BroadcasterFunctions;
-use crate::avm1::property_decl::{DeclContext, Declaration, SystemClass};
+use crate::avm1::property_decl::{DeclContext, StaticDeclarations, SystemClass};
 use crate::avm1::{NativeObject, Object, Value};
 use crate::avm1_stub;
 use crate::backend::ui::{FileDialogResult, FileFilter};
@@ -15,14 +15,6 @@ use gc_arena::lock::Lock;
 use gc_arena::{Collect, Gc};
 use ruffle_macros::istr;
 use url::Url;
-
-// There are two undocumented functions in FileReference: convertToPPT and deleteConvertedPPT.
-// Until further reason is given, they will be unimplemented.
-// See:
-// ASSetPropFlags(flash.net.FileReference.prototype, null, 6, 1);
-// for(var k in flash.net.FileReference.prototype) {
-// 	trace(k);
-// }
 
 #[derive(Clone, Copy, Collect)]
 #[collect(no_drop)]
@@ -91,21 +83,21 @@ pub struct FileReferenceData<'gc> {
     data: RefCell<Vec<u8>>,
 }
 
-const PROTO_DECLS: &[Declaration] = declare_properties! {
+const PROTO_DECLS: StaticDeclarations = declare_static_properties! {
+    "name" => property(name; DONT_ENUM);
+    "type" => property(file_type; DONT_ENUM);
+    "size" => property(size; DONT_ENUM);
+    "modificationDate" => property(modification_date; DONT_ENUM);
     "creationDate" => property(creation_date; DONT_ENUM);
     "creator" => property(creator; DONT_ENUM);
-    "modificationDate" => property(modification_date; DONT_ENUM);
-    "name" => property(name; DONT_ENUM);
     "postData" => property(post_data, set_post_data; DONT_ENUM);
-    "size" => property(size; DONT_ENUM);
-    "type" => property(file_type; DONT_ENUM);
     "browse" => method(browse; DONT_ENUM);
-    "cancel" => method(cancel; DONT_ENUM);
-    "download" => method(download; DONT_ENUM);
     "upload" => method(upload; DONT_ENUM);
+    "download" => method(download; DONT_ENUM);
+    "cancel" => method(cancel; DONT_ENUM);
 };
 
-const OBJECT_DECLS: &[Declaration] = declare_properties! {};
+const OBJECT_DECLS: StaticDeclarations = declare_static_properties! {};
 
 pub fn create_class<'gc>(
     context: &mut DeclContext<'_, 'gc>,
@@ -114,9 +106,9 @@ pub fn create_class<'gc>(
     array_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
     let class = context.class(constructor, super_proto);
-    context.define_properties_on(class.proto, PROTO_DECLS);
+    context.define_properties_on(class.proto, PROTO_DECLS(context));
     broadcaster_fns.initialize(context.strings, class.proto, array_proto);
-    context.define_properties_on(class.constr, OBJECT_DECLS);
+    context.define_properties_on(class.constr, OBJECT_DECLS(context));
     class
 }
 
@@ -251,17 +243,15 @@ pub fn browse<'gc>(
 
             for i in 0..length {
                 if let Value::Object(element) = array.get_element(activation, i) {
-                    let mac_type = if let Some(val) =
-                        element.get_local_stored(istr!("macType"), activation, false)
-                    {
-                        Some(val.coerce_to_string(activation)?.to_string())
-                    } else {
-                        None
-                    };
+                    let mac_type =
+                        if let Some(val) = element.get_local_stored(istr!("macType"), activation) {
+                            Some(val.coerce_to_string(activation)?.to_string())
+                        } else {
+                            None
+                        };
 
-                    let description =
-                        element.get_local_stored(istr!("description"), activation, false);
-                    let extension = element.get_local_stored(istr!("extension"), activation, false);
+                    let description = element.get_local_stored(istr!("description"), activation);
+                    let extension = element.get_local_stored(istr!("extension"), activation);
 
                     if let (Some(description), Some(extension)) = (description, extension) {
                         let description = description.coerce_to_string(activation)?.to_string();

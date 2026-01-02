@@ -3,13 +3,13 @@
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::property::Attribute;
-use crate::avm1::property_decl::{DeclContext, Declaration, SystemClass};
+use crate::avm1::property_decl::{DeclContext, StaticDeclarations, SystemClass};
 use crate::avm1::{Object, Value};
 use crate::avm_warn;
 use crate::display_object::TDisplayObject;
 use crate::string::AvmString;
 
-const PROTO_DECLS: &[Declaration] = declare_properties! {
+const PROTO_DECLS: StaticDeclarations = declare_static_properties! {
     use fn method;
     "watch" => method(WATCH; DONT_ENUM | DONT_DELETE | VERSION_6);
     "unwatch" => method(UNWATCH; DONT_ENUM | DONT_DELETE | VERSION_6);
@@ -21,7 +21,7 @@ const PROTO_DECLS: &[Declaration] = declare_properties! {
     "isPropertyEnumerable" => method(IS_PROPERTY_ENUMERABLE; DONT_DELETE | DONT_ENUM | VERSION_6);
 };
 
-const OBJECT_DECLS: &[Declaration] = declare_properties! {
+const OBJECT_DECLS: StaticDeclarations = declare_static_properties! {
     use fn method;
     "registerClass" => method(REGISTER_CLASS; DONT_ENUM | DONT_DELETE | READ_ONLY);
 };
@@ -37,8 +37,8 @@ pub fn create_class<'gc>(context: &mut DeclContext<'_, 'gc>) -> SystemClass<'gc>
         Some(function),
         context.object_proto,
     );
-    context.define_properties_on(class.proto, PROTO_DECLS);
-    context.define_properties_on(class.constr, OBJECT_DECLS);
+    context.define_properties_on(class.proto, PROTO_DECLS(context));
+    context.define_properties_on(class.constr, OBJECT_DECLS(context));
     class
 }
 
@@ -86,7 +86,7 @@ fn constructor<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let this = match args.get(0).unwrap_or(&Value::Undefined) {
         Value::Undefined | Value::Null => this,
-        val => val.coerce_to_object(activation),
+        val => val.coerce_to_object_or_bare(activation)?,
     };
     Ok(this.into())
 }
@@ -98,8 +98,8 @@ fn function<'gc>(
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let obj = match args.get(0).unwrap_or(&Value::Undefined) {
-        Value::Undefined | Value::Null => Object::new(&activation.context.strings, None),
-        val => val.coerce_to_object(activation),
+        Value::Undefined | Value::Null => Object::new_without_proto(activation.gc()),
+        val => val.coerce_to_object_or_bare(activation)?,
     };
     Ok(obj.into())
 }
@@ -196,7 +196,7 @@ fn is_prototype_of<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     match args.get(0) {
         Some(val) => {
-            let ob = val.coerce_to_object(activation);
+            let ob = val.coerce_to_object_or_bare(activation)?;
             Ok(this.is_prototype_of(activation, ob).into())
         }
         _ => Ok(false.into()),
@@ -253,7 +253,7 @@ fn watch<'gc>(
     let callback = args
         .get(1)
         .unwrap_or(&Value::Undefined)
-        .coerce_to_object(activation);
+        .coerce_to_object_or_bare(activation)?;
     if callback.as_function().is_none() {
         return Ok(false.into());
     }
@@ -292,7 +292,7 @@ pub fn as_set_prop_flags<'gc>(
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let object = if let Some(v) = args.get(0) {
-        v.coerce_to_object(activation)
+        v.coerce_to_object_or_bare(activation)?
     } else {
         avm_warn!(
             activation,

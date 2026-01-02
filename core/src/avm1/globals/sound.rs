@@ -12,7 +12,8 @@ use ruffle_macros::istr;
 use crate::avm1::activation::Activation;
 use crate::avm1::clamp::Clamp;
 use crate::avm1::error::Error;
-use crate::avm1::property_decl::{DeclContext, Declaration, SystemClass};
+use crate::avm1::function::FunctionObject;
+use crate::avm1::property_decl::{DeclContext, StaticDeclarations, SystemClass};
 use crate::avm1::{ArrayBuilder, Attribute, ExecutionReason, NativeObject, Object, Value};
 use crate::backend::audio::{SoundHandle, SoundInstanceHandle};
 use crate::backend::navigator::Request;
@@ -178,6 +179,7 @@ impl<'gc> Sound<'gc> {
                 num_loops: play.loops,
                 envelope: None,
             },
+            None,
             self.owner(),
             Some(play.sound_object),
         );
@@ -194,15 +196,45 @@ impl<'gc> Sound<'gc> {
         unlock!(Gc::write(context.gc(), self.0), SoundData, state).replace(new_data);
     }
 
-    pub fn load_sound(self, sound: SoundHandle, context: &mut UpdateContext<'gc>) {
+    pub fn load_sound(
+        self,
+        activation: &mut Activation<'_, 'gc>,
+        sound_object: Object<'gc>,
+        sound: SoundHandle,
+    ) {
         let new_data = SoundState::Loaded { sound };
-        let write = Gc::write(context.gc(), self.0);
+        let write = Gc::write(activation.gc(), self.0);
         let old_data = unlock!(write, SoundData, state).replace(new_data);
 
         if let SoundState::Loading { queued_plays } = old_data {
             for play in queued_plays {
-                self.play(play, context);
+                self.play(play, activation.context);
             }
+        }
+
+        if !sound_object.has_property(activation, istr!("position"))
+            || !sound_object.has_property(activation, istr!("duration"))
+        {
+            let fn_proto = activation.prototypes().function;
+            let getter_position =
+                FunctionObject::native(position).build(activation.strings(), fn_proto, None);
+            let getter_duration =
+                FunctionObject::native(duration).build(activation.strings(), fn_proto, None);
+
+            sound_object.add_property(
+                activation.gc(),
+                istr!("position"),
+                getter_position,
+                None,
+                Attribute::DONT_ENUM | Attribute::DONT_DELETE,
+            );
+            sound_object.add_property(
+                activation.gc(),
+                istr!("duration"),
+                getter_duration,
+                None,
+                Attribute::DONT_ENUM | Attribute::DONT_DELETE,
+            );
         }
     }
 
@@ -290,8 +322,10 @@ impl<'gc> Sound<'gc> {
     }
 }
 
-const PROTO_DECLS: &[Declaration] = declare_properties! {
+const PROTO_DECLS: StaticDeclarations = declare_static_properties! {
     // Note: id3 is not a built-in property. See [`Sound::load_id3`].
+    // Note: duration is defined later. See [`Sound::load_sound`].
+    // Note: position is defined later. See [`Sound::load_sound`].
     "getPan" => method(get_pan; DONT_ENUM | DONT_DELETE | READ_ONLY);
     "getTransform" => method(get_transform; DONT_ENUM | DONT_DELETE | READ_ONLY);
     "getVolume" => method(get_volume; DONT_ENUM | DONT_DELETE | READ_ONLY);
@@ -308,10 +342,6 @@ const PROTO_DECLS: &[Declaration] = declare_properties! {
     "loadSound" => method(load_sound; DONT_ENUM | DONT_DELETE | READ_ONLY | VERSION_6);
     "getBytesLoaded" => method(get_bytes_loaded; DONT_ENUM | DONT_DELETE | READ_ONLY | VERSION_6);
     "getBytesTotal" => method(get_bytes_total; DONT_ENUM | DONT_DELETE | READ_ONLY | VERSION_6);
-
-    // TODO The following 2 probably should not be declared here. See avm1/sound_props_swf*
-    "duration" => property(duration; DONT_ENUM | DONT_DELETE);
-    "position" => property(position; DONT_ENUM | DONT_DELETE);
 };
 
 pub fn create_class<'gc>(
@@ -319,7 +349,7 @@ pub fn create_class<'gc>(
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
     let class = context.native_class(constructor, None, super_proto);
-    context.define_properties_on(class.proto, PROTO_DECLS);
+    context.define_properties_on(class.proto, PROTO_DECLS(context));
     class
 }
 
@@ -362,7 +392,7 @@ fn attach_sound<'gc>(
             .library_for_movie_mut(movie)
             .character_by_export_name(name)
         {
-            sound.load_sound(sound_handle, activation.context);
+            sound.load_sound(activation, this, sound_handle);
             sound.set_is_streaming(false);
             sound.set_duration(
                 activation
@@ -563,7 +593,7 @@ fn set_transform<'gc>(
     let obj = args
         .get(0)
         .unwrap_or(&Value::Undefined)
-        .coerce_to_object(activation);
+        .coerce_to_object_or_bare(activation)?;
 
     if let NativeObject::Sound(sound) = this.native() {
         let mut transform = if let Some(owner) = sound.owner() {
@@ -706,10 +736,12 @@ fn set_position<'gc>(
 }
 
 fn get_position<'gc>(
-    activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    _activation: &mut Activation<'_, 'gc>,
+    this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm1_stub!(activation, "Sound", "getPosition");
+    if let NativeObject::Sound(sound) = this.native() {
+        return Ok(sound.position().into());
+    }
     Ok(Value::Undefined)
 }

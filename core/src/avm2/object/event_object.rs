@@ -11,9 +11,9 @@ use crate::display_object::TDisplayObject;
 use crate::display_object::{DisplayObject, InteractiveObject, TInteractiveObject};
 use crate::events::{KeyCode, MouseButton};
 use crate::string::AvmString;
-use crate::utils::HasPrefixField;
 use gc_arena::barrier::unlock;
 use gc_arena::{lock::RefLock, Collect, Gc, GcWeak, Mutation};
+use ruffle_common::utils::HasPrefixField;
 use ruffle_macros::istr;
 use std::cell::{Ref, RefMut};
 use std::fmt::Debug;
@@ -231,7 +231,7 @@ impl<'gc> EventObject<'gc> {
         activation: &mut Activation<'_, 'gc>,
         info: impl IntoIterator<Item = (&'a str, &'a str)>,
     ) -> EventObject<'gc> {
-        let info_object = ScriptObject::new_object(activation);
+        let info_object = ScriptObject::new_object(activation.context);
         for (key, value) in info {
             let key = AvmString::new_utf8(activation.gc(), key);
             let value = AvmString::new_utf8(activation.gc(), value);

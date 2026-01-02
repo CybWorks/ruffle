@@ -3,19 +3,19 @@
 use std::cell::Cell;
 
 use crate::avm1::function::ExecutionReason;
-use crate::avm1::property_decl::{DeclContext, Declaration, SystemClass};
+use crate::avm1::property_decl::{DeclContext, StaticDeclarations, SystemClass};
 use crate::avm1::xml::{XmlNode, ELEMENT_NODE, TEXT_NODE};
 use crate::avm1::{Activation, Attribute, Error, NativeObject, Object, Value};
 use crate::avm_warn;
 use crate::backend::navigator::Request;
 use crate::string::{AvmString, StringContext, WStr, WString};
-use crate::xml::custom_unescape;
 use gc_arena::barrier::unlock;
 use gc_arena::lock::Lock;
 use gc_arena::{Collect, Gc};
 use quick_xml::errors::IllFormedError;
 use quick_xml::events::attributes::AttrError;
 use quick_xml::{events::Event, Reader};
+use ruffle_common::xml::custom_unescape;
 use ruffle_macros::istr;
 
 #[derive(Clone, Copy, Collect)]
@@ -97,7 +97,7 @@ impl<'gc> Xml<'gc> {
                 root,
                 xml_decl: Lock::new(None),
                 doctype: Lock::new(None),
-                id_map: Object::new(context, None),
+                id_map: Object::new_without_proto(context.gc()),
                 status: Cell::new(XmlStatus::NoError),
             },
         ));
@@ -252,21 +252,22 @@ impl<'gc> Xml<'gc> {
     }
 }
 
-const PROTO_DECLS: &[Declaration] = declare_properties! {
-    "docTypeDecl" => property(doc_type_decl; READ_ONLY);
-    "ignoreWhite" => bool(false);
-    "contentType" => string("application/x-www-form-urlencoded"; READ_ONLY);
-    "xmlDecl" => property(xml_decl);
-    "idMap" => property(id_map);
-    "status" => property(status);
+const PROTO_DECLS: StaticDeclarations = declare_static_properties! {
     "createElement" => method(create_element);
     "createTextNode" => method(create_text_node);
-    "getBytesLoaded" => method(get_bytes_loaded);
-    "getBytesTotal" => method(get_bytes_total);
     "parseXML" => method(parse_xml);
     "load" => method(load);
     "sendAndLoad" => method(send_and_load);
     "onData" => method(on_data);
+    "getBytesLoaded" => method(get_bytes_loaded);
+    "getBytesTotal" => method(get_bytes_total);
+    "contentType" => string("application/x-www-form-urlencoded"; READ_ONLY);
+    "docTypeDecl" => property(doc_type_decl; READ_ONLY);
+    "ignoreWhite" => bool(false);
+    "status" => property(status);
+    "xmlDecl" => property(xml_decl);
+    // TODO Looks like idMap is not a built-in property.
+    "idMap" => property(id_map);
 };
 
 pub fn create_class<'gc>(
@@ -274,7 +275,7 @@ pub fn create_class<'gc>(
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
     let class = context.native_class(constructor, None, super_proto);
-    context.define_properties_on(class.proto, PROTO_DECLS);
+    context.define_properties_on(class.proto, PROTO_DECLS(context));
     class
 }
 

@@ -1,7 +1,7 @@
 //! `TextFormat` impl
 
 use crate::avm1::object::NativeObject;
-use crate::avm1::property_decl::{DeclContext, Declaration, SystemClass};
+use crate::avm1::property_decl::{DeclContext, StaticDeclarations, SystemClass};
 use crate::avm1::{Activation, ArrayBuilder, Error, Object, Value};
 use crate::display_object::{AutoSizeMode, EditText, TDisplayObject};
 use crate::ecma_conversions::round_to_even;
@@ -44,7 +44,8 @@ macro_rules! method {
     };
 }
 
-const PROTO_DECLS: &[Declaration] = declare_properties! {
+const PROTO_DECLS: StaticDeclarations = declare_static_properties! {
+    "getTextExtent" => method(method!(get_text_extent); DONT_ENUM | DONT_DELETE);
     "font" => property(getter!(font), setter!(set_font));
     "size" => property(getter!(size), setter!(set_size));
     "color" => property(getter!(color), setter!(set_color));
@@ -64,7 +65,6 @@ const PROTO_DECLS: &[Declaration] = declare_properties! {
     "display" => property(getter!(display), setter!(set_display));
     "kerning" => property(getter!(kerning), setter!(set_kerning));
     "letterSpacing" => property(getter!(letter_spacing), setter!(set_letter_spacing));
-    "getTextExtent" => method(method!(get_text_extent); DONT_ENUM | DONT_DELETE);
 };
 
 pub fn create_class<'gc>(
@@ -72,7 +72,7 @@ pub fn create_class<'gc>(
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
     let class = context.native_class(constructor, None, super_proto);
-    context.define_properties_on(class.proto, PROTO_DECLS);
+    context.define_properties_on(class.proto, PROTO_DECLS(context));
     class
 }
 
@@ -538,7 +538,7 @@ fn get_text_extent<'gc>(
     temp_edittext.set_new_text_format(text_format.clone());
     temp_edittext.set_text(&text, activation.context);
 
-    let result = Object::new(&activation.context.strings, None);
+    let result = Object::new_without_proto(activation.gc());
     let metrics = temp_edittext
         .layout_metrics()
         .expect("All text boxes should have at least one line at all times");

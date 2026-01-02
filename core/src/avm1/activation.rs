@@ -343,23 +343,19 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         active_clip: DisplayObject<'gc>,
         code: SwfSlice,
     ) -> Result<ReturnType<'gc>, Error<'gc>> {
-        let mut parent_activation =
-            Activation::from_nothing(self.context, self.id.child("[Actions Parent]"), active_clip);
-        let clip_obj = active_clip
-            .object1_or_undef()
-            .coerce_to_object(&mut parent_activation);
+        let clip_obj = active_clip.object1_or_bare(self.gc());
         let child_scope = Gc::new(
-            parent_activation.gc(),
+            self.gc(),
             Scope::new(
-                parent_activation.scope(),
+                self.context.avm1.global_scope(active_clip.swf_version()),
                 scope::ScopeClass::Target,
                 clip_obj,
             ),
         );
-        let constant_pool = parent_activation.context.avm1.constant_pool();
-        let child_name = parent_activation.id.child(name);
+        let constant_pool = self.context.avm1.constant_pool();
+        let child_name = self.id.child(name);
         let mut child_activation = Activation::from_action(
-            parent_activation.context,
+            self.context,
             child_name,
             active_clip.swf_version(),
             child_scope,
@@ -571,6 +567,16 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         self.context.avm1.push(value);
     }
 
+    fn pop_call_args(&mut self, num_args: usize) -> Vec<Value<'gc>> {
+        (0..num_args.min(self.context.avm1.stack_len()))
+            .map(|_| {
+                let arg = self.context.avm1.pop();
+                // Unwrap MovieClipReferences, if possible.
+                arg.as_object(self).map(Value::from).unwrap_or(arg)
+            })
+            .collect()
+    }
+
     fn action_add(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
         let a = self.context.avm1.pop();
         let b = self.context.avm1.pop();
@@ -646,10 +652,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let start_clip = self.target_clip_or_root();
         let source_clip = self.resolve_target_display_object(start_clip, source, true)?;
 
-        if let Some(movie_clip) = source_clip.and_then(|o| o.as_movie_clip()) {
-            globals::movie_clip::clone_sprite(movie_clip, self.context, target, depth, None);
-        } else {
-            avm_warn!(self, "CloneSprite: Source is not a movie clip");
+        if let Some(source_clip) = source_clip {
+            globals::movie_clip::clone_sprite(source_clip, self.context, target, depth, None);
         }
 
         Ok(FrameControl::Continue)
@@ -754,16 +758,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let fn_name_value = self.context.avm1.pop();
         let fn_name = fn_name_value.coerce_to_string(self)?;
         let num_args = self.context.avm1.pop().coerce_to_u32(self)? as usize;
-        let num_args = num_args.min(self.context.avm1.stack_len());
-        let mut args = Vec::with_capacity(num_args);
-        for _ in 0..num_args {
-            let arg = self.context.avm1.pop();
-            if let Value::MovieClip(_) = arg {
-                args.push(Value::Object(arg.coerce_to_object(self)));
-            } else {
-                args.push(arg);
-            }
-        }
+        let args = self.pop_call_args(num_args);
 
         let variable = self.get_variable(fn_name)?;
 
@@ -784,16 +779,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let method_name = self.context.avm1.pop();
         let object_val = self.context.avm1.pop();
         let num_args = self.context.avm1.pop().coerce_to_u32(self)? as usize;
-        let num_args = num_args.min(self.context.avm1.stack_len());
-        let mut args = Vec::with_capacity(num_args);
-        for _ in 0..num_args {
-            let arg = self.context.avm1.pop();
-            if let Value::MovieClip(_) = arg {
-                args.push(Value::Object(arg.coerce_to_object(self)));
-            } else {
-                args.push(arg);
-            }
-        }
+        let args = self.pop_call_args(num_args);
 
         // Can not call method on undefined/null.
         if matches!(object_val, Value::Undefined | Value::Null) {
@@ -801,7 +787,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             return Ok(FrameControl::Continue);
         }
 
-        let object = object_val.coerce_to_object(self);
+        let object = object_val.coerce_to_object_or_bare(self)?;
 
         let method_name = if method_name == Value::Undefined {
             istr!(self, "")
@@ -823,26 +809,15 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
     fn action_cast_op(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
         let obj = self.context.avm1.pop();
-        let constr = self.context.avm1.pop().coerce_to_object(self);
+        let constr = self.context.avm1.pop();
+        // For some reason, FP does this useless extra coercion.
+        if obj.is_primitive() {
+            let _ = obj.coerce_to_object(self)?;
+        }
 
-        let is_instance_of = if let Value::Object(obj) = obj {
-            let prototype = constr
-                .get(istr!(self, "prototype"), self)?
-                .coerce_to_object(self);
-            obj.is_instance_of(self, constr, prototype)?
-        } else if let Value::MovieClip(_) = obj {
-            let obj = obj.coerce_to_object(self);
-            let prototype = constr
-                .get(istr!(self, "prototype"), self)?
-                .coerce_to_object(self);
-            obj.is_instance_of(self, constr, prototype)?
-        } else {
-            false
-        };
-
+        let is_instance_of = obj.instance_of(constr, self)?;
         let result = if is_instance_of { obj } else { Value::Null };
         self.context.avm1.push(result);
-
         Ok(FrameControl::Continue)
     }
 
@@ -880,7 +855,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let swf_version = self.swf_version();
         let func_data = parent_data.to_unbounded_subslice(action.actions);
         let constant_pool = self.constant_pool();
-        let bc = self.base_clip.object1_or_undef().coerce_to_object(self);
+        let bc = self.base_clip.object1_or_bare(self.gc());
         let func = Avm1Function::from_swf_function(
             self.gc(),
             swf_version,
@@ -944,10 +919,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let name = name_val.coerce_to_string(self)?;
         let object = self.context.avm1.pop();
 
-        let success = if let Value::Object(object) = object {
-            object.delete(self, name)
-        } else if let Value::MovieClip(_) = object {
-            let object = object.coerce_to_object(self);
+        let success = if let Some(object) = object.as_object(self) {
             object.delete(self, name)
         } else {
             avm_warn!(self, "Cannot delete property {} from {:?}", name, object);
@@ -1003,23 +975,16 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     fn action_enumerate(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
         let name_value = self.context.avm1.pop();
         let name = name_value.coerce_to_string(self)?;
-        let object: Value<'gc> = self.get_variable(name)?.into();
+        let value: Value<'gc> = self.get_variable(name)?.into();
         self.context.avm1.push(Value::Undefined); // Sentinel that indicates end of enumeration
 
-        match object {
-            Value::MovieClip(_) => {
-                let ob = object.coerce_to_object(self);
-                for k in ob.get_keys(self, false).into_iter().rev() {
-                    self.stack_push(k.into());
-                }
+        if let Some(object) = value.as_object(self) {
+            for k in object.get_keys(self, false).into_iter().rev() {
+                self.stack_push(k.into());
             }
-            Value::Object(ob) => {
-                for k in ob.get_keys(self, false).into_iter().rev() {
-                    self.stack_push(k.into());
-                }
-            }
-            _ => avm_error!(self, "Cannot enumerate properties of {}", name),
-        };
+        } else {
+            avm_error!(self, "Cannot enumerate properties of {}", name);
+        }
 
         Ok(FrameControl::Continue)
     }
@@ -1029,12 +994,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
         self.context.avm1.push(Value::Undefined); // Sentinel that indicates end of enumeration
 
-        if let Value::MovieClip(_) = value {
-            let object = value.coerce_to_object(self);
-            for k in object.get_keys(self, false).into_iter().rev() {
-                self.stack_push(k.into());
-            }
-        } else if let Value::Object(object) = value {
+        if let Some(object) = value.as_object(self) {
             for k in object.get_keys(self, false).into_iter().rev() {
                 self.stack_push(k.into());
             }
@@ -1067,14 +1027,12 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     fn action_extends(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let superclass = self.context.avm1.pop().coerce_to_object(self);
-        let subclass = self.context.avm1.pop().coerce_to_object(self);
+        let superclass = self.context.avm1.pop().coerce_to_object_or_bare(self)?;
+        let subclass = self.context.avm1.pop().coerce_to_object_or_bare(self)?;
 
         //TODO: What happens if we try to extend an object which has no `prototype`?
         //e.g. `class Whatever extends Object.prototype` or `class Whatever extends 5`
-        let super_prototype = superclass
-            .get(istr!(self, "prototype"), self)?
-            .coerce_to_object(self);
+        let super_prototype = superclass.get(istr!(self, "prototype"), self)?;
 
         let sub_prototype = Object::new(self.strings(), Some(super_prototype));
 
@@ -1101,9 +1059,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let name_val = self.context.avm1.pop();
         let name = name_val.coerce_to_string(self)?;
         let object_val = self.context.avm1.pop();
-        let object = object_val.coerce_to_object(self);
+        let object = object_val.coerce_to_object_or_bare(self)?;
 
-        let result = object.get_non_slash_path(name, self)?;
+        let result = object.get(name, self)?;
         self.stack_push(result);
 
         Ok(FrameControl::Continue)
@@ -1253,11 +1211,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let mut clip_target: Option<DisplayObject<'gc>> = if level_target > -1 {
             self.get_level(level_target)
         } else if action.is_load_vars() || action.is_target_sprite() {
-            if let Value::Object(target) = target_val {
+            if let Some(target) = target_val.as_object(self) {
                 target.as_display_object()
-            } else if let Value::MovieClip(_) = target_val {
-                let tgt = target_val.coerce_to_object(self);
-                tgt.as_display_object()
             } else {
                 let start = self.target_clip_or_root();
                 self.resolve_target_display_object(start, target_val, true)?
@@ -1285,7 +1240,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             }
             if is_load_vars {
                 if let Some(clip_target) = clip_target {
-                    let target_obj = clip_target.object1_or_undef().coerce_to_object(self);
+                    let target_obj = clip_target.object1_or_bare(self.gc());
                     let request = self.locals_into_request(
                         url,
                         NavigationMethod::from_send_vars_method(action.send_vars_method()),
@@ -1471,7 +1426,14 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     fn action_implements_op(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let constructor = self.context.avm1.pop().coerce_to_object(self);
+        // Old Flash Players used to coerce primitives as well. However, this was changed and
+        // now the following is logged:
+        // Parameters of primitive types are no longer coerced into the required type - Object.
+        let constructor = self.context.avm1.pop().as_object(self);
+        if constructor.is_none() {
+            avm_warn!(self, "ImplementsOp: primitive not coerced into object");
+        }
+
         let count = self.context.avm1.pop();
         // Old Flash Players (at least FP9) used to coerce objects as well. However, this was
         // changed at some point and instead the following is logged:
@@ -1489,40 +1451,34 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         if count > 0 {
             let mut interfaces = Vec::with_capacity(count);
 
-            // TODO: If one of the interfaces is not an object, do we leave the
-            // whole stack dirty, or...?
             for _ in 0..count {
-                interfaces.push(self.context.avm1.pop().coerce_to_object(self));
+                // Old Flash Players used to coerce primitives as well. However, this was changed and
+                // now the following is logged:
+                // Parameters of primitive types are no longer coerced into the required type - Object.
+                if let Some(obj) = self.context.avm1.pop().as_object(self) {
+                    if let Value::Object(prototype) = obj.prototype(self) {
+                        interfaces.push(prototype);
+                    }
+                } else {
+                    avm_warn!(self, "ImplementsOp: primitive not coerced into object");
+                }
             }
 
-            let prototype = constructor
-                .get(istr!(self, "prototype"), self)?
-                .coerce_to_object(self);
-            prototype.set_interfaces(self.gc(), interfaces);
+            if let Some(prototype) = constructor
+                .filter(|_| self.swf_version >= 7)
+                .and_then(|o| o.prototype(self).as_object(self))
+            {
+                prototype.set_interfaces(self.gc(), interfaces);
+            }
         }
 
         Ok(FrameControl::Continue)
     }
 
     fn action_instance_of(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let constr = self.context.avm1.pop().coerce_to_object(self);
+        let constr = self.context.avm1.pop();
         let obj = self.context.avm1.pop();
-
-        let result = if let Value::Object(obj) = obj {
-            let prototype = constr
-                .get(istr!(self, "prototype"), self)?
-                .coerce_to_object(self);
-            obj.is_instance_of(self, constr, prototype)?
-        } else if let Value::MovieClip(_) = obj {
-            let obj = obj.coerce_to_object(self);
-            let prototype = constr
-                .get(istr!(self, "prototype"), self)?
-                .coerce_to_object(self);
-            obj.is_instance_of(self, constr, prototype)?
-        } else {
-            false
-        };
-
+        let result = obj.instance_of(constr, self)?;
         self.context.avm1.push(result.into());
         Ok(FrameControl::Continue)
     }
@@ -1676,16 +1632,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let method_name = self.context.avm1.pop();
         let object_val = self.context.avm1.pop();
         let num_args = self.context.avm1.pop().coerce_to_u32(self)? as usize;
-        let num_args = num_args.min(self.context.avm1.stack_len());
-        let mut args = Vec::with_capacity(num_args);
-        for _ in 0..num_args {
-            let arg = self.context.avm1.pop();
-            if let Value::MovieClip(_) = arg {
-                args.push(Value::Object(arg.coerce_to_object(self)));
-            } else {
-                args.push(arg);
-            }
-        }
+        let args = self.pop_call_args(num_args);
 
         // Can not call method on undefined/null.
         if matches!(object_val, Value::Undefined | Value::Null) {
@@ -1693,7 +1640,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             return Ok(FrameControl::Continue);
         }
 
-        let object = object_val.coerce_to_object(self);
+        let object = object_val.coerce_to_object_or_bare(self)?;
 
         let method_name = if method_name == Value::Undefined {
             istr!(self, "")
@@ -1728,19 +1675,10 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let fn_name_val = self.context.avm1.pop();
         let fn_name = fn_name_val.coerce_to_string(self)?;
         let num_args = self.context.avm1.pop().coerce_to_u32(self)? as usize;
-        let num_args = num_args.min(self.context.avm1.stack_len());
-        let mut args = Vec::with_capacity(num_args);
-        for _ in 0..num_args {
-            let arg = self.context.avm1.pop();
-            if let Value::MovieClip(_) = arg {
-                args.push(Value::Object(arg.coerce_to_object(self)));
-            } else {
-                args.push(arg);
-            }
-        }
+        let args = self.pop_call_args(num_args);
 
         let name_value: Value<'gc> = self.resolve(fn_name)?.into();
-        let constructor = name_value.coerce_to_object(self);
+        let constructor = name_value.coerce_to_object_or_bare(self)?;
         let result = constructor.construct(self, &args)?;
         self.stack_push(result);
 
@@ -1848,10 +1786,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                 // Revert the target to the base clip, or `None` if the base was also removed
                 self.set_target_clip(Some(self.base_clip()));
 
-                let clip_obj = self
-                    .target_clip_or_root()
-                    .object1_or_undef()
-                    .coerce_to_object(self);
+                let clip_obj = self.target_clip_or_root().object1_or_bare(self.gc());
 
                 self.set_scope(Scope::new_target_scope(self.scope(), clip_obj, self.gc()));
             }
@@ -1872,7 +1807,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let name_val = self.context.avm1.pop();
         let name = name_val.coerce_to_string(self)?;
 
-        let object = self.context.avm1.pop().coerce_to_object(self);
+        let object = self.context.avm1.pop().coerce_to_object_or_bare(self)?;
         object.set(name, value, self)?;
 
         Ok(FrameControl::Continue)
@@ -1980,7 +1915,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                 }
             }
             Value::MovieClip(_) => {
-                let o = target.coerce_to_object(self);
+                let o = target.coerce_to_object_or_bare(self)?;
                 if let Some(clip) = o.as_display_object() {
                     // MovieClips can be targeted directly.
                     self.set_target_clip(Some(clip));
@@ -1996,10 +1931,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             }
         };
 
-        let clip_obj = self
-            .target_clip_or_base_clip()
-            .object1_or_undef()
-            .coerce_to_object(self);
+        let clip_obj = self.target_clip_or_base_clip().object1_or_bare(self.gc());
 
         self.set_scope(Scope::new_target_scope(self.scope(), clip_obj, self.gc()));
         Ok(FrameControl::Continue)
@@ -2154,7 +2086,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     fn action_target_path(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
         // Prints out the dot-path for the parameter.
         // Parameter must be a display object (not a string path).
-        let param = self.context.avm1.pop().coerce_to_object(self);
+        let param = self.context.avm1.pop().coerce_to_object_or_bare(self)?;
         let result = if let Some(display_object) = param.as_display_object() {
             let path = display_object.path();
             AvmString::new(self.gc(), path).into()
@@ -2376,7 +2308,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
             value => {
                 // Note that primitives get boxed at this point.
-                let object = value.coerce_to_object(self);
+                let object = value.coerce_to_object_or_bare(self)?;
                 let with_scope = Gc::new(self.gc(), Scope::new_with_scope(self.scope(), object));
                 let mut new_activation = self.with_new_scope("[With]", with_scope);
                 if let ReturnType::Explicit(value) = new_activation.run_actions(code)? {
@@ -2559,9 +2491,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         }
 
         let root = start.avm1_root();
-        let start = start.object1_or_undef().coerce_to_object(self);
+        let start = start.object1_or_bare(self.gc());
         Ok(self
-            .resolve_target_path(root, start, &path, false, true)?
+            .resolve_target_path(root, start, &path, false)?
             .and_then(|o| o.as_display_object()))
     }
 
@@ -2580,7 +2512,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         start: Object<'gc>,
         mut path: &WStr,
         mut first_element: bool,
-        path_has_slash: bool,
     ) -> Result<Option<Object<'gc>>, Error<'gc>> {
         // Empty path resolves immediately to start clip.
         if path.is_empty() {
@@ -2591,7 +2522,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         // (`/bar` means `_root.bar`)
         let (mut object, mut is_slash_path) = if path.starts_with(b'/') {
             path = &path[1..];
-            (root.object1_or_undef().coerce_to_object(self), true)
+            (root.object1_or_bare(self.gc()), true)
         } else {
             (start, false)
         };
@@ -2645,7 +2576,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                 if first_element && name == b"this" {
                     self.this_cell()
                 } else if first_element && name == b"_root" {
-                    self.root_object()
+                    self.base_clip().avm1_root().object1_or_undef()
                 } else {
                     // Get the value from the object.
                     // Resolves display object instances first, then local variables.
@@ -2655,25 +2586,15 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                         .and_then(|o| o.as_container())
                         .and_then(|o| o.child_by_name(name, case_sensitive))
                     {
-                        // If an object doesn't have an object representation, e.g. Graphic, then trying to access it
-                        // Returns the parent instead
-                        if path_has_slash {
-                            child.object1_or_undef()
-                        } else if let crate::display_object::DisplayObject::Graphic(_) = child {
-                            child
-                                .parent()
-                                .map(|p| p.object1_or_undef())
-                                .unwrap_or(Value::Undefined)
-                        } else {
-                            child.object1_or_undef()
-                        }
+                        child
+                            .object1()
+                            // If an object doesn't have an object representation, e.g. Graphic,
+                            // then trying to access it returns the parent instead
+                            .or_else(|| child.parent().and_then(|p| p.object1()))
+                            .map_or(Value::Undefined, Value::from)
                     } else {
                         let name = AvmString::new(self.gc(), name);
-                        if path_has_slash {
-                            object.get(name, self).unwrap()
-                        } else {
-                            object.get_non_slash_path(name, self).unwrap()
-                        }
+                        object.get(name, self).unwrap()
                     }
                 }
             };
@@ -2682,10 +2603,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             first_element = false;
 
             // Resolve the value to an object while traversing the path.
-            object = if let Value::Object(o) = val {
+            object = if let Some(o) = val.as_object(self) {
                 o
-            } else if let Value::MovieClip(_) = val {
-                val.coerce_to_object(self)
             } else {
                 return Ok(None);
             };
@@ -2703,8 +2622,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         start: DisplayObject<'gc>,
         path: &'s WStr,
     ) -> Result<Option<(Object<'gc>, &'s WStr)>, Error<'gc>> {
-        let path_has_slash = path.contains(b'/');
-
         // Find the right-most : or . in the path.
         // If we have one, we must resolve as a target path.
         if let Some(separator) = path.rfind(b":.".as_ref()) {
@@ -2715,13 +2632,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             for scope in Scope::ancestors(self.scope()) {
                 let avm1_root = start.avm1_root();
 
-                if let Some(object) = self.resolve_target_path(
-                    avm1_root,
-                    *scope.locals(),
-                    path,
-                    true,
-                    path_has_slash,
-                )? {
+                if let Some(object) =
+                    self.resolve_target_path(avm1_root, *scope.locals(), path, true)?
+                {
                     return Ok(Some((object, var_name)));
                 }
             }
@@ -2759,8 +2672,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         // Resolve a variable path for a GetVariable action.
         let start = self.target_clip_or_root();
 
-        let path_has_slash = path.contains(b'/');
-
         // Find the right-most : or . in the path.
         // If we have one, we must resolve as a target path.
         if let Some(separator) = path.rfind(b":.".as_ref()) {
@@ -2771,13 +2682,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             for scope in Scope::ancestors(self.scope()) {
                 let avm1_root = start.avm1_root();
 
-                if let Some(object) = self.resolve_target_path(
-                    avm1_root,
-                    *scope.locals(),
-                    path,
-                    true,
-                    path_has_slash,
-                )? {
+                if let Some(object) =
+                    self.resolve_target_path(avm1_root, *scope.locals(), path, true)?
+                {
                     let var_name = AvmString::new(self.gc(), var_name);
                     if object.has_property(self, var_name) {
                         return Ok(CallableValue::Callable(object, object.get(var_name, self)?));
@@ -2794,7 +2701,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                 let avm1_root = start.avm1_root();
 
                 if let Some(object) =
-                    self.resolve_target_path(avm1_root, *scope.locals(), &path, false, true)?
+                    self.resolve_target_path(avm1_root, *scope.locals(), &path, false)?
                 {
                     return Ok(CallableValue::UnCallable(object.into()));
                 }
@@ -2860,7 +2767,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                 let avm1_root = start.avm1_root();
 
                 if let Some(object) =
-                    self.resolve_target_path(avm1_root, *scope.locals(), path, true, true)?
+                    self.resolve_target_path(avm1_root, *scope.locals(), path, true)?
                 {
                     let var_name = AvmString::new(self.gc(), var_name);
                     object.set(var_name, value, self)?;
@@ -2926,11 +2833,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         self.target_clip().unwrap_or_else(|| self.base_clip())
     }
 
-    /// Obtain the value of `_root`.
-    pub fn root_object(&self) -> Value<'gc> {
-        self.base_clip().avm1_root().object1_or_undef()
-    }
-
     /// Returns whether property keys should be case sensitive based on the current SWF version.
     pub fn is_case_sensitive(&self) -> bool {
         crate::avm1::runtime::Avm1::is_case_sensitive(self.swf_version())
@@ -2983,7 +2885,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             Scope::new(
                 self.scope,
                 ScopeClass::Target,
-                object.object1_or_undef().coerce_to_object(self),
+                object.object1_or_bare(self.gc()),
             ),
         );
     }
@@ -3079,11 +2981,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let base_clip = self.base_clip();
         let new_target_clip;
         let root = base_clip.avm1_root();
-        let start = base_clip.object1_or_undef().coerce_to_object(self);
+        let start = base_clip.object1_or_bare(self.gc());
         if target.is_empty() {
             new_target_clip = Some(base_clip);
         } else if let Some(clip) = self
-            .resolve_target_path(root, start, target, false, true)?
+            .resolve_target_path(root, start, target, false)?
             .and_then(|o| o.as_display_object())
             .filter(|_| !self.base_clip.avm1_removed())
         // All properties invalid if base clip is removed.
@@ -3115,10 +3017,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
         self.set_target_clip(new_target_clip);
 
-        let clip_obj = self
-            .target_clip_or_root()
-            .object1_or_undef()
-            .coerce_to_object(self);
+        let clip_obj = self.target_clip_or_root().object1_or_bare(self.gc());
 
         self.set_scope(Scope::new_target_scope(self.scope(), clip_obj, self.gc()));
         Ok(FrameControl::Continue)

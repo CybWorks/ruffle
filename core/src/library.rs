@@ -15,7 +15,7 @@ use ruffle_render::bitmap::BitmapHandle;
 use ruffle_render::utils::remove_invalid_jpeg_data;
 
 use crate::backend::ui::{FontDefinition, UiBackend};
-use crate::DefaultFont;
+use crate::font::DefaultFont;
 use fnv::{FnvHashMap, FnvHashSet};
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
@@ -660,7 +660,7 @@ impl<'gc> Library<'gc> {
                 let name = font.descriptor().name().to_owned();
                 let is_bold = font.descriptor().bold();
                 let is_italic = font.descriptor().italic();
-                info!("Loaded new device font \"{name}\" (bold: {is_bold}, italic: {is_italic}) from swf tag");
+                tracing::debug!("Loaded new device font \"{name}\" (bold: {is_bold}, italic: {is_italic}) from swf tag");
                 self.device_fonts.register(font);
             }
             FontDefinition::FontFile {
@@ -675,11 +675,22 @@ impl<'gc> Library<'gc> {
                     Font::from_font_file(gc_context, descriptor, data, index, FontType::Device)
                 {
                     let name = font.descriptor().name().to_owned();
-                    info!("Loaded new device font \"{name}\" (bold: {is_bold}, italic: {is_italic}) from file");
+                    tracing::debug!("Loaded new device font \"{name}\" (bold: {is_bold}, italic: {is_italic}) from file");
                     self.device_fonts.register(font);
                 } else {
                     warn!("Failed to load device font from file");
                 }
+            }
+            FontDefinition::ExternalRenderer {
+                name,
+                is_bold,
+                is_italic,
+                font_renderer,
+            } => {
+                let descriptor = FontDescriptor::from_parts(&name, is_bold, is_italic);
+                let font = Font::from_renderer(gc_context, descriptor, font_renderer);
+                tracing::debug!("Loaded new externally rendered font \"{name}\" (bold: {is_bold}, italic: {is_italic})");
+                self.device_fonts.register(font);
             }
         }
         self.default_font_cache.clear();

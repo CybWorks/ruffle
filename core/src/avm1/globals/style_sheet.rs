@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::avm1::property_decl::{DeclContext, Declaration, SystemClass};
+use crate::avm1::property_decl::{DeclContext, StaticDeclarations, SystemClass};
 use crate::avm1::{Activation, Error, Object, Value};
 use crate::avm1::{ArrayBuilder, ExecutionReason, NativeObject};
 use crate::backend::navigator::Request;
@@ -37,7 +37,7 @@ impl<'gc> StyleSheetObject<'gc> {
     }
 }
 
-const PROTO_DECLS: &[Declaration] = declare_properties! {
+const PROTO_DECLS: StaticDeclarations = declare_static_properties! {
     "setStyle" => method(set_style; DONT_ENUM | DONT_DELETE | READ_ONLY | VERSION_7);
     "clear" => method(clear; DONT_ENUM | DONT_DELETE | READ_ONLY | VERSION_7);
     "getStyleNames" => method(get_style_names; DONT_ENUM | DONT_DELETE | READ_ONLY | VERSION_7);
@@ -53,7 +53,7 @@ pub fn create_class<'gc>(
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
     let class = context.native_class(constructor, None, super_proto);
-    context.define_properties_on(class.proto, PROTO_DECLS);
+    context.define_properties_on(class.proto, PROTO_DECLS(context));
     class
 }
 
@@ -107,10 +107,10 @@ fn set_style<'gc>(
     }
     let css = this
         .get_stored(istr!("_css"), activation)?
-        .coerce_to_object(activation);
+        .coerce_to_object_or_bare(activation)?;
     let styles = this
         .get_stored(istr!("_styles"), activation)?
-        .coerce_to_object(activation);
+        .coerce_to_object_or_bare(activation)?;
     let name = args
         .get(0)
         .unwrap_or(&Value::Undefined)
@@ -147,7 +147,7 @@ fn get_style<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let css = this
         .get_stored(istr!("_css"), activation)?
-        .coerce_to_object(activation);
+        .coerce_to_object_or_bare(activation)?;
     let name = args
         .get(0)
         .unwrap_or(&Value::Undefined)
@@ -163,7 +163,7 @@ fn get_style_names<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let css = this
         .get_stored(istr!("_css"), activation)?
-        .coerce_to_object(activation);
+        .coerce_to_object_or_bare(activation)?;
     Ok(ArrayBuilder::new(activation)
         .with(
             css.get_keys(activation, false)

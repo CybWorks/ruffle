@@ -5,7 +5,7 @@ use crate::avm1::Avm1;
 use crate::avm1::{Object as Avm1Object, Value as Avm1Value};
 use crate::avm2::api_version::ApiVersion;
 use crate::avm2::Activation as Avm2Activation;
-use crate::avm2::{Avm2, LoaderInfoObject, Object as Avm2Object, SoundChannelObject};
+use crate::avm2::{Avm2, LoaderInfoObject, SharedObjectObject, SoundChannelObject};
 use crate::avm_rng::AvmRng;
 use crate::backend::{
     audio::{AudioBackend, AudioManager, SoundHandle, SoundInstanceHandle},
@@ -157,7 +157,7 @@ pub struct UpdateContext<'gc> {
     pub avm1_shared_objects: &'gc mut HashMap<String, Avm1Object<'gc>>,
 
     /// Shared objects cache
-    pub avm2_shared_objects: &'gc mut HashMap<String, Avm2Object<'gc>>,
+    pub avm2_shared_objects: &'gc mut HashMap<String, SharedObjectObject<'gc>>,
 
     /// Text fields with unbound variable bindings.
     pub unbound_text_fields: &'gc mut Vec<EditText<'gc>>,
@@ -272,11 +272,12 @@ impl<'gc> UpdateContext<'gc> {
         &mut self,
         sound: SoundHandle,
         settings: &swf::SoundInfo,
+        transform: Option<SoundTransform>,
         owner: Option<DisplayObject<'gc>>,
         avm1_object: Option<Avm1Object<'gc>>,
     ) -> Option<SoundInstanceHandle> {
         self.audio_manager
-            .start_sound(self.audio, sound, settings, owner, avm1_object)
+            .start_sound(self.audio, sound, settings, transform, owner, avm1_object)
     }
 
     pub fn attach_avm2_sound_channel(

@@ -35,8 +35,16 @@ sleep_to_meet_frame_rate = false
 # Prefer setting `known_failure = true` to ignoring the test.
 ignore = false
 
-# If true, this test is known to fail and the test runner will expect it to fail.
+# If true, this test is known to fail and the test runner will expect the check against
+# the trace output (specified `output_path`) to fail.
 # When the test passes in the future, it'll fail and alert that it now passes.
+# This will not catch Ruffle panics; if the test is expected to panic, use
+#   `known_failure.panic = "panic message"`
+# instead (note that 'panicky' tests will be skipped if the test harness is run
+# with debug assertions disabled, e.g. with `--release`).
+# By default, the test runner will additionally check Ruffle's output against itself
+# to detect regressions in failing tests; this can be disabled with
+#    `known_failure.ruffle_check = false`.
 known_failure = false
 
 # Path (relative to the directory containing test.toml) to the expected output
@@ -96,6 +104,10 @@ with_default_font = false
 # The comparison part of a test is optional and only runs when `imgtests` feature is enabled
 # This requires a render to be setup for this test
 [image_comparisons.COMPARISON_NAME] # COMPARISON_NAME is a name of this particular image
+
+# If true, this image comparison is known to fail and the test runner will expect it to fail.
+# When the comparison passes in the future, it'll fail and alert that it now passes.
+known_failure = false
 
 # The tolerance per pixel channel to be considered "the same".
 # Increase as needed with tests that aren't pixel perfect across platforms.

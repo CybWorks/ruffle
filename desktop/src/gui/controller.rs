@@ -2,7 +2,7 @@ use crate::backends::DesktopUiBackend;
 use crate::custom_event::RuffleEvent;
 use crate::gui::movie::{MovieView, MovieViewRenderer};
 use crate::gui::theme::ThemeController;
-use crate::gui::{RuffleGui, MENU_HEIGHT};
+use crate::gui::{MENU_HEIGHT, RuffleGui};
 use crate::player::{LaunchOptions, PlayerController};
 use crate::preferences::GlobalPreferences;
 use anyhow::anyhow;
@@ -10,7 +10,7 @@ use egui::{Context, FontData, FontDefinitions, ViewportId};
 use fontdb::{Database, Family, Query, Source};
 use ruffle_core::events::{ImeCursorArea, ImePurpose};
 use ruffle_core::{Player, PlayerEvent};
-use ruffle_render_wgpu::backend::{request_adapter_and_device, WgpuRenderBackend};
+use ruffle_render_wgpu::backend::{WgpuRenderBackend, request_adapter_and_device};
 use ruffle_render_wgpu::descriptors::Descriptors;
 use ruffle_render_wgpu::utils::{format_list, get_backend_names};
 use std::any::Any;
@@ -132,17 +132,25 @@ impl GuiController {
             size.height,
             window.scale_factor(),
         ));
-        let egui_renderer =
-            egui_wgpu::Renderer::new(&descriptors.device, surface_format, None, 1, true);
+        let egui_renderer = egui_wgpu::Renderer::new(
+            &descriptors.device,
+            surface_format,
+            egui_wgpu::RendererOptions {
+                msaa_samples: 1,
+                depth_stencil_format: None,
+                dithering: false,
+                predictable_texture_filtering: false,
+            },
+        );
         let descriptors = Arc::new(descriptors);
         let gui = RuffleGui::new(
             Arc::downgrade(&window),
             event_loop,
-            initial_movie_url.clone(),
+            initial_movie_url,
             LaunchOptions::from(&preferences),
             preferences.clone(),
         );
-        let system_fonts = load_system_fonts(font_database, preferences.language().to_owned());
+        let system_fonts = load_system_fonts(font_database, preferences.language());
         egui_winit.egui_ctx().set_fonts(system_fonts);
 
         egui_extras::install_image_loaders(egui_winit.egui_ctx());
@@ -341,13 +349,13 @@ impl GuiController {
             .repaint_delay;
 
         // If we're not in a UI, tell egui which cursor we prefer to use instead
-        if !self.egui_winit.egui_ctx().wants_pointer_input() {
-            if let Some(player) = player.as_deref() {
-                full_output.platform_output.cursor_icon =
-                    <dyn Any>::downcast_ref::<DesktopUiBackend>(player.ui())
-                        .unwrap_or_else(|| panic!("UI Backend should be DesktopUiBackend"))
-                        .cursor();
-            }
+        if !self.egui_winit.egui_ctx().wants_pointer_input()
+            && let Some(player) = player.as_deref()
+        {
+            full_output.platform_output.cursor_icon =
+                <dyn Any>::downcast_ref::<DesktopUiBackend>(player.ui())
+                    .unwrap_or_else(|| panic!("UI Backend should be DesktopUiBackend"))
+                    .cursor();
         }
         self.egui_winit
             .handle_platform_output(&self.window, full_output.platform_output);

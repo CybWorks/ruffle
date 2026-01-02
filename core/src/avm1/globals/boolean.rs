@@ -4,12 +4,12 @@ use ruffle_macros::istr;
 
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
-use crate::avm1::property_decl::{DeclContext, Declaration, SystemClass};
+use crate::avm1::property_decl::{DeclContext, StaticDeclarations, SystemClass};
 use crate::avm1::{NativeObject, Object, Value};
 
-const PROTO_DECLS: &[Declaration] = declare_properties! {
-    "toString" => method(to_string; DONT_ENUM | DONT_DELETE);
+const PROTO_DECLS: StaticDeclarations = declare_static_properties! {
     "valueOf" => method(value_of; DONT_ENUM | DONT_DELETE);
+    "toString" => method(to_string; DONT_ENUM | DONT_DELETE);
 };
 
 pub fn create_class<'gc>(
@@ -17,7 +17,7 @@ pub fn create_class<'gc>(
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
     let class = context.native_class(constructor, Some(function), super_proto);
-    context.define_properties_on(class.proto, PROTO_DECLS);
+    context.define_properties_on(class.proto, PROTO_DECLS(context));
     class
 }
 

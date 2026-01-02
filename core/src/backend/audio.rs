@@ -3,12 +3,12 @@ use std::any::Any;
 use crate::{
     avm1::{NativeObject, Object as Avm1Object},
     avm2::{Avm2, EventObject as Avm2EventObject, SoundChannelObject},
-    buffer::Substream,
     context::UpdateContext,
     display_object::{self, DisplayObject, MovieClip, TDisplayObject},
     string::AvmString,
 };
 use gc_arena::Collect;
+pub use ruffle_common::buffer::Substream;
 use slotmap::{new_key_type, Key, SlotMap};
 
 #[cfg(feature = "audio")]
@@ -449,12 +449,16 @@ impl<'gc> AudioManager<'gc> {
         audio: &mut dyn AudioBackend,
         sound: SoundHandle,
         settings: &swf::SoundInfo,
+        transform: Option<display_object::SoundTransform>,
         display_object: Option<DisplayObject<'gc>>,
         avm1_object: Option<Avm1Object<'gc>>,
     ) -> Option<SoundInstanceHandle> {
         if self.sounds.len() < Self::MAX_SOUNDS {
-            let handle = audio.start_sound(sound, settings).ok()?;
-            let instance = SoundInstance {
+            let handle = audio
+                .start_sound(sound, settings)
+                .map_err(|e| tracing::warn!("Cannot start sound: {e}"))
+                .ok()?;
+            let mut instance = SoundInstance {
                 sound: Some(sound),
                 instance: handle,
                 display_object,
@@ -463,6 +467,11 @@ impl<'gc> AudioManager<'gc> {
                 avm2_object: None,
                 stream_start_frame: None,
             };
+
+            if let Some(transform) = transform {
+                instance.transform = transform;
+            }
+
             audio.set_sound_transform(handle, self.transform_for_sound(&instance));
             self.sounds.push(instance);
             Some(handle)
@@ -773,13 +782,20 @@ impl<'gc> AudioManager<'gc> {
             match sound_info.event {
                 // "Event" sounds always play, independent of the timeline.
                 SoundEvent::Event => {
-                    let _ = context.start_sound(handle, sound_info, Some(display_object), None);
+                    let _ =
+                        context.start_sound(handle, sound_info, None, Some(display_object), None);
                 }
 
                 // "Start" sounds only play if an instance of the same sound is not already playing.
                 SoundEvent::Start => {
                     if !context.is_sound_playing_with_handle(handle) {
-                        let _ = context.start_sound(handle, sound_info, Some(display_object), None);
+                        let _ = context.start_sound(
+                            handle,
+                            sound_info,
+                            None,
+                            Some(display_object),
+                            None,
+                        );
                     }
                 }
 

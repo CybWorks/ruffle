@@ -2,7 +2,7 @@
 
 use crate::avm2::activation::Activation;
 use crate::avm2::array::ArrayStorage;
-use crate::avm2::error::argument_error;
+use crate::avm2::error::make_error_2109;
 use crate::avm2::object::ArrayObject;
 use crate::avm2::parameters::ParametersExt;
 use crate::avm2::value::Value;
@@ -143,7 +143,7 @@ fn labels_for_scene<'gc>(
     Ok((
         scene_name.to_string(),
         *scene_length,
-        ArrayObject::from_storage(activation, ArrayStorage::from_storage(frame_labels)),
+        ArrayObject::from_storage(activation.context, ArrayStorage::from_storage(frame_labels)),
     ))
 }
 
@@ -277,7 +277,7 @@ pub fn get_scenes<'gc>(
         }
 
         return Ok(ArrayObject::from_storage(
-            activation,
+            activation.context,
             ArrayStorage::from_storage(scene_objects),
         )
         .into());
@@ -421,25 +421,24 @@ pub fn goto_frame<'gc>(
                         &scene_str,
                         activation.context,
                     ) {
-                        return Err(Error::avm_error(argument_error(
-                            activation,
-                            &format!("Error #2109: Frame label {frame_or_label} not found in scene {scene_str}."),
-                            2109,
-                        )?));
+                        return Err(make_error_2109(activation, frame_or_label, scene_str));
                     }
                 }
 
                 let frame = mc.frame_label_to_number(&frame_or_label, activation.context);
 
                 if activation.caller_movie_or_root().version() >= 11 {
-                    frame.ok_or(
-                        // TODO: Also include the scene in the error message, as done above
-                        Error::avm_error(argument_error(
+                    if let Some(frame) = frame {
+                        frame as i32
+                    } else {
+                        return Err(make_error_2109(
                             activation,
-                            &format!("Error #2109: {frame_or_label} is not a valid frame label."),
-                            2109,
-                        )?),
-                    )? as i32
+                            frame_or_label,
+                            // For some reason Flash uses the frame label as the
+                            // name of the scene
+                            frame_or_label,
+                        ));
+                    }
                 } else {
                     frame.unwrap_or(0) as i32 // Old swf versions silently jump to frame 1 for invalid labels.
                 }

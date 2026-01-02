@@ -4,7 +4,10 @@ use swf::Point;
 use swf::Twips;
 
 use crate::avm2::activation::Activation;
-use crate::avm2::error::{argument_error, make_error_2025, range_error};
+use crate::avm2::error::{
+    make_error_2006, make_error_2024, make_error_2025, make_error_2150, make_error_2180,
+    make_error_3783,
+};
 use crate::avm2::globals::slots::flash_geom_point as point_slots;
 use crate::avm2::object::{Object, TObject as _};
 use crate::avm2::parameters::ParametersExt;
@@ -33,50 +36,29 @@ fn validate_add_operation<'gc>(
         .expect("Parent must be a DisplayObjectContainer");
 
     if let DisplayObject::Stage(_) = proposed_child {
-        return Err(Error::avm_error(argument_error(
-            activation,
-            "Error #3783: A Stage object cannot be added as the child of another object.",
-            3783,
-        )?));
+        return Err(make_error_3783(activation));
     }
 
     if !proposed_child.movie().is_action_script_3() && activation.context.root_swf.version() > 9 {
-        return Err(Error::avm_error(argument_error(
-            activation,
-            "Error #2180: It is illegal to move AVM1 content (AS1 or AS2) to a different part of the displayList when it has been loaded into AVM2 (AS3) content.",
-            2180,
-        )?));
+        return Err(make_error_2180(activation));
     }
 
     if DisplayObject::ptr_eq(proposed_child, new_parent) {
-        return Err(Error::avm_error(argument_error(
-            activation,
-            "Error #2024: An object cannot be added as a child of itself.",
-            2024,
-        )?));
+        return Err(make_error_2024(activation));
     }
 
     let mut checking_parent = Some(new_parent);
 
     while let Some(tp) = checking_parent {
         if DisplayObject::ptr_eq(tp, proposed_child) {
-            return Err(Error::avm_error(argument_error(
-                activation,
-                "Error #2150: An object cannot be added as a child to one of it's children (or children's children, etc.).",
-                2150,
-            )?));
+            return Err(make_error_2150(activation));
         }
 
         checking_parent = tp.parent();
     }
 
     if proposed_index > ctr.num_children() {
-        // Flash error message: The supplied index is out of bounds.
-        return Err(Error::avm_error(range_error(
-            activation,
-            "Index position does not exist in the child list",
-            2006,
-        )?));
+        return Err(make_error_2006(activation));
     }
 
     Ok(())
@@ -144,12 +126,7 @@ pub fn get_child_at<'gc>(
         return if let Some(child) = dobj.child_by_index(index as usize) {
             Ok(child.object2_or_null())
         } else {
-            // Flash error message: The supplied index is out of bounds.
-            Err(Error::avm_error(range_error(
-                activation,
-                &format!("Display object container has no child with id {index}"),
-                2006,
-            )?))
+            Err(make_error_2006(activation))
         };
     }
 
@@ -335,16 +312,7 @@ pub fn remove_child_at<'gc>(
             let target_child = args.get_i32(0);
 
             if target_child >= ctr.num_children() as i32 || target_child < 0 {
-                // Flash error message: The supplied index is out of bounds.
-                return Err(Error::avm_error(range_error(
-                    activation,
-                    &format!(
-                        "{} does not exist in the child list (valid range is 0 to {})",
-                        target_child,
-                        ctr.num_children()
-                    ),
-                    2006,
-                )?));
+                return Err(make_error_2006(activation));
             }
 
             let child = ctr.child_by_index(target_child as usize).unwrap();
@@ -377,38 +345,15 @@ pub fn remove_children<'gc>(
             // https://github.com/ruffle-rs/ruffle/issues/11382
 
             if (from >= ctr.num_children() as i32 || from < 0) && to != i32::MAX {
-                // Flash error message: The supplied index is out of bounds.
-                return Err(Error::avm_error(range_error(
-                    activation,
-                    &format!(
-                        "Starting position {} does not exist in the child list (valid range is 0 to {})",
-                        from,
-                        ctr.num_children()
-                    ),
-                    2006,
-                )?));
+                return Err(make_error_2006(activation));
             }
 
             if (to >= ctr.num_children() as i32 || to < 0) && to != i32::MAX {
-                // Flash error message: The supplied index is out of bounds.
-                return Err(Error::avm_error(range_error(
-                    activation,
-                    &format!(
-                        "Ending position {} does not exist in the child list (valid range is 0 to {})",
-                        to,
-                        ctr.num_children()
-                    ),
-                    2006,
-                )?));
+                return Err(make_error_2006(activation));
             }
 
             if from > to {
-                // Flash error message: The supplied index is out of bounds.
-                return Err(Error::avm_error(range_error(
-                    activation,
-                    &format!("Range {from} to {to} is invalid"),
-                    2006,
-                )?));
+                return Err(make_error_2006(activation));
             }
 
             ctr.remove_range(
@@ -463,21 +408,11 @@ pub fn swap_children_at<'gc>(
             let bounds = ctr.num_children();
 
             if index0 < 0 || index0 as usize >= bounds {
-                // Flash error message: The supplied index is out of bounds.
-                return Err(Error::avm_error(range_error(
-                    activation,
-                    &format!("Index {index0} is out of bounds"),
-                    2006,
-                )?));
+                return Err(make_error_2006(activation));
             }
 
             if index1 < 0 || index1 as usize >= bounds {
-                // Flash error message: The supplied index is out of bounds.
-                return Err(Error::avm_error(range_error(
-                    activation,
-                    &format!("Index {index1} is out of bounds"),
-                    2006,
-                )?));
+                return Err(make_error_2006(activation));
             }
 
             let child0 = ctr.child_by_index(index0 as usize).unwrap();
@@ -507,15 +442,17 @@ pub fn swap_children<'gc>(
                 .get_object(activation, 0, "child")?
                 .as_display_object()
                 .expect("Child must be a display object");
-            let child1 = args
-                .get_object(activation, 1, "child")?
-                .as_display_object()
-                .expect("Child must be a display object");
 
             let index0 = ctr
                 .iter_render_list()
                 .position(|a| DisplayObject::ptr_eq(a, child0))
                 .ok_or(make_error_2025(activation))?;
+
+            let child1 = args
+                .get_object(activation, 1, "child")?
+                .as_display_object()
+                .expect("Child must be a display object");
+
             let index1 = ctr
                 .iter_render_list()
                 .position(|a| DisplayObject::ptr_eq(a, child1))
@@ -607,7 +544,10 @@ pub fn get_objects_under_point<'gc>(
         }
     }
 
-    Ok(ArrayObject::from_storage(activation, ArrayStorage::from_storage(under_point)).into())
+    Ok(
+        ArrayObject::from_storage(activation.context, ArrayStorage::from_storage(under_point))
+            .into(),
+    )
 }
 
 pub fn are_inaccessible_objects_under_point<'gc>(

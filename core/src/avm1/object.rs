@@ -145,38 +145,36 @@ impl<'gc> NativeObject<'gc> {
 
 impl<'gc> Object<'gc> {
     /// Retrieve a named property from the object, or its prototype.
-    pub fn get_non_slash_path(
+    /// Returns `None` if the property couldn't be found.
+    pub fn get_opt(
         self,
         name: impl Into<AvmString<'gc>>,
         activation: &mut Activation<'_, 'gc>,
-    ) -> Result<Value<'gc>, Error<'gc>> {
-        self.lookup(name, activation, false)
-    }
-
-    /// Retrieve a named property from the object, or its prototype.
-    pub fn get(
-        self,
-        name: impl Into<AvmString<'gc>>,
-        activation: &mut Activation<'_, 'gc>,
-    ) -> Result<Value<'gc>, Error<'gc>> {
-        self.lookup(name, activation, true)
-    }
-
-    fn lookup(
-        self,
-        name: impl Into<AvmString<'gc>>,
-        activation: &mut Activation<'_, 'gc>,
-        is_slash_path: bool,
-    ) -> Result<Value<'gc>, Error<'gc>> {
+        call_resolve_fn: bool,
+    ) -> Result<Option<Value<'gc>>, Error<'gc>> {
+        // This duplicates logic already present in `SuperObject::proto` and so doesn't seem necessary.
+        // But removing it would make `SuperObject`s go through an extra iteration in `search_prototype`,
+        // which impacts the maximum possible depth before `Error::PrototypeRecursionLimit`.
+        // TODO(moulins): Test this limit and figure out what is correct.
         let (this, proto) = if let Some(super_object) = self.as_super_object() {
             (super_object.this(), super_object.proto(activation))
         } else {
             (self, Value::Object(self))
         };
-        match search_prototype(proto, name.into(), activation, this, is_slash_path)? {
-            Some((value, _depth)) => Ok(value),
-            None => Ok(Value::Undefined),
-        }
+
+        let result = search_prototype(proto, name.into(), activation, this, call_resolve_fn)?;
+        Ok(result.map(|(value, _depth)| value))
+    }
+
+    /// Retrieve a named property from the object, or its prototype.
+    /// If the property couldn't be found, try to find and call a `__resolve` handler.
+    pub fn get(
+        self,
+        name: impl Into<AvmString<'gc>>,
+        activation: &mut Activation<'_, 'gc>,
+    ) -> Result<Value<'gc>, Error<'gc>> {
+        self.get_opt(name, activation, true)
+            .map(|v| v.unwrap_or(Value::Undefined))
     }
 
     /// Retrieve a non-virtual property from the object, or its prototype.
@@ -193,7 +191,7 @@ impl<'gc> Object<'gc> {
                 return Err(Error::PrototypeRecursionLimit);
             }
 
-            if let Some(value) = p.get_local_stored(name, activation, true) {
+            if let Some(value) = p.get_local_stored(name, activation) {
                 return Ok(value);
             }
 
@@ -279,8 +277,10 @@ impl<'gc> Object<'gc> {
             }
         }
 
+        // 'special' method calls appear to skip the `__resolve` fallback logic
+        let call_resolve_fn = !matches!(reason, ExecutionReason::Special);
         let (method, depth) =
-            match search_prototype(Value::Object(self), name, activation, self, false)? {
+            match search_prototype(Value::Object(self), name, activation, self, call_resolve_fn)? {
                 Some((Value::Object(method), depth)) => (method, depth),
                 _ => return Ok(Value::Undefined),
             };
@@ -310,41 +310,31 @@ impl<'gc> Object<'gc> {
     /// they are already linked.
     ///
     /// Because ActionScript 2.0 added interfaces, this function cannot simply
-    /// check the prototype chain and call it a day. Each interface represents
-    /// a new, parallel prototype chain which also needs to be checked. You
-    /// can't implement interfaces within interfaces (fortunately), but if you
-    /// somehow could this would support that, too.
+    /// check the prototype chain and call it a day: each step in the chain has
+    /// its own attached 'interface tree' which also needs to be checked.
     pub fn is_instance_of(
         self,
         activation: &mut Activation<'_, 'gc>,
-        constructor: Object<'gc>,
         prototype: Object<'gc>,
     ) -> Result<bool, Error<'gc>> {
-        let mut proto_stack = vec![];
-        if let Value::Object(p) = self.proto(activation) {
-            proto_stack.push(p);
-        }
+        // TODO(moulins): should we guard against infinite loops here?
+        // A recursive prototype and/or interface chain will hang Flash Player.
 
-        while let Some(this_proto) = proto_stack.pop() {
-            if Object::ptr_eq(this_proto, prototype) {
-                return Ok(true);
-            }
+        let mut interface_stack = smallvec::SmallVec::<[_; 4]>::new();
+        let mut this = self;
 
-            if let Value::Object(p) = this_proto.proto(activation) {
-                proto_stack.push(p);
-            }
+        while let Value::Object(this_proto) = this.proto(activation) {
+            interface_stack.push(this_proto);
 
-            if activation.swf_version() >= 7 {
-                for interface in this_proto.interfaces() {
-                    if Object::ptr_eq(interface, constructor) {
-                        return Ok(true);
-                    }
-
-                    if let Value::Object(o) = interface.get(istr!("prototype"), activation)? {
-                        proto_stack.push(o);
-                    }
+            while let Some(interface) = interface_stack.pop() {
+                if Object::ptr_eq(interface, prototype) {
+                    return Ok(true);
                 }
+
+                interface_stack.extend(interface.interfaces().iter().cloned());
             }
+
+            this = this_proto;
         }
 
         Ok(false)
@@ -361,6 +351,9 @@ impl<'gc> Object<'gc> {
 
     /// Check if this object is in the prototype chain of the specified test object.
     pub fn is_prototype_of(self, activation: &mut Activation<'_, 'gc>, other: Object<'gc>) -> bool {
+        // TODO(moulins): should we guard against infinite loops here?
+        // A recursive prototype chain will hang Flash Player.
+
         let mut proto = other.proto(activation);
 
         while let Value::Object(proto_ob) = proto {
@@ -394,7 +387,7 @@ pub fn search_prototype<'gc>(
     name: AvmString<'gc>,
     activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
-    is_slash_path: bool,
+    call_resolve_fn: bool,
 ) -> Result<Option<(Value<'gc>, u8)>, Error<'gc>> {
     let mut depth = 0;
     let orig_proto = proto;
@@ -424,7 +417,7 @@ pub fn search_prototype<'gc>(
             }
         }
 
-        if let Some(value) = p.get_local_stored(name, activation, is_slash_path) {
+        if let Some(value) = p.get_local_stored(name, activation) {
             return Ok(Some((value, depth)));
         }
 
@@ -432,9 +425,12 @@ pub fn search_prototype<'gc>(
         depth += 1;
     }
 
-    if let Some(resolve) = find_resolve_method(orig_proto, activation)? {
-        let result = resolve.call(istr!("__resolve"), activation, this.into(), &[name.into()])?;
-        return Ok(Some((result, 0)));
+    if call_resolve_fn {
+        if let Some(resolve) = find_resolve_method(orig_proto, activation)? {
+            let result =
+                resolve.call(istr!("__resolve"), activation, this.into(), &[name.into()])?;
+            return Ok(Some((result, 0)));
+        }
     }
 
     Ok(None)
@@ -452,8 +448,10 @@ pub fn find_resolve_method<'gc>(
             return Err(Error::PrototypeRecursionLimit);
         }
 
-        if let Some(value) = p.get_local_stored(istr!("__resolve"), activation, false) {
-            return Ok(Some(value.coerce_to_object(activation)));
+        let resolve = p.get_local_stored(istr!("__resolve"), activation);
+        // FP completely skips over primitives (but not over non-function objects).
+        if let Some(Value::Object(value)) = resolve {
+            return Ok(Some(value));
         }
 
         proto = p.proto(activation);
