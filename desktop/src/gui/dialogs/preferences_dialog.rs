@@ -4,6 +4,7 @@ use crate::log::FilenamePattern;
 use crate::preferences::{GlobalPreferences, storage::StorageBackend};
 use cpal::traits::{DeviceTrait, HostTrait};
 use egui::{Align2, Button, Checkbox, ComboBox, DragValue, Grid, Ui, Widget, Window};
+use ruffle_render_wgpu::backend::create_wgpu_instance;
 use ruffle_render_wgpu::clap::{GraphicsBackend, PowerPreference};
 use std::borrow::Cow;
 use unic_langid::LanguageIdentifier;
@@ -564,7 +565,7 @@ impl PreferencesDialog {
         ui.end_row()
     }
 
-    fn save(&mut self) {
+    fn save(&self) {
         if let Err(e) = self.preferences.write_preferences(|preferences| {
             if self.graphics_backend_changed {
                 preferences.set_graphics_backend(self.graphics_backend);
@@ -712,11 +713,7 @@ fn find_available_graphics_backends() -> wgpu::Backends {
 
     // We have to make a new instance here, as the one created for the entire application may not have
     // all backends enabled
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::all(),
-        flags: wgpu::InstanceFlags::default().with_env(),
-        ..Default::default()
-    });
+    let instance = create_wgpu_instance(wgpu::Backends::all(), wgpu::BackendOptions::default());
 
     available_backends |= backend_availability(&instance, wgpu::Backends::VULKAN);
     available_backends |= backend_availability(&instance, wgpu::Backends::GL);

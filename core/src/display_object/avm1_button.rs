@@ -4,12 +4,12 @@ use crate::backend::audio::AudioManager;
 use crate::backend::ui::MouseCursor;
 use crate::context::{ActionType, RenderContext, UpdateContext};
 use crate::display_object::container::{
-    dispatch_added_event, dispatch_removed_event, ChildContainer,
+    ChildContainer, dispatch_added_event, dispatch_removed_event,
 };
 use crate::display_object::interactive::{
     Avm2MousePick, InteractiveObject, InteractiveObjectBase, TInteractiveObject,
 };
-use crate::display_object::{Avm1TextFieldBinding, DisplayObjectBase};
+use crate::display_object::{Avm1TextFieldBinding, BoundsMode, DisplayObjectBase};
 use crate::events::{ClipEvent, ClipEventResult};
 use crate::prelude::*;
 use crate::string::AvmString;
@@ -68,7 +68,7 @@ impl<'gc> Avm1Button<'gc> {
             .actions
             .iter()
             .map(|action| ButtonAction {
-                action_data: source_movie.to_unbounded_subslice(action.action_data),
+                action_data: source_movie.to_subslice(action.action_data),
                 conditions: action.conditions,
             })
             .collect();
@@ -316,7 +316,7 @@ impl<'gc> TDisplayObject<'gc> for Avm1Button<'gc> {
             for (child, depth) in new_children {
                 child.post_instantiation(context, None, Instantiator::Movie, false);
                 write.borrow_mut().hit_area.insert(depth, child);
-                hit_bounds = hit_bounds.union(&child.local_bounds());
+                hit_bounds = hit_bounds.union(&child.local_bounds(BoundsMode::Engine));
             }
             write.borrow_mut().hit_bounds = hit_bounds;
         }
@@ -326,7 +326,7 @@ impl<'gc> TDisplayObject<'gc> for Avm1Button<'gc> {
         self.render_children(context);
     }
 
-    fn self_bounds(self) -> Rectangle<Twips> {
+    fn self_bounds(self, _mode: BoundsMode) -> Rectangle<Twips> {
         // No inherent bounds; contains child DisplayObjects.
         Default::default()
     }
@@ -498,18 +498,18 @@ impl<'gc> TInteractiveObject<'gc> for Avm1Button<'gc> {
 
             // Queue ActionScript-defined event handlers after the SWF defined ones.
             // (e.g., clip.onRelease = foo).
-            if self.should_fire_event_handlers(context, event) {
-                if let Some(name) = event.method_name(&context.strings) {
-                    context.action_queue.queue_action(
-                        self_display_object,
-                        ActionType::Method {
-                            object: self.0.object.get().unwrap(),
-                            name,
-                            args: vec![],
-                        },
-                        false,
-                    );
-                }
+            if self.should_fire_event_handlers(context, event)
+                && let Some(name) = event.method_name(&context.strings)
+            {
+                context.action_queue.queue_action(
+                    self_display_object,
+                    ActionType::Method {
+                        object: self.0.object.get().unwrap(),
+                        name,
+                        args: vec![],
+                    },
+                    false,
+                );
             }
 
             (self.0.state.get() != new_state, new_state)

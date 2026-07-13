@@ -1,11 +1,11 @@
 //! Object representation for `flash.utils.Dictionary`
 
+use crate::avm2::Error;
 use crate::avm2::activation::Activation;
 use crate::avm2::dynamic_map::DynamicKey;
 use crate::avm2::object::script_object::ScriptObjectData;
 use crate::avm2::object::{ClassObject, Object, TObject};
 use crate::avm2::value::Value;
-use crate::avm2::Error;
 use crate::string::AvmString;
 use core::fmt;
 use gc_arena::{Collect, Gc, GcWeak, Mutation};
@@ -55,9 +55,7 @@ impl<'gc> DictionaryObject<'gc> {
     pub fn get_property_by_object(self, name: Object<'gc>) -> Value<'gc> {
         self.base()
             .values()
-            .as_hashmap()
             .get(&DynamicKey::Object(name))
-            .cloned()
             .map(|v| v.value)
             .unwrap_or(Value::Undefined)
     }
@@ -75,11 +73,7 @@ impl<'gc> DictionaryObject<'gc> {
     }
 
     pub fn has_property_by_object(self, name: Object<'gc>) -> bool {
-        self.base()
-            .values()
-            .as_hashmap()
-            .get(&DynamicKey::Object(name))
-            .is_some()
+        self.base().values().contains_key(&DynamicKey::Object(name))
     }
 }
 

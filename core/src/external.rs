@@ -5,13 +5,14 @@ use crate::avm1::{ArrayBuilder as Avm1ArrayBuilder, Error as Avm1Error, Object a
 use crate::avm2::activation::Activation as Avm2Activation;
 use crate::avm2::error::Error as Avm2Error;
 use crate::avm2::object::{
-    ArrayObject as Avm2ArrayObject, FunctionObject as Avm2FunctionObject, Object as Avm2Object,
+    ArrayObject as Avm2ArrayObject, FunctionObject as Avm2FunctionObject,
     ScriptObject as Avm2ScriptObject, TObject as _,
 };
 use crate::avm2::{Avm2, FunctionArgs, Value as Avm2Value};
 use crate::context::UpdateContext;
 use crate::string::AvmString;
 use gc_arena::Collect;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
@@ -162,10 +163,11 @@ impl Value {
             Value::Number(value) => Avm1Value::Number(value),
             Value::String(value) => {
                 let value = if activation.swf_version() < 9 && value.trim().is_empty() {
-                    "null"
+                    Cow::Borrowed("null")
                 } else {
-                    &value
+                    Cow::Owned(value)
                 };
+
                 Avm1Value::String(AvmString::new_utf8(activation.gc(), value))
             }
             Value::Object(values) => {
@@ -211,7 +213,7 @@ impl Value {
                         })
                         .collect::<Result<Vec<Value>, Avm2Error>>()?;
                     Value::List(values)
-                } else if matches!(obj, Avm2Object::ScriptObject(_)) {
+                } else if obj.as_script_object().is_some() {
                     let mut values = BTreeMap::new();
 
                     let mut last_index = obj.get_next_enumerant(0, activation)?;
@@ -365,7 +367,7 @@ pub struct NullExternalInterfaceProvider;
 #[collect(no_drop)]
 pub struct ExternalInterface<'gc> {
     #[collect(require_static)]
-    provider: Option<Rc<Box<dyn ExternalInterfaceProvider>>>,
+    provider: Option<Rc<dyn ExternalInterfaceProvider>>,
     callbacks: BTreeMap<String, Callback<'gc>>,
     #[collect(require_static)]
     fs_commands: Box<dyn FsCommandProvider>,
@@ -377,14 +379,14 @@ impl<'gc> ExternalInterface<'gc> {
         fs_commands: Box<dyn FsCommandProvider>,
     ) -> Self {
         Self {
-            provider: provider.map(Rc::new),
+            provider: provider.map(Rc::from),
             callbacks: Default::default(),
             fs_commands,
         }
     }
 
     pub fn set_provider(&mut self, provider: Option<Box<dyn ExternalInterfaceProvider>>) {
-        self.provider = provider.map(Rc::new);
+        self.provider = provider.map(Rc::from);
     }
 
     pub fn add_callback(&mut self, name: String, callback: Callback<'gc>) {
@@ -392,6 +394,10 @@ impl<'gc> ExternalInterface<'gc> {
         if let Some(provider) = &self.provider {
             provider.on_callback_available(&name);
         }
+    }
+
+    pub fn remove_callback(&mut self, name: String) {
+        self.callbacks.remove(&name);
     }
 
     pub fn get_callback(&self, name: &str) -> Option<Callback<'gc>> {

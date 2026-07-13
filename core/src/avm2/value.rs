@@ -6,12 +6,12 @@ use crate::avm2::error::{
     make_error_1006, make_error_1007, make_error_1034, make_error_1050, make_error_1064,
     make_error_1115,
 };
-use crate::avm2::function::{exec, FunctionArgs};
+use crate::avm2::function::{FunctionArgs, exec};
 use crate::avm2::object::{NamespaceObject, Object, TObject};
 use crate::avm2::property::Property;
 use crate::avm2::script::TranslationUnit;
 use crate::avm2::vtable::VTable;
-use crate::avm2::{Error, Multiname, Namespace};
+use crate::avm2::{Error, Multiname};
 use crate::ecma_conversions::{f64_to_wrapping_i32, f64_to_wrapping_u32};
 use crate::string::{AvmAtom, AvmString, WStr};
 use gc_arena::Collect;
@@ -19,7 +19,7 @@ use num_bigint::BigInt;
 use num_traits::{ToPrimitive, Zero};
 use ruffle_macros::istr;
 use std::mem::size_of;
-use swf::avm2::types::{DefaultValue as AbcDefaultValue, Index};
+use swf::avm2::types::DefaultValue as AbcDefaultValue;
 
 use super::class::Class;
 use super::e4x::E4XNode;
@@ -44,11 +44,15 @@ pub enum Value<'gc> {
     Undefined,
     Null,
     Bool(bool),
+
+    /// Numbers that are representable as ints are equivalent to
+    /// [`Value::Integer`]. See [`Value::normalize`] for details.
     Number(f64),
-    // note: this value should never reach +/- 1<<28; this is currently not enforced (TODO).
-    // Ruffle currently won't break if you break that invariant,
-    // but some FP compatibility edge cases depend on it, so we should do this at some point.
+
+    /// All integers are equivalent to [`Value::Number`].
+    /// See [`Value::normalize`] for details.
     Integer(i32),
+
     String(AvmString<'gc>),
     Object(Object<'gc>),
 }
@@ -57,18 +61,21 @@ pub enum Value<'gc> {
 const _: () = assert!(size_of::<Value<'_>>() <= 16);
 
 impl<'gc> From<AvmString<'gc>> for Value<'gc> {
+    #[inline(always)]
     fn from(string: AvmString<'gc>) -> Self {
         Value::String(string)
     }
 }
 
 impl<'gc> From<AvmAtom<'gc>> for Value<'gc> {
+    #[inline(always)]
     fn from(atom: AvmAtom<'gc>) -> Self {
         Value::String(atom.into())
     }
 }
 
 impl From<bool> for Value<'_> {
+    #[inline(always)]
     fn from(value: bool) -> Self {
         Value::Bool(value)
     }
@@ -78,70 +85,69 @@ impl<'gc, T> From<T> for Value<'gc>
 where
     Object<'gc>: From<T>,
 {
+    #[inline(always)]
     fn from(value: T) -> Self {
         Value::Object(Object::from(value))
     }
 }
 
 impl From<f64> for Value<'_> {
+    #[inline(always)]
     fn from(value: f64) -> Self {
         Value::Number(value)
     }
 }
 
 impl From<f32> for Value<'_> {
+    #[inline(always)]
     fn from(value: f32) -> Self {
         Value::Number(f64::from(value))
     }
 }
 
 impl From<u8> for Value<'_> {
+    #[inline(always)]
     fn from(value: u8) -> Self {
         Value::Integer(i32::from(value))
     }
 }
 
 impl From<i8> for Value<'_> {
+    #[inline(always)]
     fn from(value: i8) -> Self {
         Value::Integer(i32::from(value))
     }
 }
 
 impl From<i16> for Value<'_> {
+    #[inline(always)]
     fn from(value: i16) -> Self {
         Value::Integer(i32::from(value))
     }
 }
 
 impl From<u16> for Value<'_> {
+    #[inline(always)]
     fn from(value: u16) -> Self {
         Value::Integer(i32::from(value))
     }
 }
 
 impl From<i32> for Value<'_> {
+    #[inline(always)]
     fn from(value: i32) -> Self {
-        if fits_in_value_integer_i32(value) {
-            Value::Integer(value)
-        } else {
-            Value::Number(value as f64)
-        }
+        Value::Integer(value)
     }
 }
 
 impl From<u32> for Value<'_> {
+    #[inline(always)]
     fn from(value: u32) -> Self {
-        if fits_in_value_integer_u32(value) {
-            Value::Integer(value as i32)
+        if let Some(value) = value.to_i32() {
+            Value::Integer(value)
         } else {
             Value::Number(value as f64)
         }
-    }
-}
-
-impl From<usize> for Value<'_> {
-    fn from(value: usize) -> Self {
-        Value::Number(value as f64)
     }
 }
 
@@ -164,10 +170,6 @@ impl PartialEq for Value<'_> {
 
 fn fits_in_value_integer_i32(value: i32) -> bool {
     value < (1 << 28) && value >= -(1 << 28)
-}
-
-fn fits_in_value_integer_u32(value: u32) -> bool {
-    value < (1 << 28)
 }
 
 /// Strips leading whitespace.
@@ -459,57 +461,6 @@ pub fn string_to_f64(mut s: &WStr, swf_version: u8, strict: bool) -> Option<f64>
     Some(result)
 }
 
-pub fn abc_int<'gc>(
-    translation_unit: TranslationUnit<'gc>,
-    index: Index<i32>,
-) -> Result<i32, Error<'gc>> {
-    if index.0 == 0 {
-        return Ok(0);
-    }
-
-    translation_unit
-        .abc()
-        .constant_pool
-        .ints
-        .get(index.0 as usize - 1)
-        .cloned()
-        .ok_or_else(|| format!("Unknown int constant {}", index.0).into())
-}
-
-pub fn abc_uint<'gc>(
-    translation_unit: TranslationUnit<'gc>,
-    index: Index<u32>,
-) -> Result<u32, Error<'gc>> {
-    if index.0 == 0 {
-        return Ok(0);
-    }
-
-    translation_unit
-        .abc()
-        .constant_pool
-        .uints
-        .get(index.0 as usize - 1)
-        .cloned()
-        .ok_or_else(|| format!("Unknown uint constant {}", index.0).into())
-}
-
-pub fn abc_double<'gc>(
-    translation_unit: TranslationUnit<'gc>,
-    index: Index<f64>,
-) -> Result<f64, Error<'gc>> {
-    if index.0 == 0 {
-        return Ok(f64::NAN);
-    }
-
-    translation_unit
-        .abc()
-        .constant_pool
-        .doubles
-        .get(index.0 as usize - 1)
-        .cloned()
-        .ok_or_else(|| format!("Unknown double constant {}", index.0).into())
-}
-
 /// Retrieve a default value as an AVM2 `Value`.
 pub fn abc_default_value<'gc>(
     translation_unit: TranslationUnit<'gc>,
@@ -517,12 +468,14 @@ pub fn abc_default_value<'gc>(
     activation: &mut Activation<'_, 'gc>,
 ) -> Result<Value<'gc>, Error<'gc>> {
     match default {
-        AbcDefaultValue::Int(i) => abc_int(translation_unit, i).map(|v| v.into()),
-        AbcDefaultValue::Uint(u) => abc_uint(translation_unit, u).map(|v| v.into()),
-        AbcDefaultValue::Double(d) => abc_double(translation_unit, d).map(|v| v.into()),
+        AbcDefaultValue::Int(i) => translation_unit.pool_int(activation, i).map(|v| v.into()),
+        AbcDefaultValue::Uint(u) => translation_unit.pool_uint(activation, u).map(|v| v.into()),
+        AbcDefaultValue::Double(d) => translation_unit
+            .pool_double(activation, d)
+            .map(|v| v.into()),
         AbcDefaultValue::String(s) => translation_unit
-            .pool_string(s.0, activation.strings())
-            .map(Into::into),
+            .pool_string(s, activation)
+            .map(|v| v.into()),
         AbcDefaultValue::True => Ok(true.into()),
         AbcDefaultValue::False => Ok(false.into()),
         AbcDefaultValue::Null => Ok(Value::Null),
@@ -541,12 +494,17 @@ pub fn abc_default_value<'gc>(
 }
 
 impl<'gc> Value<'gc> {
-    pub fn as_namespace(&self) -> Result<Namespace<'gc>, Error<'gc>> {
-        match self {
-            Value::Object(ns) => ns
-                .as_namespace()
-                .ok_or_else(|| "Expected Namespace, found Object".into()),
-            _ => Err(format!("Expected Namespace, found {self:?}").into()),
+    /// Do the best effort of converting the [`usize`] value to [`Value`].
+    ///
+    /// This is lossless on 32-bit architectures and for values less or equal to
+    /// 2^53. For values greater than that, it will return a value equivalent to
+    /// the closest integer representable as IEEE 754 64-bit.
+    #[inline(always)]
+    pub fn from_usize_lossy(value: usize) -> Self {
+        if let Some(value) = value.to_i32() {
+            Value::Integer(value)
+        } else {
+            Value::Number(value as f64)
         }
     }
 
@@ -730,25 +688,44 @@ impl<'gc> Value<'gc> {
     ///
     /// Numerical conversions occur according to ECMA-262 3rd Edition's
     /// ToNumber algorithm which appears to match AVM2.
+    ///
+    /// This function can be very hot in physics code, so we inline a fast-path
+    /// for `Value::Number` and `Value::Integer`, and fall back to a non-inlined
+    /// slow-path handling the rest of the cases if necessary.
     pub fn coerce_to_number(
         &self,
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<f64, Error<'gc>> {
-        Ok(match self {
-            Value::Undefined => f64::NAN,
-            Value::Null => 0.0,
-            Value::Bool(true) => 1.0,
-            Value::Bool(false) => 0.0,
-            Value::Number(n) => *n,
-            Value::Integer(i) => *i as f64,
-            Value::String(s) => {
-                let swf_version = activation.context.root_swf.version();
-                string_to_f64(s, swf_version, true).unwrap_or_else(|| string_to_int(s, 0, true))
+        // Full coerce-to-number implementation. This is the slow-path.
+        #[inline(never)]
+        fn coerce_to_number_slow<'gc>(
+            value: &Value<'gc>,
+            activation: &mut Activation<'_, 'gc>,
+        ) -> Result<f64, Error<'gc>> {
+            Ok(match value {
+                Value::Undefined => f64::NAN,
+                Value::Null => 0.0,
+                Value::Bool(true) => 1.0,
+                Value::Bool(false) => 0.0,
+                Value::Integer(_) | Value::Number(_) => unreachable!("Handled by fast path"),
+                Value::String(s) => {
+                    let swf_version = activation.context.root_swf.version();
+                    string_to_f64(s, swf_version, true).unwrap_or_else(|| string_to_int(s, 0, true))
+                }
+                Value::Object(_) => value
+                    .coerce_to_primitive(Some(Hint::Number), activation)?
+                    .coerce_to_number(activation)?,
+            })
+        }
+
+        match self {
+            Value::Number(n) => Ok(*n),
+            Value::Integer(i) => Ok(*i as f64),
+            _ => {
+                // Fall back to slow path
+                coerce_to_number_slow(self, activation)
             }
-            Value::Object(_) => self
-                .coerce_to_primitive(Some(Hint::Number), activation)?
-                .coerce_to_number(activation)?,
-        })
+        }
     }
 
     /// Coerce the value to a 32-bit unsigned integer.
@@ -758,16 +735,35 @@ impl<'gc> Value<'gc> {
     ///
     /// Numerical conversions occur according to ECMA-262 3rd Edition's
     /// ToUint32 algorithm which appears to match AVM2.
+    ///
+    /// This function can be very hot, so we inline a fast-path for
+    /// `Value::Number` and `Value::Integer`, and fall back to a non-inlined
+    /// slow-path handling the rest of the cases if necessary.
     pub fn coerce_to_u32(&self, activation: &mut Activation<'_, 'gc>) -> Result<u32, Error<'gc>> {
-        Ok(match self {
-            Value::Integer(i) => *i as u32,
-            Value::Number(n) => f64_to_wrapping_u32(*n),
-            Value::Bool(b) => *b as u32,
-            Value::Undefined | Value::Null => 0,
-            Value::String(_) | Value::Object(_) => {
-                f64_to_wrapping_u32(self.coerce_to_number(activation)?)
+        // Full coerce-to-u32 implementation. This is the slow-path.
+        #[inline(never)]
+        fn coerce_to_u32_slow<'gc>(
+            value: &Value<'gc>,
+            activation: &mut Activation<'_, 'gc>,
+        ) -> Result<u32, Error<'gc>> {
+            Ok(match value {
+                Value::Integer(_) | Value::Number(_) => unreachable!("Handled by fast path"),
+                Value::Bool(b) => *b as u32,
+                Value::Undefined | Value::Null => 0,
+                Value::String(_) | Value::Object(_) => {
+                    f64_to_wrapping_u32(value.coerce_to_number(activation)?)
+                }
+            })
+        }
+
+        match self {
+            Value::Number(n) => Ok(f64_to_wrapping_u32(*n)),
+            Value::Integer(i) => Ok(*i as u32),
+            _ => {
+                // Fall back to slow path
+                coerce_to_u32_slow(self, activation)
             }
-        })
+        }
     }
 
     /// Coerce the value to a 32-bit signed integer.
@@ -777,16 +773,35 @@ impl<'gc> Value<'gc> {
     ///
     /// Numerical conversions occur according to ECMA-262 3rd Edition's
     /// ToInt32 algorithm which appears to match AVM2.
+    ///
+    /// This function can be very hot, so we inline a fast-path for
+    /// `Value::Number` and `Value::Integer`, and fall back to a non-inlined
+    /// slow-path handling the rest of the cases if necessary.
     pub fn coerce_to_i32(&self, activation: &mut Activation<'_, 'gc>) -> Result<i32, Error<'gc>> {
-        Ok(match self {
-            Value::Integer(i) => *i,
-            Value::Number(n) => f64_to_wrapping_i32(*n),
-            Value::Bool(b) => *b as i32,
-            Value::Undefined | Value::Null => 0,
-            Value::String(_) | Value::Object(_) => {
-                f64_to_wrapping_i32(self.coerce_to_number(activation)?)
+        // Full coerce-to-i32 implementation. This is the slow-path.
+        #[inline(never)]
+        fn coerce_to_i32_slow<'gc>(
+            value: &Value<'gc>,
+            activation: &mut Activation<'_, 'gc>,
+        ) -> Result<i32, Error<'gc>> {
+            Ok(match value {
+                Value::Integer(_) | Value::Number(_) => unreachable!("Handled by fast path"),
+                Value::Bool(b) => *b as i32,
+                Value::Undefined | Value::Null => 0,
+                Value::String(_) | Value::Object(_) => {
+                    f64_to_wrapping_i32(value.coerce_to_number(activation)?)
+                }
+            })
+        }
+
+        match self {
+            Value::Number(n) => Ok(f64_to_wrapping_i32(*n)),
+            Value::Integer(i) => Ok(*i),
+            _ => {
+                // Fall back to slow path
+                coerce_to_i32_slow(self, activation)
             }
-        })
+        }
     }
 
     /// Minimum number of digits after which numbers are formatted as
@@ -932,7 +947,7 @@ impl<'gc> Value<'gc> {
         let vtable = self.vtable(activation);
 
         match vtable.get_trait(multiname) {
-            Some(Property::Slot { slot_id }) | Some(Property::ConstSlot { slot_id }) => {
+            Some(Property::Slot { slot_id } | Property::ConstSlot { slot_id }) => {
                 // Only objects can have slots
                 let object = self.as_object().unwrap();
 
@@ -1072,7 +1087,7 @@ impl<'gc> Value<'gc> {
             Some(Property::Virtual { set: Some(set), .. }) => {
                 self.call_method(set, &[value], activation).map(|_| ())
             }
-            Some(Property::ConstSlot { .. }) | Some(Property::Virtual { set: None, .. }) => {
+            Some(Property::ConstSlot { .. } | Property::Virtual { set: None, .. }) => {
                 let instance_class = self.instance_class(activation);
 
                 Err(error::make_reference_error(
@@ -1125,7 +1140,7 @@ impl<'gc> Value<'gc> {
         let vtable = self.vtable(activation);
 
         match vtable.get_trait(multiname) {
-            Some(Property::Slot { slot_id }) | Some(Property::ConstSlot { slot_id }) => {
+            Some(Property::Slot { slot_id } | Property::ConstSlot { slot_id }) => {
                 // Only objects can have slots
                 let object = self.as_object().unwrap();
 
@@ -1156,7 +1171,7 @@ impl<'gc> Value<'gc> {
             }
             None => {
                 if let Some(object) = self.as_object() {
-                    object.init_property_local(multiname, value, activation)
+                    object.set_property_local(multiname, value, activation)
                 } else {
                     let instance_class = self.instance_class(activation);
 
@@ -1186,7 +1201,7 @@ impl<'gc> Value<'gc> {
         let vtable = self.vtable(activation);
 
         match vtable.get_trait(multiname) {
-            Some(Property::Slot { slot_id }) | Some(Property::ConstSlot { slot_id }) => {
+            Some(Property::Slot { slot_id } | Property::ConstSlot { slot_id }) => {
                 // Only objects can have slots
                 let object = self.as_object().unwrap();
 
@@ -1257,7 +1272,7 @@ impl<'gc> Value<'gc> {
     /// This method will panic if called on null or undefined.
     pub fn call_method(
         &self,
-        id: u32,
+        id: usize,
         arguments: &[Value<'gc>],
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
@@ -1266,16 +1281,16 @@ impl<'gc> Value<'gc> {
 
     pub fn call_method_with_args(
         &self,
-        id: u32,
+        id: usize,
         arguments: FunctionArgs<'_, 'gc>,
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
         // TODO: Bound methods should be cached on the Method in a
         // WeakKeyHashMap<Value, FunctionObject>, not on the Object
-        if let Some(object) = self.as_object() {
-            if let Some(bound_method) = object.get_bound_method(id) {
-                return bound_method.call(activation, *self, arguments);
-            }
+        if let Some(object) = self.as_object()
+            && let Some(bound_method) = object.get_bound_method(id)
+        {
+            return bound_method.call(activation, *self, arguments);
         }
 
         let vtable = self.vtable(activation);
@@ -1362,7 +1377,7 @@ impl<'gc> Value<'gc> {
         let vtable = self.vtable(activation);
 
         match vtable.get_trait(multiname) {
-            Some(Property::Slot { slot_id }) | Some(Property::ConstSlot { slot_id }) => {
+            Some(Property::Slot { slot_id } | Property::ConstSlot { slot_id }) => {
                 // Only objects can have slots
                 let object = self.as_object().unwrap();
 
@@ -1467,10 +1482,10 @@ impl<'gc> Value<'gc> {
     ) -> bool {
         let name = Multiname::new(activation.avm2().find_public_namespace(), name);
 
-        if let Some(object) = self.as_object() {
-            if object.has_own_property(&name) {
-                return true;
-            }
+        if let Some(object) = self.as_object()
+            && object.has_own_property(&name)
+        {
+            return true;
         }
 
         if let Some(proto) = self.proto(activation) {
@@ -1492,9 +1507,11 @@ impl<'gc> Value<'gc> {
         receiver: Value<'gc>,
         args: FunctionArgs<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
-        match self.as_object() {
-            Some(Object::ClassObject(class_object)) => class_object.call(activation, args),
-            Some(Object::FunctionObject(function_object)) => {
+        match self {
+            Value::Object(o) if let Some(class_object) = o.as_class_object() => {
+                class_object.call(activation, args)
+            }
+            Value::Object(o) if let Some(function_object) = o.as_function_object() => {
                 function_object.call(activation, receiver, args)
             }
             _ => Err(make_error_1006(activation)),
@@ -1506,11 +1523,11 @@ impl<'gc> Value<'gc> {
         activation: &mut Activation<'_, 'gc>,
         args: FunctionArgs<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
-        match self.as_object() {
-            Some(Object::ClassObject(class_object)) => {
+        match self {
+            Value::Object(o) if let Some(class_object) = o.as_class_object() => {
                 class_object.construct_with_args(activation, args)
             }
-            Some(Object::FunctionObject(function_object)) => {
+            Value::Object(o) if let Some(function_object) = o.as_function_object() => {
                 function_object.construct(activation, args).map(Into::into)
             }
             _ => Err(make_error_1007(activation)),
@@ -1561,10 +1578,10 @@ impl<'gc> Value<'gc> {
             return Ok(*self);
         }
 
-        if let Some(object) = self.as_object() {
-            if object.is_of_type(class) {
-                return Ok(*self);
-            }
+        if let Some(object) = self.as_object()
+            && object.is_of_type(class)
+        {
+            return Ok(*self);
         }
 
         Err(make_error_1034(activation, *self, class))
@@ -1716,10 +1733,12 @@ impl<'gc> Value<'gc> {
         activation: &mut Activation<'_, 'gc>,
         class_or_function_object: Object<'gc>,
     ) -> bool {
-        let type_proto = match class_or_function_object {
-            Object::ClassObject(class_object) => Some(class_object.prototype()),
-            Object::FunctionObject(function_object) => function_object.prototype(),
-            _ => panic!("Object must be either ClassObject or FunctionObject"),
+        let type_proto = if let Some(class_object) = class_or_function_object.as_class_object() {
+            Some(class_object.prototype())
+        } else if let Some(function_object) = class_or_function_object.as_function_object() {
+            function_object.prototype()
+        } else {
+            panic!("Object must be either ClassObject or FunctionObject")
         };
 
         if let Some(type_proto) = type_proto {
@@ -1743,10 +1762,10 @@ impl<'gc> Value<'gc> {
             true
         } else {
             // TODO - this should apply to (Array/Vector).indexOf, and possibility more places as well
-            if let Some(xml1) = self.as_object().and_then(|obj| obj.as_xml_object()) {
-                if let Some(xml2) = other.as_object().and_then(|obj| obj.as_xml_object()) {
-                    return E4XNode::ptr_eq(xml1.node(), xml2.node());
-                }
+            if let Some(xml1) = self.as_object().and_then(|obj| obj.as_xml_object())
+                && let Some(xml2) = other.as_object().and_then(|obj| obj.as_xml_object())
+            {
+                return E4XNode::ptr_eq(xml1.node(), xml2.node());
             }
             false
         }
@@ -1775,20 +1794,22 @@ impl<'gc> Value<'gc> {
                 return xml_obj.abstract_eq(other, activation);
             }
 
-            if let Some(self_qname) = obj.as_qname_object() {
-                if let Value::Object(Object::QNameObject(other_qname)) = other {
-                    return Ok(self_qname.uri(activation.strings())
-                        == other_qname.uri(activation.strings())
-                        && self_qname.local_name(activation.strings())
-                            == other_qname.local_name(activation.strings()));
-                }
+            if let Some(self_qname) = obj.as_qname_object()
+                && let Value::Object(o) = other
+                && let Some(other_qname) = o.as_qname_object()
+            {
+                return Ok(self_qname.uri(activation.strings())
+                    == other_qname.uri(activation.strings())
+                    && self_qname.local_name(activation.strings())
+                        == other_qname.local_name(activation.strings()));
             }
 
-            if let Some(self_ns) = obj.as_namespace_object() {
-                if let Value::Object(Object::NamespaceObject(other_ns)) = other {
-                    return Ok(self_ns.namespace().as_uri(activation.strings())
-                        == other_ns.namespace().as_uri(activation.strings()));
-                }
+            if let Some(self_ns) = obj.as_namespace_object()
+                && let Value::Object(o) = other
+                && let Some(other_ns) = o.as_namespace_object()
+            {
+                return Ok(self_ns.namespace().as_uri(activation.strings())
+                    == other_ns.namespace().as_uri(activation.strings()));
             }
         }
 
@@ -1809,20 +1830,7 @@ impl<'gc> Value<'gc> {
             (Value::Number(_) | Value::Integer(_), Value::Number(_) | Value::Integer(_)) => {
                 let a = self.coerce_to_number(activation)?;
                 let b = other.coerce_to_number(activation)?;
-
-                if a.is_nan() || b.is_nan() {
-                    return Ok(false);
-                }
-
-                if a == b {
-                    return Ok(true);
-                }
-
-                if a.abs() == 0.0 && b.abs() == 0.0 {
-                    return Ok(true);
-                }
-
-                Ok(false)
+                Ok(a == b)
             }
             (Value::String(a), Value::String(b)) => Ok(a == b),
             (Value::Bool(a), Value::Bool(b)) => Ok(a == b),
@@ -1882,7 +1890,7 @@ impl<'gc> Value<'gc> {
                 let prim_other = other.coerce_to_primitive(Some(Hint::Number), activation)?;
 
                 if let (Value::String(s), Value::String(o)) = (&prim_self, &prim_other) {
-                    return Ok(Some(s.to_string().bytes().lt(o.to_string().bytes())));
+                    return Ok(Some(s.as_wstr() < o.as_wstr()));
                 }
 
                 let num_self = prim_self.coerce_to_number(activation)?;

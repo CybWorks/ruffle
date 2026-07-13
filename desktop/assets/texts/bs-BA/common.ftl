@@ -1,6 +1,5 @@
 language-name = Bosanski
-start = Početak
-browse = Pretraga
+start = Pokreni
 save = Sačuvaj
 cancel = Otkaži
 remove = Ukloni

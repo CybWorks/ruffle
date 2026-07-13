@@ -19,6 +19,7 @@ use ruffle_render::transform::Transform;
 use ruffle_web_common::{JsError, JsResult};
 use std::any::Any;
 use std::borrow::Cow;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use swf::{BlendMode, Color, ColorTransform, Point, Twips};
 use wasm_bindgen::{Clamped, JsCast, JsValue};
@@ -188,9 +189,7 @@ impl BitmapData {
             .expect("get_context method must return a value")
             .dyn_into()
             .expect("get_context method returned something other than a CanvasRenderingContext2d");
-        context
-            .put_image_data(&image_data, 0.0, 0.0)
-            .into_js_result()?;
+        context.put_image_data(&image_data, 0, 0).into_js_result()?;
         Ok(BitmapData {
             image_data,
             canvas,
@@ -206,7 +205,7 @@ impl BitmapData {
         self.canvas.set_width(bitmap.width());
         self.canvas.set_height(bitmap.height());
         self.context
-            .put_image_data(&image_data, 0.0, 0.0)
+            .put_image_data(&image_data, 0, 0)
             .into_js_result()?;
         Ok(())
     }
@@ -323,7 +322,7 @@ impl WebCanvasRenderBackend {
     }
 
     #[inline]
-    fn set_transform(&mut self, matrix: &Matrix) {
+    fn set_transform(&self, matrix: &Matrix) {
         self.context
             .set_transform(
                 matrix.a.into(),
@@ -387,7 +386,7 @@ impl WebCanvasRenderBackend {
         ));
     }
 
-    fn apply_blend_mode(&mut self, blend: RenderBlendMode) {
+    fn apply_blend_mode(&self, blend: RenderBlendMode) {
         // TODO: Objects with a blend mode need to be rendered to an intermediate buffer first,
         // but for now we render each child directly to the canvas. This should look reasonable for most
         // common cases.
@@ -455,7 +454,7 @@ impl WebCanvasRenderBackend {
         }
     }
 
-    fn draw_lines(&mut self, color: Color, mut matrix: Matrix, rect: bool) {
+    fn draw_lines(&self, color: Color, mut matrix: Matrix, rect: bool) {
         matrix.tx += Twips::HALF_PX;
         matrix.ty += Twips::HALF_PX;
         let dom_matrix = matrix.to_dom_matrix();
@@ -585,8 +584,13 @@ impl RenderBackend for WebCanvasRenderBackend {
         Err(Error::Unimplemented("Sync handle resolution".into()))
     }
 
-    fn create_empty_texture(&mut self, width: u32, height: u32) -> Result<BitmapHandle, Error> {
-        let bitmap_data = BitmapData::empty(width, height).map_err(Error::JavascriptError)?;
+    fn create_empty_texture(
+        &mut self,
+        width: NonZeroU32,
+        height: NonZeroU32,
+    ) -> Result<BitmapHandle, Error> {
+        let bitmap_data =
+            BitmapData::empty(width.get(), height.get()).map_err(Error::JavascriptError)?;
         Ok(BitmapHandle(Arc::new(bitmap_data)))
     }
 }

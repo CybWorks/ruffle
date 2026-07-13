@@ -2,13 +2,13 @@
 
 pub use crate::avm2::object::xml_list_allocator;
 use crate::avm2::{
-    e4x::{name_to_multiname, simple_content_to_string, E4XNode, E4XNodeKind},
+    Activation, Error, TObject, Value,
+    e4x::{E4XNode, E4XNodeKind, name_to_multiname, simple_content_to_string},
     error::make_error_1086,
     globals::methods::xml as xml_methods,
     multiname::Multiname,
     object::{E4XOrXml, XmlListObject, XmlObject},
     parameters::ParametersExt,
-    Activation, Error, TObject, Value,
 };
 use crate::string::AvmString;
 
@@ -41,15 +41,15 @@ pub fn init<'gc>(
     let ignore_processing_instructions = args.get_bool(2);
     let ignore_whitespace = args.get_bool(3);
 
-    if let Some(obj) = value.as_object() {
-        if let Some(xml) = obj.as_xml_object() {
-            // Note - we re-use the XML object that was passed in, which makes
-            // `this[0] === xmlObjArg` true.
-            // This logic does *not* go in `E4XNode::parse`, as it does not apply
-            // to the `XML` constructor: `new XML(xmlObj) === xmlObj` is false.
-            this.set_children(activation.gc(), vec![E4XOrXml::Xml(xml)]);
-            return Ok(Value::Undefined);
-        }
+    if let Some(obj) = value.as_object()
+        && let Some(xml) = obj.as_xml_object()
+    {
+        // Note - we re-use the XML object that was passed in, which makes
+        // `this[0] === xmlObjArg` true.
+        // This logic does *not* go in `E4XNode::parse`, as it does not apply
+        // to the `XML` constructor: `new XML(xmlObj) === xmlObj` is false.
+        this.set_children(activation.gc(), vec![E4XOrXml::Xml(xml)]);
+        return Ok(Value::Undefined);
     }
 
     match E4XNode::parse(
@@ -68,7 +68,7 @@ pub fn init<'gc>(
         Err(e) => {
             return Err(Error::rust_error(
                 format!("Failed to parse XML: {e:?}").into(),
-            ))
+            ));
         }
     }
 
@@ -82,10 +82,10 @@ pub fn call_handler<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     if args.len() == 1 {
         // We do *not* create a new object when AS does 'XMLList(someXMLList)'
-        if let Some(obj) = args.get_value(0).as_object() {
-            if let Some(xml_list) = obj.as_xml_list_object() {
-                return Ok(xml_list.into());
-            }
+        if let Some(obj) = args.get_value(0).as_object()
+            && let Some(xml_list) = obj.as_xml_list_object()
+        {
+            return Ok(xml_list.into());
         }
     }
 
@@ -192,7 +192,7 @@ pub fn length<'gc>(
 
     let list = this.as_xml_list_object().unwrap();
     let children = list.children();
-    Ok(children.len().into())
+    Ok(Value::from_usize_lossy(children.len()))
 }
 
 pub fn child<'gc>(
@@ -235,7 +235,7 @@ pub fn children<'gc>(
     let children = list.children();
     let mut sub_children = Vec::new();
     for child in &*children {
-        if let E4XNodeKind::Element { ref children, .. } = &*child.node().kind() {
+        if let E4XNodeKind::Element { children, .. } = &*child.node().kind() {
             sub_children.extend(children.iter().map(|node| E4XOrXml::E4X(*node)));
         }
     }
@@ -303,14 +303,13 @@ pub fn attribute<'gc>(
     let children = list.children();
     let mut sub_children = Vec::new();
     for child in &*children {
-        if let E4XNodeKind::Element { ref attributes, .. } = &*child.node().kind() {
-            if let Some(found) = attributes
+        if let E4XNodeKind::Element { attributes, .. } = &*child.node().kind()
+            && let Some(found) = attributes
                 .iter()
                 .find(|node| node.matches_name(&multiname))
                 .copied()
-            {
-                sub_children.push(E4XOrXml::E4X(found));
-            }
+        {
+            sub_children.push(E4XOrXml::E4X(found));
         }
     }
 
@@ -335,7 +334,7 @@ pub fn attributes<'gc>(
 
     let mut child_attrs = Vec::new();
     for child in list.children().iter() {
-        if let E4XNodeKind::Element { ref attributes, .. } = &*child.node().kind() {
+        if let E4XNodeKind::Element { attributes, .. } = &*child.node().kind() {
             child_attrs.extend(attributes.iter().map(|node| E4XOrXml::E4X(*node)));
         }
     }
@@ -376,7 +375,7 @@ pub fn text<'gc>(
     let xml_list = this.as_xml_list_object().unwrap();
     let mut nodes = Vec::new();
     for child in xml_list.children().iter() {
-        if let E4XNodeKind::Element { ref children, .. } = &*child.node().kind() {
+        if let E4XNodeKind::Element { children, .. } = &*child.node().kind() {
             nodes.extend(
                 children
                     .iter()
@@ -400,7 +399,7 @@ pub fn comments<'gc>(
     let xml_list = this.as_xml_list_object().unwrap();
     let mut nodes = Vec::new();
     for child in xml_list.children().iter() {
-        if let E4XNodeKind::Element { ref children, .. } = &*child.node().kind() {
+        if let E4XNodeKind::Element { children, .. } = &*child.node().kind() {
             nodes.extend(
                 children
                     .iter()
@@ -465,7 +464,7 @@ pub fn processing_instructions<'gc>(
     let multiname = name_to_multiname(activation, args.get_value(0), false)?;
     let mut nodes = Vec::new();
     for child in xml_list.children().iter() {
-        if let E4XNodeKind::Element { ref children, .. } = &*child.node().kind() {
+        if let E4XNodeKind::Element { children, .. } = &*child.node().kind() {
             nodes.extend(
                 children
                     .iter()

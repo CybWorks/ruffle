@@ -30,8 +30,10 @@ pub fn connect<'gc>(
     let url = args.try_get_string(0);
 
     if let Some(url) = url {
-        if url.starts_with(WStr::from_units(b"http://"))
-            || url.starts_with(WStr::from_units(b"https://"))
+        let url_lower = url.to_ascii_lowercase();
+
+        if url_lower.starts_with(WStr::from_units(b"http://"))
+            || url_lower.starts_with(WStr::from_units(b"https://"))
         {
             // HTTP(S) is for Flash Remoting, which is just POST requests to the URL.
             NetConnections::connect_to_flash_remoting(
@@ -280,10 +282,8 @@ pub fn call<'gc>(
 
     let mut object_table = FnvHashMap::default();
     for arg in &args[2..] {
-        if let Some(value) = serialize_value(activation, *arg, AMFVersion::AMF0, &mut object_table)
-        {
-            arguments.push(Rc::new(value));
-        }
+        let value = serialize_value(activation, *arg, AMFVersion::AMF0, &mut object_table);
+        arguments.push(Rc::new(value));
     }
 
     if let Some(handle) = connection.handle() {
@@ -338,8 +338,7 @@ pub fn add_header<'gc>(
         args.get_value(2),
         AMFVersion::AMF0,
         &mut Default::default(),
-    )
-    .unwrap_or(AMFValue::Null);
+    );
 
     if let Some(handle) = connection.handle() {
         activation.context.net_connections.set_header(

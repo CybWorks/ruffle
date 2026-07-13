@@ -460,7 +460,7 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
             tokio::select! {
                _ = read => {},
                _ = write => {},
-            };
+            }
 
             if let Err(e) = stream.shutdown().await {
                 tracing::warn!("Failed to shutdown write half of TcpStream: {e}");
@@ -492,6 +492,8 @@ mod tests {
     use std::str::FromStr;
     use tokio::net::TcpListener;
     use tokio::task;
+
+    use crate::content::ContentDescriptor;
 
     use super::*;
 
@@ -571,7 +573,10 @@ mod tests {
             } else {
                 SocketMode::Deny
             },
-            Rc::new(PlayingContent::DirectFile(url)),
+            Rc::new(PlayingContent::DirectFile(ContentDescriptor {
+                url,
+                root_content_path: None,
+            })),
             (),
         )
     }

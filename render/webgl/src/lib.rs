@@ -23,6 +23,7 @@ use ruffle_render::transform::Transform;
 use ruffle_web_common::{JsError, JsResult};
 use std::any::Any;
 use std::borrow::Cow;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use swf::{BlendMode, Color, Twips};
 use thiserror::Error;
@@ -566,12 +567,13 @@ impl WebGlRenderBackend {
         &mut self,
         shape: DistilledShape,
         bitmap_source: &dyn BitmapSource,
+        scale: f32,
     ) -> Result<Vec<Draw>, Error> {
         use ruffle_render::tessellator::DrawType as TessDrawType;
 
-        let lyon_mesh = self
-            .shape_tessellator
-            .tessellate_shape(shape, bitmap_source);
+        let lyon_mesh =
+            self.shape_tessellator
+                .tessellate_shape_with_scale(shape, bitmap_source, scale);
 
         let mut draws = Vec::with_capacity(lyon_mesh.draws.len());
         for draw in lyon_mesh.draws {
@@ -726,7 +728,7 @@ impl WebGlRenderBackend {
         };
     }
 
-    fn set_stencil_state(&mut self) {
+    fn set_stencil_state(&self) {
         // Set stencil state for masking, if necessary.
         if self.mask_state_dirty {
             match self.mask_state {
@@ -757,7 +759,7 @@ impl WebGlRenderBackend {
         }
     }
 
-    fn apply_blend_mode(&mut self, mode: RenderBlendMode) {
+    fn apply_blend_mode(&self, mode: RenderBlendMode) {
         let (blend_op, src_rgb, dst_rgb) = match mode {
             RenderBlendMode::Builtin(BlendMode::Normal) => {
                 // src + (1-a)
@@ -814,7 +816,7 @@ impl WebGlRenderBackend {
         self.gl.clear(Gl::COLOR_BUFFER_BIT | Gl::STENCIL_BUFFER_BIT);
     }
 
-    fn end_frame(&mut self) {
+    fn end_frame(&self) {
         // Resolve MSAA, if we're using it (WebGL2).
         if let (Some(gl), Some(msaa_buffers)) = (&self.gl2, &self.msaa_buffers) {
             // Disable any remaining masking state.
@@ -1039,7 +1041,16 @@ impl RenderBackend for WebGlRenderBackend {
         shape: DistilledShape,
         bitmap_source: &dyn BitmapSource,
     ) -> ShapeHandle {
-        let mesh = match self.register_shape_internal(shape, bitmap_source) {
+        self.register_shape_with_scale(shape, bitmap_source, 1.0)
+    }
+
+    fn register_shape_with_scale(
+        &mut self,
+        shape: DistilledShape,
+        bitmap_source: &dyn BitmapSource,
+        scale: f32,
+    ) -> ShapeHandle {
+        let mesh = match self.register_shape_internal(shape, bitmap_source, scale) {
             Ok(draws) => Mesh {
                 draws,
                 gl2: self.gl2.clone(),
@@ -1222,8 +1233,8 @@ impl RenderBackend for WebGlRenderBackend {
 
     fn create_empty_texture(
         &mut self,
-        width: u32,
-        height: u32,
+        width: NonZeroU32,
+        height: NonZeroU32,
     ) -> Result<BitmapHandle, BitmapError> {
         let texture = self
             .gl
@@ -1243,8 +1254,8 @@ impl RenderBackend for WebGlRenderBackend {
 
         Ok(BitmapHandle(Arc::new(RegistryData {
             gl: self.gl.clone(),
-            width,
-            height,
+            width: width.get(),
+            height: height.get(),
             texture,
         })))
     }

@@ -12,6 +12,7 @@ describe("Embed without type attribute", () => {
 
     it("polyfills with ruffle", async () => {
         await injectRuffleAndWait(browser);
+        await browser.$("<ruffle-embed />").waitForExist();
         const actual = await browser
             .$("#test-container")
             .getHTML({ includeSelectorTag: false, pierceShadowRoot: false });
@@ -25,7 +26,10 @@ describe("Embed without type attribute", () => {
     it("Plays a movie", async () => {
         await playAndMonitor(
             browser,
-            await browser.$("#test-container").$("<ruffle-embed />"),
+            await browser
+                .$("#test-container")
+                .$("<ruffle-embed />")
+                .getElement(),
         );
     });
 });

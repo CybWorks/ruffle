@@ -5,10 +5,11 @@ use crate::drawing::Drawing;
 use crate::font::{DefaultFont, EvalParameters, Font, FontLike, FontSet, FontType};
 use crate::html::dimensions::{BoxBounds, Position, Size};
 use crate::html::text_format::{FormatSpans, TextFormat, TextSpan};
-use crate::string::{utils as string_utils, WStr};
+use crate::html::wrap_line;
+use crate::string::WStr;
 use crate::tag_utils::SwfMovie;
 use gc_arena::Collect;
-use std::cmp::{max, min, Ordering};
+use std::cmp::{Ordering, max, min};
 use std::fmt::{Debug, Formatter};
 use std::mem;
 use std::ops::Range;
@@ -152,8 +153,10 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
 
         let params = EvalParameters::from_span(span);
 
-        for text in span_text.split(&[b'\n', b'\r', b'\t'][..]) {
-            let slice_start = text.offset_in(span_text).unwrap();
+        for range in span_text.split_indices([b'\n', b'\r', b'\t']) {
+            let slice_start = range.start;
+            let text = &span_text[range];
+
             let delimiter = if slice_start > 0 {
                 span_text
                     .get(slice_start - 1)
@@ -177,26 +180,28 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
             if self.is_word_wrap {
                 let (mut width, mut offset) = self.wrap_dimensions(span);
 
-                while let Some(breakpoint) = font_set.wrap_line(
-                    &text[last_breakpoint..],
-                    params,
-                    width,
-                    offset,
-                    self.is_start_of_line(),
-                ) {
-                    // This ensures that the space causing the line break
-                    // is included in the line it broke.
-                    let next_breakpoint =
-                        string_utils::next_char_boundary(text, last_breakpoint + breakpoint);
-
-                    // If text doesn't fit at the start of a line, it
-                    // won't fit on the next either, abort and put the
-                    // whole text on the line (will be cut-off). This
-                    // can happen for small text fields with single
-                    // characters.
-                    if breakpoint == 0 && self.is_start_of_line() {
+                loop {
+                    let breakpoint = wrap_line(
+                        &font_set,
+                        &text[last_breakpoint..],
+                        params,
+                        width,
+                        offset,
+                        self.is_start_of_line(),
+                        self.movie.version(),
+                    );
+                    let Some(breakpoint) = breakpoint else {
                         break;
-                    } else if breakpoint == 0 {
+                    };
+
+                    let next_breakpoint = last_breakpoint + breakpoint;
+
+                    if breakpoint == 0 {
+                        if self.is_start_of_line() {
+                            unreachable!(
+                                "wrap_line is supposed to return nonzero if is_start_of_line"
+                            );
+                        }
                         self.newline(context, start + next_breakpoint, span, false);
 
                         let next_dim = self.wrap_dimensions(span);
@@ -452,10 +457,10 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
         self.has_line_break = true;
 
         let font_size = Twips::from_pixels(self.current_line_span.font.size);
-        let font = self.font_set.unwrap();
+        let metrics = self.font_set.unwrap().metrics();
         self.max_font_size = font_size;
-        self.max_ascent = font.get_baseline_for_height(font_size);
-        self.max_descent = font.get_descent_for_height(font_size);
+        self.max_ascent = metrics.ascent(font_size);
+        self.max_descent = metrics.descent(font_size);
         self.max_leading = Twips::from_pixels(span.leading);
     }
 
@@ -487,9 +492,9 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
     /// Enter a new span.
     fn newspan(&mut self, first_span: &TextSpan) {
         let font_size = Twips::from_pixels(first_span.font.size);
-        let font = self.font_set.unwrap();
-        let ascent = font.get_baseline_for_height(font_size);
-        let descent = font.get_descent_for_height(font_size);
+        let metrics = self.font_set.unwrap().metrics();
+        let ascent = metrics.ascent(font_size);
+        let descent = metrics.descent(font_size);
         let leading = Twips::from_pixels(first_span.leading);
         if self.is_start_of_line() {
             self.current_line_span = first_span.clone();
@@ -536,8 +541,8 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
 
         // Note that the SWF can still contain a DefineFont tag with no glyphs/layout info in this case (see #451).
         // In an ideal world, device fonts would search for a matching font on the system and render it in some way.
-        if self.font_type.is_embedded() {
-            if let Some(font) = context
+        if self.font_type.is_embedded()
+            && let Some(font) = context
                 .library
                 .get_embedded_font_by_name(
                     &font_name,
@@ -547,14 +552,13 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
                     Some(self.movie.clone()),
                 )
                 .filter(|f| f.has_glyphs())
-            {
-                return FontSet::from_one_font(context.gc(), font);
-            }
-            // TODO: If set to use embedded fonts and we couldn't find any matching font, show nothing
-            // However - at time of writing, we don't support DefineFont4. If we matched this behaviour,
-            // then a bunch of SWFs would just show no text suddenly.
-            // return new_empty_font(context, span, self.font_type);
+        {
+            return FontSet::from_one_font(context.gc(), font);
         }
+        // TODO: If set to use embedded fonts and we couldn't find any matching font, show nothing
+        // However - at time of writing, we don't support DefineFont4. If we matched this behaviour,
+        // then a bunch of SWFs would just show no text suddenly.
+        // return new_empty_font(context, span, self.font_type);
 
         // Specifying multiple font names is supported only for device fonts.
         let font_names: Vec<&str> = font_name.split(",").collect();
@@ -649,9 +653,9 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
     fn append_text(&mut self, text: &'a WStr, start: usize, end: usize, span: &TextSpan) {
         let empty = start == end;
         if !empty && self.effective_alignment() == swf::TextAlign::Justify {
-            for word in text.split(b' ') {
-                let word_start = word.offset_in(text).unwrap();
-                let word_end = min(word_start + word.len() + 1, text.len());
+            for range in text.split_indices(b' ') {
+                let word_start = range.start;
+                let word_end = min(range.end + 1, text.len());
 
                 if word_start == word_end {
                     // Do not append empty boxes
@@ -677,12 +681,13 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
     fn append_text_fragment(&mut self, text: &'a WStr, start: usize, end: usize, span: &TextSpan) {
         let font_set = self.font_set.expect("text fragment requires a font");
         let params = EvalParameters::from_span(span);
-        let ascent = font_set.get_baseline_for_height(params.height());
-        let descent = font_set.get_descent_for_height(params.height());
-        let text_width = font_set.measure(text, params);
+        let metrics = font_set.metrics();
+        let ascent = metrics.ascent(params.height());
+        let descent = metrics.descent(params.height());
         let box_origin = self.cursor - (Twips::ZERO, ascent).into();
 
         let mut new_box = LayoutBox::from_text(text, start, end, font_set, span);
+        let text_width = new_box.text_width();
         new_box.bounds = BoxBounds::from_position_and_size(
             box_origin,
             Size::from((text_width, ascent + descent)),
@@ -707,8 +712,9 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
         );
 
         let params = EvalParameters::from_span(span);
-        let ascent = bullet_font.get_baseline_for_height(params.height());
-        let descent = bullet_font.get_descent_for_height(params.height());
+        let metrics = bullet_font.metrics();
+        let ascent = metrics.ascent(params.height());
+        let descent = metrics.descent(params.height());
         let bullet = WStr::from_units(&[0x2022u16]);
         let text_width = bullet_font.measure(bullet, params);
         let box_origin = bullet_cursor - (Twips::ZERO, ascent).into();
@@ -862,7 +868,7 @@ fn lower_from_text_spans_known_width<'gc>(
 
 /// A `Layout` represents a fully laid-out text field.
 /// It consists of [`LayoutLine`]s.
-#[derive(Clone, Debug, Collect)]
+#[derive(Clone, Debug, Collect, Default)]
 #[collect(no_drop)]
 pub struct Layout<'gc> {
     #[collect(require_static)]
@@ -1063,12 +1069,11 @@ impl<'gc> LayoutLine<'gc> {
         // and its bounds will end where the next character starts.
         // If it's not a space or the text is not justified, it won't change the value.
         // TODO [KJ] We need to test this behavior with letter spacing or kerning enabled.
-        if layout_box.end() == position + 1 {
-            if let Some(next_box) = self.boxes.get(box_index + 1) {
-                if let Some(next_start) = next_box.char_x_bounds(position + 1).map(|(s, _)| s) {
-                    end = next_start;
-                }
-            }
+        if layout_box.end() == position + 1
+            && let Some(next_box) = self.boxes.get(box_index + 1)
+            && let Some(next_start) = next_box.char_x_bounds(position + 1).map(|(s, _)| s)
+        {
+            end = next_start;
         }
 
         Some((start, end))
@@ -1380,6 +1385,15 @@ impl<'gc> LayoutBox<'gc> {
         self.start()..self.end()
     }
 
+    pub fn text_width(&self) -> Twips {
+        match &self.content {
+            LayoutContent::Text { char_end_pos, .. } => {
+                char_end_pos.last().copied().unwrap_or_default()
+            }
+            _ => Twips::ZERO,
+        }
+    }
+
     /// Return x-axis char bounds of the given char relative to the whole layout.
     pub fn char_x_bounds(&self, position: usize) -> Option<(Twips, Twips)> {
         let relative_position = position.checked_sub(self.start())?;
@@ -1422,10 +1436,10 @@ impl<'layout, 'gc> Iterator for LayoutBoxIter<'layout, 'gc> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if let Some(boxes_iter) = self.boxes_iter.as_mut() {
-                if let Some(next) = boxes_iter.next() {
-                    return Some(next);
-                }
+            if let Some(boxes_iter) = self.boxes_iter.as_mut()
+                && let Some(next) = boxes_iter.next()
+            {
+                return Some(next);
             }
 
             if let Some(next_line) = self.lines_iter.next() {

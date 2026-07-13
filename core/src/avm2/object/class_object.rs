@@ -1,11 +1,15 @@
 //! Class object impl
 
+use crate::avm2::Error;
+use crate::avm2::Multiname;
+use crate::avm2::QName;
+use crate::avm2::TranslationUnit;
 use crate::avm2::activation::Activation;
 use crate::avm2::class::{AllocatorFn, Class, CustomConstructorFn};
 use crate::avm2::error::{
     self, make_error_1070, make_error_1107, make_error_1112, make_error_1127, make_error_1128,
 };
-use crate::avm2::function::{exec, FunctionArgs};
+use crate::avm2::function::{FunctionArgs, exec};
 use crate::avm2::method::{Method, MethodAssociation, NativeMethodImpl};
 use crate::avm2::object::function_object::FunctionObject;
 use crate::avm2::object::script_object::ScriptObjectData;
@@ -14,17 +18,13 @@ use crate::avm2::property::Property;
 use crate::avm2::scope::{Scope, ScopeChain};
 use crate::avm2::value::Value;
 use crate::avm2::vtable::VTable;
-use crate::avm2::Error;
-use crate::avm2::Multiname;
-use crate::avm2::QName;
-use crate::avm2::TranslationUnit;
 use crate::context::UpdateContext;
 use crate::string::AvmString;
 use fnv::FnvHashMap;
 use gc_arena::barrier::unlock;
 use gc_arena::{
-    lock::{Lock, RefLock},
     Collect, Gc, GcWeak, Mutation,
+    lock::{Lock, RefLock},
 };
 use ruffle_common::utils::HasPrefixField;
 use ruffle_macros::istr;
@@ -219,6 +219,9 @@ impl<'gc> ClassObject<'gc> {
             self.superclass_object().map(|cls| cls.instance_vtable()),
             activation.context,
         );
+        // If the vtable weren't valid, creation of the `Class` would have
+        // thrown an error.
+        let vtable = vtable.expect("ClassObject VTable should be valid");
 
         unlock!(Gc::write(mc, self.0), ClassObjectData, instance_vtable).set(vtable);
     }
@@ -255,6 +258,9 @@ impl<'gc> ClassObject<'gc> {
             Some(class_classobject.instance_vtable()),
             activation.gc(),
         );
+        // If the vtable weren't valid, creation of the `Class` would have
+        // thrown an error.
+        let class_vtable = class_vtable.expect("ClassObject VTable should be valid");
 
         self.set_vtable(activation.gc(), class_vtable);
     }
@@ -420,7 +426,7 @@ impl<'gc> ClassObject<'gc> {
     ) -> Result<Value<'gc>, Error<'gc>> {
         let property = self.instance_vtable().get_trait(multiname);
         match property {
-            Some(Property::Slot { slot_id }) | Some(Property::ConstSlot { slot_id }) => {
+            Some(Property::Slot { slot_id } | Property::ConstSlot { slot_id }) => {
                 let func = receiver.get_slot(slot_id);
 
                 func.call(activation, receiver.into(), arguments)
@@ -482,7 +488,7 @@ impl<'gc> ClassObject<'gc> {
         let property = self.instance_vtable().get_trait(multiname);
 
         match property {
-            Some(Property::Slot { slot_id }) | Some(Property::ConstSlot { slot_id }) => {
+            Some(Property::Slot { slot_id } | Property::ConstSlot { slot_id }) => {
                 Ok(receiver.get_slot(slot_id))
             }
             Some(Property::Method { disp_id }) => {
@@ -568,7 +574,7 @@ impl<'gc> ClassObject<'gc> {
 
                 Ok(())
             }
-            Some(Property::ConstSlot { .. }) | Some(Property::Virtual { set: None, .. }) => {
+            Some(Property::ConstSlot { .. } | Property::Virtual { set: None, .. }) => {
                 if activation.is_interpreter() {
                     Err(error::make_reference_error(
                         activation,
@@ -598,7 +604,7 @@ impl<'gc> ClassObject<'gc> {
         self,
         activation: &mut Activation<'_, 'gc>,
         receiver: Object<'gc>,
-        disp_id: u32,
+        disp_id: usize,
         arguments: FunctionArgs<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
         let full_method = self.instance_vtable().get_full_method(disp_id).unwrap();
@@ -719,8 +725,10 @@ impl<'gc> ClassObject<'gc> {
         }
     }
 
-    pub fn translation_unit(self) -> Option<TranslationUnit<'gc>> {
-        self.init_method().map(|m| m.translation_unit())
+    pub fn translation_unit(self) -> TranslationUnit<'gc> {
+        self.inner_class_definition()
+            .translation_unit()
+            .expect("ClassObject must have init method")
     }
 
     pub fn init_method(self) -> Option<Method<'gc>> {

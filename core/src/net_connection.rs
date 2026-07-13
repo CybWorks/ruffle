@@ -1,5 +1,6 @@
-use crate::avm1::globals::netconnection::NetConnection as Avm1NetConnectionObject;
+use crate::Player;
 use crate::avm1::Object as Avm1Object;
+use crate::avm1::globals::netconnection::NetConnection as Avm1NetConnectionObject;
 use crate::avm2::object::{
     NetConnectionObject as Avm2NetConnectionObject, ResponderObject as Avm2ResponderObject,
 };
@@ -9,12 +10,10 @@ use crate::backend::navigator::{
 };
 use crate::context::UpdateContext;
 use crate::loader::Error;
-use crate::Player;
 use flash_lso::packet::{Header, Message, Packet};
 use flash_lso::types::{AMFVersion, Value as AmfValue};
-use gc_arena::collect::Trace;
 use gc_arena::{Collect, DynamicRoot, Gc, Rootable};
-use slotmap::{new_key_type, SlotMap};
+use slotmap::{SlotMap, new_key_type};
 use std::fmt::{Debug, Formatter};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -112,16 +111,10 @@ impl<'gc> From<Avm1Object<'gc>> for NetConnectionObject<'gc> {
 }
 
 /// Manages the collection of NetConnections.
+#[derive(Collect)]
+#[collect(no_drop)]
 pub struct NetConnections<'gc> {
     connections: SlotMap<NetConnectionHandle, NetConnection<'gc>>,
-}
-
-unsafe impl<'gc> Collect<'gc> for NetConnections<'gc> {
-    fn trace<C: Trace<'gc>>(&self, cc: &mut C) {
-        for (_, connection) in self.connections.iter() {
-            cc.trace(connection);
-        }
-    }
 }
 
 impl Default for NetConnections<'_> {
@@ -238,11 +231,9 @@ impl<'gc> NetConnections<'gc> {
                 }
                 if is_explicit
                     && matches!(connection.protocol, NetConnectionProtocol::FlashRemoting(_))
+                    && let Err(e) = Avm1NetConnectionObject::on_empty_status_event(context, object)
                 {
-                    if let Err(e) = Avm1NetConnectionObject::on_empty_status_event(context, object)
-                    {
-                        tracing::error!("Unhandled error sending connection callback: {e}");
-                    }
+                    tracing::error!("Unhandled error sending connection callback: {e}");
                 }
             }
         }

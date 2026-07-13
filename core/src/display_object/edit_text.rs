@@ -14,7 +14,7 @@ use crate::context::{RenderContext, UpdateContext};
 use crate::display_object::interactive::{
     InteractiveObject, InteractiveObjectBase, TInteractiveObject,
 };
-use crate::display_object::{Avm1TextFieldBinding, DisplayObjectBase};
+use crate::display_object::{Avm1TextFieldBinding, BoundsMode, DisplayObjectBase};
 use crate::events::{
     ClipEvent, ClipEventResult, ImeCursorArea, ImeEvent, ImeNotification, ImePurpose,
     PlayerNotification, TextControlCode,
@@ -26,7 +26,7 @@ use crate::html::{
     FormatSpans, Layout, LayoutBox, LayoutContent, LayoutLine, LayoutMetrics, Position, TextFormat,
 };
 use crate::prelude::*;
-use crate::string::{utils as string_utils, AvmString, SwfStrExt as _, WStr, WString};
+use crate::string::{AvmString, SwfStrExt as _, WStr, WString, utils as string_utils};
 use crate::tag_utils::SwfMovie;
 use crate::vminterface::{AvmObject, Instantiator};
 use chrono::DateTime;
@@ -289,35 +289,12 @@ impl<'gc> EditText<'gc> {
             AutoSizeMode::None
         };
 
-        let font_type = if swf_tag.use_outlines() {
-            FontType::Embedded
-        } else {
-            FontType::Device
-        };
-
-        let is_word_wrap = swf_tag.is_word_wrap();
-        let content_width = if autosize == AutoSizeMode::None || is_word_wrap {
-            Some(swf_tag.bounds().width() - Self::GUTTER * 2)
-        } else {
-            None
-        };
-
-        let layout = html::lower_from_text_spans(
-            &text_spans,
-            context,
-            swf_movie.clone(),
-            content_width,
-            !swf_tag.is_read_only(),
-            is_word_wrap,
-            font_type,
-        );
-
         let variable = if !swf_tag.variable_name().is_empty() {
-            Some(swf_tag.variable_name().decode(encoding))
+            let name = swf_tag.variable_name().decode(encoding);
+            Some(context.strings.intern_wstr(name).into())
         } else {
             None
         };
-        let variable = variable.map(|s| context.strings.intern_wstr(s).into());
 
         // We match the flags from the DefineEditText SWF tag.
         let mut flags = EditTextFlag::from_bits_truncate(swf_tag.flags().bits());
@@ -354,7 +331,7 @@ impl<'gc> EditText<'gc> {
                 background_color: Cell::new(Color::WHITE),
                 border_color: Cell::new(Color::BLACK),
                 object: Lock::new(None),
-                layout: RefLock::new(layout),
+                layout: RefLock::new(Default::default()),
                 bounds: Cell::new(*swf_tag.bounds()),
                 autosize_lazy_bounds: Cell::new(None),
                 autosize: Cell::new(autosize),
@@ -377,11 +354,7 @@ impl<'gc> EditText<'gc> {
                 avm1_text_field_bindings: RefLock::new(Vec::new()),
             },
         ));
-
-        if swf_tag.is_auto_size() {
-            et.relayout(context);
-        }
-
+        et.relayout(context);
         et
     }
 
@@ -528,6 +501,10 @@ impl<'gc> EditText<'gc> {
     }
 
     pub fn text_format(self, from: usize, to: usize) -> TextFormat {
+        if from == to {
+            return Default::default();
+        }
+
         // TODO: Convert to byte indices
         self.0.text_spans.borrow().get_text_format(from, to)
     }
@@ -787,27 +764,57 @@ impl<'gc> EditText<'gc> {
         unlock!(Gc::write(mc, self.0), EditTextData, bound_display_object).set(value);
     }
 
+    fn device_font_scale_x(self) -> f32 {
+        let m = self.local_to_global_matrix();
+        m.d / m.a
+    }
+
     /// Returns the matrix for transforming from layout
     /// coordinate space into this object's local space.
     fn layout_to_local_matrix(self) -> Matrix {
         let bounds = self.0.bounds.get();
-        Matrix::translate(
+        let matrix = Matrix::translate(
             bounds.x_min + Self::GUTTER - Twips::from_pixels(self.0.hscroll.get()),
             bounds.y_min + Self::GUTTER - self.0.vertical_scroll_offset(),
-        )
+        );
+
+        if self.font_type() == FontType::Device {
+            // Device text cannot be scaled independently in x/y.
+            // Here we have to make sure the independent x/y scale applied for
+            // the local coordinate space is reversed, leaving only y scale
+            // and keeping the original aspect ratio in x.
+            matrix * Matrix::scale(self.device_font_scale_x(), 1.0f32)
+        } else {
+            matrix
+        }
     }
 
     /// Returns the matrix for transforming from this object's
     /// local space into its layout coordinate space.
-    fn local_to_layout_matrix(self) -> Matrix {
-        // layout_to_local contains only a translation,
-        // no need to inverse the matrix generically.
-        let Matrix { tx, ty, .. } = self.layout_to_local_matrix();
-        Matrix::translate(-tx, -ty)
+    fn local_to_layout_matrix(self) -> Option<Matrix> {
+        self.layout_to_local_matrix().inverse()
     }
 
-    fn local_to_layout(self, local: Point<Twips>) -> Point<Twips> {
-        self.local_to_layout_matrix() * local
+    fn local_to_layout(self, local: Point<Twips>) -> Option<Point<Twips>> {
+        Some(self.local_to_layout_matrix()? * local)
+    }
+
+    fn local_width_to_layout_width(self, width: Twips) -> Twips {
+        if self.font_type() == FontType::Device {
+            let scale_x = self.device_font_scale_x() as f64;
+            Twips::from_pixels(width.to_pixels() / scale_x)
+        } else {
+            width
+        }
+    }
+
+    fn layout_width_to_local_width(self, width: Twips) -> Twips {
+        if self.font_type() == FontType::Device {
+            let scale_x = self.device_font_scale_x() as f64;
+            Twips::from_pixels(width.to_pixels() * scale_x)
+        } else {
+            width
+        }
     }
 
     pub fn replace_text(
@@ -883,7 +890,7 @@ impl<'gc> EditText<'gc> {
 
         // Determine the internal width available for content layout.
         let content_width = if autosize == AutoSizeMode::None || is_word_wrap {
-            Some(self.0.bounds.get().width() - padding)
+            Some(self.local_width_to_layout_width(self.0.bounds.get().width()) - padding)
         } else {
             None
         };
@@ -910,7 +917,7 @@ impl<'gc> EditText<'gc> {
         if autosize != AutoSizeMode::None {
             if !is_word_wrap {
                 // The edit text's bounds needs to have the padding baked in.
-                let mut width = text_size.width() + padding;
+                let mut width = self.layout_width_to_local_width(text_size.width()) + padding;
                 if !self.0.flags.get().contains(EditTextFlag::READ_ONLY) {
                     // When the field is editable, FP adds 2.5px to add some
                     // space to place the caret.
@@ -969,6 +976,7 @@ impl<'gc> EditText<'gc> {
     /// The returned tuple should be interpreted as width, then height.
     pub fn measure_text(self, _context: &mut UpdateContext<'gc>) -> (Twips, Twips) {
         let text_size = self.0.layout.borrow().text_size();
+        let text_size = self.layout_to_local_matrix() * text_size;
         (text_size.width(), text_size.height())
     }
 
@@ -1051,7 +1059,6 @@ impl<'gc> EditText<'gc> {
     /// Returns the selection, but takes into account whether the selection should be rendered.
     fn visible_selection(self) -> Option<TextSelection> {
         let selection = self.0.selection.get()?;
-        #[expect(clippy::collapsible_else_if)]
         if selection.is_caret() {
             if self.has_focus() && !self.0.flags.get().contains(EditTextFlag::READ_ONLY) {
                 Some(selection)
@@ -1264,9 +1271,10 @@ impl<'gc> EditText<'gc> {
         if let Some((text, _tf, font, params, color)) =
             lbox.as_renderable_text(self.0.text_spans.borrow().displayed_text())
         {
-            let baseline = font.get_baseline_for_height(params.height());
-            let descent = font.get_descent_for_height(params.height());
-            let caret_height = baseline + descent;
+            let metrics = font.metrics();
+            let ascent = metrics.ascent(params.height());
+            let descent = metrics.descent(params.height());
+            let caret_height = ascent + descent;
             let mut caret_x = Twips::ZERO;
             font.evaluate(
                 text,
@@ -1310,7 +1318,7 @@ impl<'gc> EditText<'gc> {
             } = lbox.content()
             {
                 // Draw underline
-                let underline_y = baseline + (max_descent / 2);
+                let underline_y = ascent + (max_descent / 2);
                 let underline_width = lbox.bounds().width();
                 self.render_underline(context, underline_width, underline_y, color);
             }
@@ -1366,7 +1374,7 @@ impl<'gc> EditText<'gc> {
     }
 
     /// Attempts to bind this text field to a property of a display object.
-    /// If we find a parent display object matching the given path, we register oursevles and a property name with it.
+    /// If we find a parent display object matching the given path, we register ourselves and a property name with it.
     /// `set_text` will be called by the stage object whenever the property changes.
     /// If we don't find a display object, we register ourselves on a list of pending unbound text fields.
     /// Whenever a display object is created, the unbound list is checked to see if the new object should be bound.
@@ -1423,7 +1431,7 @@ impl<'gc> EditText<'gc> {
                             if !text.is_empty() {
                                 let _ = object.set(
                                     property,
-                                    AvmString::new(activation.gc(), self.text()).into(),
+                                    AvmString::new(activation.gc(), self.text()),
                                     activation,
                                 );
                             }
@@ -1457,26 +1465,25 @@ impl<'gc> EditText<'gc> {
     pub fn propagate_text_binding(self, activation: &mut Avm1Activation<'_, 'gc>) {
         if !self.contains_flag(EditTextFlag::FIRING_VARIABLE_BINDING) {
             self.set_flag(EditTextFlag::FIRING_VARIABLE_BINDING, true);
-            if let Some(variable_path) = self.variable() {
-                if let Ok(Some((object, property))) =
+            if let Some(variable_path) = self.variable()
+                && let Ok(Some((object, property))) =
                     activation.resolve_variable_path(self.avm1_parent().unwrap(), &variable_path)
-                {
-                    // Note that this can call virtual setters, even though the opposite direction won't work
-                    // (virtual property changes do not affect the text field)
-                    activation.run_with_child_frame_for_display_object(
-                        "[Propagate Text Binding]",
-                        self.avm1_parent().unwrap(),
-                        self.movie().version(),
-                        |activation| {
-                            let property = AvmString::new(activation.gc(), property);
-                            let _ = object.set(
-                                property,
-                                AvmString::new(activation.gc(), self.html_text()).into(),
-                                activation,
-                            );
-                        },
-                    );
-                }
+            {
+                // Note that this can call virtual setters, even though the opposite direction won't work
+                // (virtual property changes do not affect the text field)
+                activation.run_with_child_frame_for_display_object(
+                    "[Propagate Text Binding]",
+                    self.avm1_parent().unwrap(),
+                    self.movie().version(),
+                    |activation| {
+                        let property = AvmString::new(activation.gc(), property);
+                        let _ = object.set(
+                            property,
+                            AvmString::new(activation.gc(), self.html_text()),
+                            activation,
+                        );
+                    },
+                );
             }
             self.set_flag(EditTextFlag::FIRING_VARIABLE_BINDING, false);
         }
@@ -1588,7 +1595,7 @@ impl<'gc> EditText<'gc> {
     /// Characters are divided in half, the last line is extended, etc.
     pub fn screen_position_to_index(self, position: Point<Twips>) -> Option<usize> {
         let position = self.global_to_local(position)?;
-        let position = self.local_to_layout(position);
+        let position = self.local_to_layout(position)?;
 
         // TODO We can use binary search for both y and x here
 
@@ -2242,8 +2249,10 @@ impl<'gc> EditText<'gc> {
         let font_set = first_font_set?;
         let text_format = first_format?;
         let size = Twips::from_pixels(text_format.size?);
-        let ascent = font_set.get_baseline_for_height(size);
-        let descent = font_set.get_descent_for_height(size);
+
+        let metrics = font_set.metrics();
+        let ascent = metrics.ascent(size);
+        let descent = metrics.descent(size);
         let leading = Twips::from_pixels(text_format.leading?);
 
         Some(LayoutMetrics {
@@ -2261,13 +2270,15 @@ impl<'gc> EditText<'gc> {
         let line = layout.lines().get(line)?;
         let bounds = line.bounds();
 
+        // TODO What about internal bounds?
+        let bounds = self.layout_to_local_matrix() * bounds;
         Some(LayoutMetrics {
             ascent: line.ascent(),
             descent: line.descent(),
             leading: line.leading(),
             width: bounds.width(),
             height: bounds.height() + line.leading(),
-            x: bounds.offset_x() + Self::GUTTER,
+            x: bounds.offset_x(),
         })
     }
 
@@ -2302,7 +2313,7 @@ impl<'gc> EditText<'gc> {
             return None;
         }
 
-        let position = self.local_to_layout(position);
+        let position = self.local_to_layout(position)?;
 
         Some(
             self.0
@@ -2583,19 +2594,19 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
         self.set_object(Some(to.into()), context.gc());
     }
 
-    fn self_bounds(self) -> Rectangle<Twips> {
+    fn self_bounds(self, _mode: BoundsMode) -> Rectangle<Twips> {
         self.apply_autosize_bounds();
 
         self.0.bounds.get()
     }
 
-    fn pixel_bounds(self) -> Rectangle<Twips> {
+    fn pixel_bounds(self, mode: BoundsMode) -> Rectangle<Twips> {
         // For pixel bounds we can't apply lazy autosize bounds.
         // It's a bit hacky, but it seems that pixelBounds are
         // an exception to the rule that lazy autosize bounds
         // are applied when reading anything related to bounds.
         let old = self.0.autosize_lazy_bounds.take();
-        let bounds = self.world_bounds();
+        let bounds = self.world_bounds(mode);
         self.0.autosize_lazy_bounds.set(old);
         bounds
     }
@@ -2665,14 +2676,23 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
     fn render_self(self, context: &mut RenderContext<'_, 'gc>) {
         self.apply_autosize_bounds();
 
-        if !context.is_offscreen && !self.world_bounds().intersects(&context.stage.view_bounds()) {
+        if !context.is_offscreen
+            && !self
+                .world_bounds(BoundsMode::Engine)
+                .intersects(&context.stage.view_bounds())
+        {
             // Off-screen; culled
             return;
         }
 
         fn is_transform_positive_scale_only(context: &mut RenderContext) -> bool {
             let Matrix { a, b, c, d, .. } = context.transform_stack.transform().matrix;
-            b == 0.0 && c == 0.0 && a > 0.0 && d > 0.0
+            // Flash does allow small shear. The following value is higher than
+            // expected due to the fact that the final calculated shear differs
+            // between Flash and Ruffle, and using a precise value would hide
+            // some objects that should otherwise be shown.
+            const ALLOWED_SHEAR: f32 = 0.006;
+            b.abs() < ALLOWED_SHEAR && c.abs() < ALLOWED_SHEAR && a > 0.0 && d > 0.0
         }
 
         // EditText is not rendered if device font is used
@@ -2687,10 +2707,18 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
             .get()
             .intersects(EditTextFlag::BORDER | EditTextFlag::HAS_BACKGROUND)
         {
-            let background_color = Some(self.0.background_color.get())
-                .filter(|_| self.0.flags.get().contains(EditTextFlag::HAS_BACKGROUND));
-            let border_color = Some(self.0.border_color.get())
-                .filter(|_| self.0.flags.get().contains(EditTextFlag::BORDER));
+            let background_color = self
+                .0
+                .flags
+                .get()
+                .contains(EditTextFlag::HAS_BACKGROUND)
+                .then_some(self.0.background_color.get());
+            let border_color = self
+                .0
+                .flags
+                .get()
+                .contains(EditTextFlag::BORDER)
+                .then_some(self.0.border_color.get());
 
             if self.is_device_font() {
                 self.draw_device_text_box(
@@ -2931,7 +2959,7 @@ impl<'gc> EditText<'gc> {
 
     fn ime_cursor_area(self) -> ImeCursorArea {
         // TODO We should be smarter here and return an area closer to the cursor.
-        let bounds = self.world_bounds();
+        let bounds = self.world_bounds(BoundsMode::Engine);
         ImeCursorArea {
             x: bounds.x_min.to_pixels(),
             y: bounds.y_min.to_pixels(),
@@ -3015,15 +3043,15 @@ impl<'gc> TInteractiveObject<'gc> for EditText<'gc> {
                 self.set_selection(Some(TextSelection::for_position(self.text_length())));
             }
 
-            if let Some((url, target)) = link_to_open {
-                if !url.is_empty() {
-                    // TODO: This fires on mouse DOWN but it should be mouse UP...
-                    // but only if it went down in the same span.
-                    // Needs more advanced focus handling than we have at time of writing this comment.
-                    // TODO This also needs to fire only if the user clicked on the link,
-                    //   currently it fires when the cursor position resolves to one in the link.
-                    self.open_url(context, &url, &target);
-                }
+            if let Some((url, target)) = link_to_open
+                && !url.is_empty()
+            {
+                // TODO: This fires on mouse DOWN but it should be mouse UP...
+                // but only if it went down in the same span.
+                // Needs more advanced focus handling than we have at time of writing this comment.
+                // TODO This also needs to fire only if the user clicked on the link,
+                //   currently it fires when the cursor position resolves to one in the link.
+                self.open_url(context, &url, &target);
             }
 
             return ClipEventResult::Handled;
@@ -3031,10 +3059,10 @@ impl<'gc> TInteractiveObject<'gc> for EditText<'gc> {
 
         if let ClipEvent::MouseMove = event {
             // If a mouse has moved and this EditTest is pressed, we need to update the selection.
-            if InteractiveObject::option_ptr_eq(context.mouse_data.pressed, Some(self.into())) {
-                if let Some(position) = self.screen_position_to_index(*context.mouse_position) {
-                    self.handle_drag(position);
-                }
+            if InteractiveObject::option_ptr_eq(context.mouse_data.pressed, Some(self.into()))
+                && let Some(position) = self.screen_position_to_index(*context.mouse_position)
+            {
+                self.handle_drag(position);
             }
         }
 

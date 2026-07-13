@@ -2,20 +2,21 @@
 
 use std::cell::Cell;
 
-use crate::avm1::function::ExecutionReason;
-use crate::avm1::property_decl::{DeclContext, StaticDeclarations, SystemClass};
-use crate::avm1::xml::{XmlNode, ELEMENT_NODE, TEXT_NODE};
-use crate::avm1::{Activation, Attribute, Error, NativeObject, Object, Value};
 use crate::avm_warn;
+use crate::avm1::function::ExecutionReason;
+use crate::avm1::property_decl::{DeclContext, PropertyOrder, StaticDeclarations, SystemClass};
+use crate::avm1::xml::{ELEMENT_NODE, TEXT_NODE, XmlNode};
+use crate::avm1::{Activation, Attribute, Error, NativeObject, Object, Value};
 use crate::backend::navigator::Request;
 use crate::string::{AvmString, StringContext, WStr, WString};
 use gc_arena::barrier::unlock;
 use gc_arena::lock::Lock;
 use gc_arena::{Collect, Gc};
+use quick_xml::encoding::EncodingError;
 use quick_xml::errors::IllFormedError;
 use quick_xml::events::attributes::AttrError;
-use quick_xml::{events::Event, Reader};
-use ruffle_common::xml::custom_unescape;
+use quick_xml::{Reader, events::Event};
+use ruffle_common::xml::avm1_unescape;
 use ruffle_macros::istr;
 
 #[derive(Clone, Copy, Collect)]
@@ -174,8 +175,7 @@ impl<'gc> Xml<'gc> {
 
             match event {
                 Event::Start(bs) => {
-                    let child =
-                        XmlNode::from_start_event(activation, bs, self.id_map(), parser.decoder())?;
+                    let child = XmlNode::from_start_event(activation, bs, self.id_map())?;
                     open_tags
                         .last()
                         .unwrap()
@@ -183,8 +183,7 @@ impl<'gc> Xml<'gc> {
                     open_tags.push(child);
                 }
                 Event::Empty(bs) => {
-                    let child =
-                        XmlNode::from_start_event(activation, bs, self.id_map(), parser.decoder())?;
+                    let child = XmlNode::from_start_event(activation, bs, self.id_map())?;
                     open_tags
                         .last()
                         .unwrap()
@@ -195,7 +194,9 @@ impl<'gc> Xml<'gc> {
                 }
                 Event::Text(bt) => {
                     Self::handle_text_cdata(
-                        custom_unescape(&bt.into_inner(), parser.decoder())?.as_bytes(),
+                        avm1_unescape(&bt)
+                            .map_err(|e| quick_xml::Error::Encoding(EncodingError::Utf8(e)))?
+                            .as_bytes(),
                         ignore_white,
                         &open_tags,
                         activation,
@@ -261,9 +262,9 @@ const PROTO_DECLS: StaticDeclarations = declare_static_properties! {
     "onData" => method(on_data);
     "getBytesLoaded" => method(get_bytes_loaded);
     "getBytesTotal" => method(get_bytes_total);
-    "contentType" => string("application/x-www-form-urlencoded"; READ_ONLY);
+    "contentType" => value("application/x-www-form-urlencoded"; READ_ONLY);
     "docTypeDecl" => property(doc_type_decl; READ_ONLY);
-    "ignoreWhite" => bool(false);
+    "ignoreWhite" => value(false);
     "status" => property(status);
     "xmlDecl" => property(xml_decl);
     // TODO Looks like idMap is not a built-in property.
@@ -274,7 +275,12 @@ pub fn create_class<'gc>(
     context: &mut DeclContext<'_, 'gc>,
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
-    let class = context.native_class(constructor, None, super_proto);
+    let class = context.native_class(
+        constructor,
+        None,
+        super_proto,
+        PropertyOrder::PrototypeFirst,
+    );
     context.define_properties_on(class.proto, PROTO_DECLS(context));
     class
 }
@@ -442,7 +448,7 @@ fn on_data<'gc>(
             ExecutionReason::Special,
         )?;
 
-        this.set(istr!("loaded"), true.into(), activation)?;
+        this.set(istr!("loaded"), true, activation)?;
 
         this.call_method(
             istr!("onLoad"),
@@ -460,10 +466,10 @@ fn doc_type_decl<'gc>(
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let NativeObject::Xml(xml) = this.native() {
-        if let Some(doctype) = xml.doctype() {
-            return Ok(doctype.into());
-        }
+    if let NativeObject::Xml(xml) = this.native()
+        && let Some(doctype) = xml.doctype()
+    {
+        return Ok(doctype.into());
     }
 
     Ok(Value::Undefined)
@@ -474,10 +480,10 @@ fn xml_decl<'gc>(
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let NativeObject::Xml(xml) = this.native() {
-        if let Some(xml_decl) = xml.xml_decl() {
-            return Ok(xml_decl.into());
-        }
+    if let NativeObject::Xml(xml) = this.native()
+        && let Some(xml_decl) = xml.xml_decl()
+    {
+        return Ok(xml_decl.into());
     }
 
     Ok(Value::Undefined)
@@ -542,7 +548,7 @@ fn spawn_xml_fetch<'gc>(
             Attribute::DONT_DELETE | Attribute::DONT_ENUM,
         );
     } else {
-        this.set(bytes_loaded_string, 0.into(), activation)?;
+        this.set(bytes_loaded_string, 0, activation)?;
     }
 
     let bytes_total_string = istr!("_bytesTotal");
@@ -568,7 +574,7 @@ fn spawn_xml_fetch<'gc>(
             Attribute::DONT_DELETE | Attribute::DONT_ENUM,
         );
     } else {
-        this.set(loaded_string, false.into(), activation)?;
+        this.set(loaded_string, false, activation)?;
     }
 
     let future =

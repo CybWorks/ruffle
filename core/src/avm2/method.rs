@@ -1,15 +1,17 @@
 //! AVM2 methods
 
+use crate::avm2::Multiname;
 use crate::avm2::activation::Activation;
 use crate::avm2::class::Class;
-use crate::avm2::error::{make_error_1014, make_error_1027, make_error_1107, Error, Error1014Type};
+use crate::avm2::error::{
+    Error, Error1014Type, make_error_1014, make_error_1027, make_error_1079, make_error_1107,
+};
 use crate::avm2::script::TranslationUnit;
-use crate::avm2::value::{abc_default_value, Value};
+use crate::avm2::value::{Value, abc_default_value};
 use crate::avm2::verify::VerifiedMethodInfo;
-use crate::avm2::Multiname;
 use crate::string::AvmString;
 use crate::tag_utils::SwfMovie;
-use gc_arena::barrier::{unlock, Write};
+use gc_arena::barrier::{Write, unlock};
 use gc_arena::lock::OnceLock;
 use gc_arena::{Collect, Gc};
 use std::borrow::Cow;
@@ -184,16 +186,22 @@ impl<'gc> Method<'gc> {
         }
 
         let mut native_info = None;
-        if txunit.domain().is_playerglobals_domain(activation.avm2()) {
-            if let Some(native_method) = activation.avm2().native_method_table[method_index] {
+        if method.flags.contains(AbcMethodFlags::NATIVE) {
+            if txunit.domain().is_playerglobals_domain(activation.avm2()) {
+                let native_method = activation.avm2().native_method_table[method_index]
+                    .expect("Native method table is generated from playerglobals");
+
                 let fast_call = activation
                     .avm2()
                     .native_fast_call_list
                     .contains(&method_index);
 
                 native_info = Some((native_method, fast_call));
+            } else {
+                // Native method in non-playerglobals code throws an error
+                return Err(make_error_1079(activation));
             }
-        };
+        }
 
         let method_kind = if let Some((native_method, fast_call)) = native_info {
             MethodKind::Native {
@@ -325,19 +333,21 @@ impl<'gc> Method<'gc> {
     }
 
     /// Get the name of this method.
-    pub fn method_name(&self) -> Cow<'_, str> {
+    pub fn method_name(&self) -> Option<Cow<'_, str>> {
         let name_index = self.method().name.0 as usize;
         if name_index == 0 {
-            return Cow::Borrowed("");
+            return None;
         }
 
-        self.0
-            .abc
-            .constant_pool
-            .strings
-            .get(name_index - 1)
-            .map(|s| String::from_utf8_lossy(s))
-            .unwrap_or(Cow::Borrowed(""))
+        Some(
+            self.0
+                .abc
+                .constant_pool
+                .strings
+                .get(name_index - 1)
+                .map(|s| String::from_utf8_lossy(s))
+                .unwrap_or(Cow::Borrowed("")),
+        )
     }
 
     /// Determine if a given method is variadic.
@@ -352,6 +362,12 @@ impl<'gc> Method<'gc> {
     /// Check if this method needs `arguments`.
     pub fn needs_arguments_object(self) -> bool {
         self.method().flags.contains(AbcMethodFlags::NEED_ARGUMENTS)
+    }
+
+    /// Check if this method sets the default XML namespace (uses dxns/dxnslate opcodes).
+    /// Methods with this flag are allowed to use the dxns and dxnslate opcodes.
+    pub fn sets_dxns(self) -> bool {
+        self.method().flags.contains(AbcMethodFlags::SET_DXNS)
     }
 
     pub fn method_kind(&self) -> &MethodKind<'gc> {

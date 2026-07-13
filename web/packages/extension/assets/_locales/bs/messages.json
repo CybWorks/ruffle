@@ -1,9 +1,18 @@
 {
+    "settings_ruffle_enable": {
+        "message": "Pokreni Flash sadržaj unutar Ruffle-u"
+    },
+    "settings_ignore_optout": {
+        "message": "Pokreni Flash sadržaj čak i na stranicama koje ne dozvoljavaju Ruffle"
+    },
     "settings_show_swf_download": {
         "message": "Prikaži SWF preuzimanje u kontekstnom meniju"
     },
     "settings_autostart": {
         "message": "Automatska reprodukcija Flash sadržaja (kliknite za uključivanje zvuka)"
+    },
+    "settings_swf_takeover": {
+        "message": "Pokreni SWF datoteke u pregledniku umjesto preuzimanja"
     },
     "settings_log_level": {
         "message": "Nivo zapisnika"
@@ -16,6 +25,9 @@
     },
     "settings_log_level_info": {
         "message": "Informacije"
+    },
+    "settings_log_level_debug": {
+        "message": "Debug"
     },
     "settings_log_level_trace": {
         "message": "Trag"
@@ -95,8 +107,11 @@
     "save_settings": {
         "message": "Sačuvaj postavke"
     },
+    "onboarding_page": {
+        "message": "Stranica za uvođenje u posao"
+    },
     "permissions_grant": {
-        "message": "Dozvoli Ruffleu pristup mojim podacima na svim web stranicama"
+        "message": "Dozvoli Ruffle-u pristup mojim podacima na svim web stranicama"
     },
     "permissions_not_granted": {
         "message": "Morat ćete kliknuti na ikonu Ruffle na svakoj web stranici na kojoj želite koristiti Ruffle"

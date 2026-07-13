@@ -1,7 +1,7 @@
 [package]
 name = "ruffle_desktop"
 authors.workspace = true
-edition = "2024"
+edition.workspace = true
 homepage.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -27,9 +27,9 @@ ruffle_video_external = { path = "../video/external", features = ["openh264"], o
 ruffle_frontend_utils = { path = "../frontend-utils", features = ["cpal", "fs", "navigator"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-tracing-appender = "0.2.4"
-winit = "0.30.12"
-webbrowser = "1.0.6"
+tracing-appender = "0.2.5"
+winit = "0.30.13"
+webbrowser = "1.1.0"
 url = { workspace = true }
 dirs = "6.0"
 rfd = { workspace = true }
@@ -42,7 +42,7 @@ wgpu = { workspace = true }
 futures = { workspace = true }
 chrono = { workspace = true }
 fluent-templates = { workspace = true }
-toml_edit = { version = "0.23.6", features = ["parse"] }
+toml_edit = { workspace = true, features = ["parse"] }
 gilrs = "0.11"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs"] }
 
@@ -51,20 +51,33 @@ rand = "0.9.1"
 thiserror.workspace = true
 async-channel.workspace = true
 unicode-bidi = "0.3.18"
-fontconfig = { version = "0.10.0", optional = true, features = ["dlopen"]}
 memmap2.workspace = true
 walkdir.workspace = true
 async-task = "4.7.1"
 
+[target.'cfg(unix)'.dependencies]
+fontconfig = { version = "0.11.0", optional = true }
+
 [target.'cfg(target_os = "linux")'.dependencies]
-ashpd = "0.11.0"
+ashpd = "0.12.1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_System_Console", "Win32_Storage_FileSystem"] }
 
 [build-dependencies]
-embed-resource = "3"
-vergen = { version = "8.3.2", features = ["build", "git", "gitcl", "cargo"] }
+vergen = { version = "9.1.0", features = ["build", "cargo"] }
+vergen-gitcl = { version = "9.1.0" }
+winresource = "0.1"
+
+[package.metadata.winresource]
+# https://learn.microsoft.com/en-us/windows/win32/menurc/stringfileinfo-block
+ProductName = "Ruffle"
+FileDescription = "Adobe Flash Player emulator"
+CompanyName = "Ruffle LLC"
+LegalCopyright = "Copyright © 2018 Ruffle LLC and Ruffle contributors"
+# InternalName should be the same as the module name
+InternalName = "ruffle_desktop"
+OriginalFilename = "ruffle.exe"
 
 [features]
 default = ["software_video", "external_video", "lzma", "fontconfig"]
@@ -77,6 +90,7 @@ software_video = ["ruffle_video_software"]
 external_video = ["ruffle_video_external"]
 tracy = ["tracing-tracy", "ruffle_render_wgpu/profile-with-tracy"]
 fontconfig = ["dep:fontconfig"]
+fontconfig-dlopen = ["fontconfig", "fontconfig/dlopen"]
 
 # wgpu features
 render_debug_labels = ["ruffle_render_wgpu/render_debug_labels"]

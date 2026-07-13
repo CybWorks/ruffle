@@ -1,16 +1,17 @@
 //! ActionScript Virtual Machine 2 (AS3) support
 
+use crate::PlayerRuntime;
 use crate::avm2::bytearray::ObjectEncoding;
 use crate::avm2::class::{AllocatorFn, CustomConstructorFn};
 use crate::avm2::e4x::XmlSettings;
 use crate::avm2::error::{
-    make_error_1014, make_error_1047, make_error_1107, make_error_2022, make_error_2023,
-    Error1014Type,
+    Error1014Type, make_error_1014, make_error_1047, make_error_1107, make_error_2022,
+    make_error_2023,
 };
 use crate::avm2::function::exec;
 use crate::avm2::globals::{
-    init_builtin_system_class_defs, init_builtin_system_classes, init_native_system_classes,
-    SystemClassDefs, SystemClasses,
+    SystemClassDefs, SystemClasses, init_builtin_system_class_defs, init_builtin_system_classes,
+    init_native_system_classes,
 };
 use crate::avm2::method::{Method, NativeMethodImpl};
 use crate::avm2::object::FunctionObject;
@@ -22,14 +23,14 @@ use crate::context::UpdateContext;
 use crate::display_object::{DisplayObject, MovieClip, TDisplayObject};
 use crate::string::{AvmString, StringContext};
 use crate::tag_utils::SwfMovie;
-use crate::PlayerRuntime;
 
 use fnv::FnvHashMap;
 use gc_arena::lock::GcRefLock;
 use gc_arena::{Collect, Gc, Mutation};
+use ruffle_wstr::WStr;
 use std::sync::Arc;
-use swf::avm2::read::Reader;
 use swf::DoAbc2Flag;
+use swf::avm2::read::Reader;
 
 #[macro_export]
 macro_rules! avm_debug {
@@ -51,6 +52,7 @@ mod domain;
 mod dynamic_map;
 mod e4x;
 pub mod error;
+pub mod error_messages;
 mod events;
 mod filters;
 mod flv;
@@ -73,7 +75,6 @@ pub mod script;
 #[cfg(feature = "known_stubs")]
 pub mod specification;
 mod stack;
-mod string;
 mod stubs;
 mod traits;
 mod value;
@@ -95,7 +96,7 @@ pub use crate::avm2::multiname::Multiname;
 pub use crate::avm2::namespace::{CommonNamespaces, Namespace};
 pub use crate::avm2::object::{
     ArrayObject, BitmapDataObject, ClassObject, EventObject, LoaderInfoObject, Object,
-    SharedObjectObject, SoundChannelObject, StageObject, TObject,
+    SharedObjectObject, SoundChannelObject, Stage3DObject, StageObject, TObject,
 };
 pub use crate::avm2::qname::QName;
 pub use crate::avm2::value::Value;
@@ -434,12 +435,12 @@ impl<'gc> Avm2<'gc> {
                 .get(i)
                 .copied();
 
-            if let Some(object) = object.and_then(|obj| obj.upgrade(context.gc())) {
-                if object.is_of_type(on_type.inner_class_definition()) {
-                    let mut activation = Activation::from_nothing(context);
+            if let Some(object) = object.and_then(|obj| obj.upgrade(context.gc()))
+                && object.is_of_type(on_type.inner_class_definition())
+            {
+                let mut activation = Activation::from_nothing(context);
 
-                    events::broadcast_event(&mut activation, object, event);
-                }
+                events::broadcast_event(&mut activation, object, event);
             }
         }
         // Once we're done iterating, remove dead weak references from the list.
@@ -676,13 +677,24 @@ impl<'gc> Avm2<'gc> {
     #[cold]
     #[inline(never)]
     pub fn uncaught_error(
-        _activation: &mut Activation<'_, 'gc>,
+        activation: &mut Activation<'_, 'gc>,
         _display_object: Option<DisplayObject<'gc>>,
         error: Error<'gc>,
-        info: &str,
+        extra_info: &str,
     ) {
-        tracing::error!("{}: {:?}", info, error);
+        // This will print the properly formatted error
+        let stringified = error.to_string(activation);
+        tracing::error!("{}: {}", extra_info, stringified);
 
         // TODO: push the error onto `loaderInfo.uncaughtErrorEvents`
     }
+}
+
+pub trait Avm2StrRepresentable: Sized {
+    fn from_avm2_str(s: &WStr) -> Option<Self>;
+
+    fn as_avm2_str<'gc>(
+        &self,
+        context: &impl crate::string::HasStringContext<'gc>,
+    ) -> AvmString<'gc>;
 }

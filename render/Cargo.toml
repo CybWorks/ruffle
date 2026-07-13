@@ -1,7 +1,7 @@
 [package]
 name = "ruffle_render"
 authors.workspace = true
-edition = "2024"
+edition.workspace = true
 homepage.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -15,8 +15,9 @@ ruffle_wstr = { path = "../wstr" }
 swf = { path = "../swf"}
 pixel_bender = { path = "pixel_bender"}
 tracing = { workspace = true }
-gif = "0.14.1"
-png = "0.18.0"
+gif = "0.14.2"
+png = "0.18.1"
+image = { workspace = true }
 flate2 = { workspace = true }
 smallvec = { workspace = true }
 lyon = { version = "1.0.1", optional = true }
@@ -32,6 +33,8 @@ num-derive = { workspace = true }
 byteorder = { workspace = true }
 wgpu = { workspace = true, optional = true }
 indexmap = { workspace = true }
+naga-agal = { path = "naga-agal" }
+jpegxr = { workspace = true, optional = true }
 
 # This crate has a `compile_error!` on apple platforms
 [target.'cfg(not(target_vendor = "apple"))'.dependencies.renderdoc]
@@ -51,3 +54,4 @@ tessellator = ["lyon"]
 web = ["wasm-bindgen"]
 wgpu = ["dep:wgpu"]
 serde = ["dep:serde"]
+jpegxr = ["dep:jpegxr", "image/tiff"]

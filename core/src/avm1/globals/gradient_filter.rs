@@ -3,12 +3,12 @@
 use crate::avm1::clamp::Clamp;
 use crate::avm1::globals::bevel_filter::BevelFilterType;
 use crate::avm1::object::NativeObject;
-use crate::avm1::property_decl::{DeclContext, StaticDeclarations, SystemClass};
+use crate::avm1::property_decl::{DeclContext, PropertyOrder, StaticDeclarations, SystemClass};
 use crate::avm1::{Activation, ArrayBuilder, Error, Object, Value};
 use gc_arena::{Collect, Gc, Mutation};
 use ruffle_macros::istr;
 use std::cell::{Cell, RefCell};
-use swf::{Color, Fixed16, Fixed8, GradientFilterFlags, GradientRecord};
+use swf::{Color, Fixed8, Fixed16, GradientFilterFlags, GradientRecord};
 
 const MAX_COLORS: usize = 16;
 
@@ -408,6 +408,7 @@ pub fn create_bevel_class<'gc>(
         table_constructor!(method, BEVEL_CONSTRUCTOR),
         None,
         super_proto,
+        PropertyOrder::PrototypeFirst,
     );
     context.define_properties_on(class.proto, PROTO_DECLS(context));
     class
@@ -421,6 +422,7 @@ pub fn create_glow_class<'gc>(
         table_constructor!(method, GLOW_CONSTRUCTOR),
         None,
         super_proto,
+        PropertyOrder::PrototypeFirst,
     );
     context.define_properties_on(class.proto, PROTO_DECLS(context));
     class

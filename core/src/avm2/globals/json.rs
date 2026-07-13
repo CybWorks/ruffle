@@ -1,5 +1,6 @@
 //! `JSON` impl
 
+use crate::avm2::Error;
 use crate::avm2::activation::Activation;
 use crate::avm2::array::ArrayStorage;
 use crate::avm2::error::{make_error_1129, make_error_1131, make_error_1132};
@@ -8,7 +9,6 @@ use crate::avm2::globals::array::ArrayIter;
 use crate::avm2::object::{ArrayObject, FunctionObject, Object, ScriptObject, TObject};
 use crate::avm2::parameters::ParametersExt;
 use crate::avm2::value::Value;
-use crate::avm2::Error;
 use crate::ecma_conversions::f64_to_wrapping_i32;
 use crate::string::{AvmString, Units};
 use ruffle_macros::istr;
@@ -57,21 +57,22 @@ fn deserialize_json_inner<'gc>(
             obj.into()
         }
         JsonValue::Array(js_arr) => {
-            let mut arr: Vec<Option<Value<'gc>>> = Vec::with_capacity(js_arr.len());
-            for (key, val) in js_arr.iter().enumerate() {
-                let val = deserialize_json_inner(activation, val.clone(), reviver)?;
-                let args = &[key.into(), val];
+            let storage = js_arr
+                .iter()
+                .enumerate()
+                .map(|(key, val)| {
+                    let val = deserialize_json_inner(activation, val.clone(), reviver)?;
+                    let args = &[Value::from_usize_lossy(key), val];
 
-                let mapped_val = match reviver {
-                    None => val,
-                    Some(reviver) => {
-                        reviver.call(activation, Value::Null, FunctionArgs::from_slice(args))?
+                    match reviver {
+                        None => Ok(val),
+                        Some(reviver) => {
+                            reviver.call(activation, Value::Null, FunctionArgs::from_slice(args))
+                        }
                     }
-                };
+                })
+                .collect::<Result<ArrayStorage<'gc>, Error<'gc>>>()?;
 
-                arr.push(Some(mapped_val));
-            }
-            let storage = ArrayStorage::from_storage(arr);
             let array = ArrayObject::from_storage(activation.context, storage);
             array.into()
         }

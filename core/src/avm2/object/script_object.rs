@@ -10,10 +10,10 @@ use crate::avm2::vtable::VTable;
 use crate::avm2::{Error, Multiname, QName};
 use crate::context::UpdateContext;
 use crate::string::AvmString;
-use gc_arena::barrier::{unlock, Write};
+use gc_arena::barrier::{field, unlock};
 use gc_arena::{
-    lock::{Lock, RefLock},
     Collect, DynamicRoot, Gc, GcWeak, Mutation, Rootable,
+    lock::{Lock, RefLock},
 };
 use std::cell::{Ref, RefMut};
 use std::fmt::Debug;
@@ -150,21 +150,13 @@ impl<'gc> ScriptObjectData<'gc> {
         proto: Option<Object<'gc>>,
         vtable: VTable<'gc>,
     ) -> Self {
-        let default_slots = vtable.default_slots();
+        let slot_table = vtable.slot_table();
 
         // We use `iter` and `collect` rather than setting elements of a Box<[]>
         // or pushing to a Vec for better performance
-        let slots = default_slots
+        let slots = slot_table
             .iter()
-            .map(|value| {
-                if let Some(value) = value {
-                    Lock::new(*value)
-                } else {
-                    // FIXME this case throws a VerifyError during vtable
-                    // construction in Flash Player
-                    Lock::new(Value::Undefined)
-                }
-            })
+            .map(|slot_info| Lock::new(slot_info.default_value))
             .collect::<Box<_>>();
 
         ScriptObjectData {
@@ -269,15 +261,6 @@ impl<'gc> ScriptObjectWrapper<'gc> {
         Ok(())
     }
 
-    pub fn init_property_local(
-        self,
-        multiname: &Multiname<'gc>,
-        value: Value<'gc>,
-        activation: &mut Activation<'_, 'gc>,
-    ) -> Result<(), Error<'gc>> {
-        self.set_property_local(multiname, value, activation)
-    }
-
     pub fn delete_property_local(self, mc: &Mutation<'gc>, multiname: &Multiname<'gc>) -> bool {
         // TODO: FP behaves differently here in interpreter mode vs JIT mode
         if !multiname.valid_dynamic_name() {
@@ -294,40 +277,33 @@ impl<'gc> ScriptObjectWrapper<'gc> {
     }
 
     #[inline(always)]
-    pub fn get_slot(self, id: u32) -> Value<'gc> {
+    pub fn get_slot(self, id: usize) -> Value<'gc> {
         self.0
             .slots
-            .get(id as usize)
+            .get(id)
             .cloned()
             .map(|s| s.get())
             .expect("Slot index out of bounds")
     }
 
     /// Set a slot by its index.
-    pub fn set_slot(self, id: u32, value: Value<'gc>, mc: &Mutation<'gc>) {
-        let slot = self
-            .0
-            .slots
-            .get(id as usize)
-            .expect("Slot index out of bounds");
+    pub fn set_slot(self, id: usize, value: Value<'gc>, mc: &Mutation<'gc>) {
+        let slots_write = field!(Gc::write(mc, self.0), ScriptObjectData, slots).as_deref();
 
-        Gc::write(mc, self.0);
-        // SAFETY: We just triggered a write barrier on the Gc.
-        let slot_write = unsafe { Write::assume(slot) };
-        slot_write.unlock().set(value);
+        slots_write[id].unlock().set(value);
     }
 
     /// Retrieve a bound method from the method table.
-    pub fn get_bound_method(self, id: u32) -> Option<FunctionObject<'gc>> {
-        self.bound_methods().get(id as usize).and_then(|v| *v)
+    pub fn get_bound_method(self, id: usize) -> Option<FunctionObject<'gc>> {
+        self.bound_methods().get(id).and_then(|v| *v)
     }
 
     pub fn has_own_dynamic_property(self, name: &Multiname<'gc>) -> bool {
-        if name.valid_dynamic_name() {
-            if let Some(name) = name.local_name() {
-                let key = maybe_int_property(name);
-                return self.values().as_hashmap().get(&key).is_some();
-            }
+        if name.valid_dynamic_name()
+            && let Some(name) = name.local_name()
+        {
+            let key = maybe_int_property(name);
+            return self.values().contains_key(&key);
         }
         false
     }
@@ -361,10 +337,7 @@ impl<'gc> ScriptObjectWrapper<'gc> {
 
     pub fn property_is_enumerable(self, name: AvmString<'gc>) -> bool {
         let key = maybe_int_property(name);
-        self.values()
-            .as_hashmap()
-            .get(&key)
-            .is_some_and(|prop| prop.enumerable)
+        self.values().get(&key).is_some_and(|prop| prop.enumerable)
     }
 
     pub fn set_local_property_is_enumerable(
@@ -374,25 +347,23 @@ impl<'gc> ScriptObjectWrapper<'gc> {
         is_enumerable: bool,
     ) {
         let key = maybe_int_property(name);
-        self.values_mut(mc).entry(key).and_modify(|v| {
-            v.enumerable = is_enumerable;
-        });
+        self.values_mut(mc).set_enumerable(&key, is_enumerable);
     }
 
     /// Install a method into the object.
     pub fn install_bound_method(
         self,
         mc: &Mutation<'gc>,
-        disp_id: u32,
+        disp_id: usize,
         function: FunctionObject<'gc>,
     ) {
         let mut bound_methods = self.bound_methods_mut(mc);
 
-        if bound_methods.len() <= disp_id as usize {
-            bound_methods.resize_with(disp_id as usize + 1, Default::default);
+        if bound_methods.len() <= disp_id {
+            bound_methods.resize_with(disp_id + 1, Default::default);
         }
 
-        *bound_methods.get_mut(disp_id as usize).unwrap() = Some(function);
+        *bound_methods.get_mut(disp_id).unwrap() = Some(function);
     }
 
     /// Get the `Class` for this object.
@@ -411,10 +382,7 @@ impl<'gc> ScriptObjectWrapper<'gc> {
 
     pub fn set_vtable(&self, mc: &Mutation<'gc>, vtable: VTable<'gc>) {
         // Make sure both vtables have the same number of slots
-        assert_eq!(
-            self.vtable().default_slots().len(),
-            vtable.default_slots().len()
-        );
+        assert_eq!(self.vtable().slot_count(), vtable.slot_count());
 
         unlock!(Gc::write(mc, self.0), ScriptObjectData, vtable).set(vtable);
     }
@@ -461,10 +429,18 @@ pub fn get_dynamic_property<'gc>(
     }
 
     let Some(local_name) = multiname.local_name() else {
-        // when can this happen?
+        // This happens for wildcard (*) multinames - they have name: `None`.
+        // Flash throws #1081 for wildcards on objects, #1069 for primitives.
+        // `local_values` is always `Some` for object lookups and always `None` for primitive lookups
+        let error_code = if local_values.is_some() {
+            error::ReferenceErrorCode::InvalidNsRead
+        } else {
+            error::ReferenceErrorCode::InvalidRead
+        };
+
         return Err(error::make_reference_error(
             activation,
-            error::ReferenceErrorCode::InvalidRead,
+            error_code,
             multiname,
             instance_class,
         ));
@@ -475,7 +451,8 @@ pub fn get_dynamic_property<'gc>(
     let key = maybe_int_property(local_name);
 
     if let Some(values) = local_values {
-        let value = values.as_hashmap().get(&key);
+        let value = values.get(&key);
+
         if let Some(value) = value {
             return Ok(Some(value.value));
         }
@@ -487,7 +464,8 @@ pub fn get_dynamic_property<'gc>(
         // First search dynamic properties
         let obj = this_proto.base();
         let values = obj.values();
-        let value = values.as_hashmap().get(&key);
+        let value = values.get(&key);
+
         if let Some(value) = value {
             return Ok(Some(value.value));
         }
@@ -497,12 +475,11 @@ pub fn get_dynamic_property<'gc>(
         // array elements (if this prototype is an `Array`).
         //
         // This special-case doesn't apply to anything else (e.g. Vector elements).
-        if let Some(array) = this_proto.as_array_object() {
-            if let Some(index) = ArrayObject::as_array_index(&local_name) {
-                if let Some(value) = array.get_index_property(index) {
-                    return Ok(Some(value));
-                }
-            }
+        if let Some(array) = this_proto.as_array_object()
+            && let Some(index) = ArrayObject::as_array_index(&local_name)
+            && let Some(value) = array.get_index_property(index)
+        {
+            return Ok(Some(value));
         }
 
         proto = this_proto.proto();

@@ -1,9 +1,9 @@
 use crate::avm1::globals::style_sheet::StyleSheetObject;
 use crate::avm1::{Activation, ActivationIdentifier, Error, NativeObject, Object, Value};
 use crate::context::UpdateContext;
+use crate::debug_ui::Message;
 use crate::debug_ui::display_object::open_display_object_button;
 use crate::debug_ui::handle::{AVM1ObjectHandle, DisplayObjectHandle};
-use crate::debug_ui::Message;
 use crate::string::AvmString;
 use egui::{Grid, Id, TextBuffer, TextEdit, Ui, Window};
 use gc_arena::Mutation;
@@ -102,10 +102,10 @@ impl Avm1ObjectWindow {
                     let value = object.get(key, activation);
 
                     ui.label(key.to_string());
-                    if let Some(new) = self.show_avm1_value(ui, activation, key, value, messages) {
-                        if let Err(e) = object.set(key, new, activation) {
-                            tracing::error!("Failed to set key {key}: {e}");
-                        }
+                    if let Some(new) = self.show_avm1_value(ui, activation, key, value, messages)
+                        && let Err(e) = object.set(key, new, activation)
+                    {
+                        tracing::error!("Failed to set key {key}: {e}");
                     }
                     ui.end_row();
                 }

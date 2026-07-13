@@ -1,7 +1,8 @@
 //! `TextFormat` impl
 
 use crate::avm1::object::NativeObject;
-use crate::avm1::property_decl::{DeclContext, StaticDeclarations, SystemClass};
+use crate::avm1::parameters::{ParametersExt, UndefinedAs};
+use crate::avm1::property_decl::{DeclContext, PropertyOrder, StaticDeclarations, SystemClass};
 use crate::avm1::{Activation, ArrayBuilder, Error, Object, Value};
 use crate::display_object::{AutoSizeMode, EditText, TDisplayObject};
 use crate::ecma_conversions::round_to_even;
@@ -71,7 +72,12 @@ pub fn create_class<'gc>(
     context: &mut DeclContext<'_, 'gc>,
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
-    let class = context.native_class(constructor, None, super_proto);
+    let class = context.native_class(
+        constructor,
+        None,
+        super_proto,
+        PropertyOrder::PrototypeFirst,
+    );
     context.define_properties_on(class.proto, PROTO_DECLS(context));
     class
 }
@@ -518,11 +524,7 @@ fn get_text_extent<'gc>(
         .cloned()
         .unwrap_or(Value::Undefined)
         .coerce_to_string(activation)?;
-    let width = args
-        .get(1)
-        .cloned()
-        .map(|v| v.coerce_to_f64(activation))
-        .transpose()?;
+    let width = args.try_get_f64(activation, 1, UndefinedAs::None)?;
 
     let temp_edittext = EditText::new(
         activation.context,
@@ -635,7 +637,6 @@ fn constructor<'gc>(
     text_format.right_margin = get_arg_as_i32(activation, args.get(10))?;
     text_format.indent = get_arg_as_i32(activation, args.get(11))?;
     text_format.leading = get_arg_as_i32(activation, args.get(12))?;
-    text_format.display = Some(crate::html::TextDisplay::Block);
     this.set_native(
         activation.gc(),
         NativeObject::TextFormat(Gc::new(activation.gc(), text_format.into())),

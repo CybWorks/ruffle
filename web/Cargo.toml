@@ -2,7 +2,7 @@
 name = "ruffle_web"
 description = "Web (WASM) bindings to the Ruffle Flash player"
 authors.workspace = true
-edition = "2024"
+edition.workspace = true
 homepage.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -35,7 +35,7 @@ console_error_panic_hook = { version = "0.1.7", optional = true }
 slotmap = { workspace = true }
 js-sys = { workspace = true }
 tracing = { workspace = true, features = ["log"] }
-tracing-subscriber = { version = "0.3.22", default-features = false, features = ["registry"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["registry"] }
 tracing-log = "0.2.0"
 tracing-wasm = { workspace = true }
 ruffle_render_canvas = { path = "../render/canvas", optional = true }
@@ -46,7 +46,7 @@ ruffle_render_wgpu = { path = "../render/wgpu", optional = true }
 ruffle_video_external = { path = "../video/external", features = ["webcodecs"] }
 url = { workspace = true }
 wasm-bindgen = { workspace = true }
-wasm-bindgen-futures = "0.4.51"
+wasm-bindgen-futures = "0.4.70"
 serde-wasm-bindgen = "0.6.5"
 chrono = { workspace = true, features = ["wasmbind", "clock"] }
 serde = { workspace = true, features = ["derive"] }
@@ -54,11 +54,11 @@ thiserror = { workspace = true }
 base64 = "0.22.1"
 async-channel = { workspace = true }
 futures-util = { version = "0.3.30", features = ["sink"] }
-gloo-net =  { version = "0.6.0", default-features = false, features = ["websocket"] }
+gloo-net =  { version = "0.7.0", default-features = false, features = ["websocket"] }
 rfd = { workspace = true, features = ["file-handle-inner"] }
-wasm-streams = "0.4.2"
+wasm-streams = "0.5.0"
 futures = { workspace = true }
-zip = { version = "7.0.0", default-features = false }
+zip = { version = "8.6.0", default-features = false }
 
 [dependencies.ruffle_core]
 path = "../core"
@@ -67,13 +67,13 @@ features = ["audio", "mp3", "aac", "nellymoser", "default_compatibility_rules", 
 [dependencies.web-sys]
 workspace = true
 features = [
-    "AddEventListenerOptions", "AudioBuffer", "AudioBufferSourceNode", "AudioContext",
+    "AddEventListenerOptions", "AudioBuffer", "AudioBufferSourceNode", "AudioContext", "AudioContextOptions",
     "AudioDestinationNode", "AudioNode", "AudioParam", "Blob", "BlobPropertyBag",
     "ChannelMergerNode", "ChannelSplitterNode", "ClipboardEvent", "DataTransfer", "Element",
     "EventTarget", "GainNode", "Headers", "HtmlCanvasElement", "HtmlDocument", "HtmlElement", "HtmlFormElement",
     "HtmlInputElement", "HtmlTextAreaElement", "KeyboardEvent", "Location", "PageTransitionEvent", "PointerEvent",
     "Request", "RequestInit", "Response", "Storage", "WheelEvent", "Window", "ReadableStream", "RequestCredentials",
-    "Url", "WebGlContextEvent", "Clipboard", "FocusEvent", "ShadowRoot", "Gamepad", "GamepadButton", "OffscreenCanvas",
+    "Url", "WebGlContextEvent", "Clipboard", "FocusEvent", "FocusOptions", "ShadowRoot", "Gamepad", "GamepadButton", "OffscreenCanvas",
     "TextMetrics", "OffscreenCanvasRenderingContext2d"
 ]
 

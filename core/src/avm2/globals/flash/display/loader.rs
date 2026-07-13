@@ -2,6 +2,7 @@
 
 use indexmap::IndexMap;
 
+use crate::avm2::ClassObject;
 use crate::avm2::activation::Activation;
 use crate::avm2::error::make_error_2007;
 use crate::avm2::globals::flash::display::display_object::initialize_for_allocator;
@@ -13,7 +14,6 @@ use crate::avm2::object::LoaderStream;
 use crate::avm2::object::TObject as _;
 use crate::avm2::parameters::ParametersExt;
 use crate::avm2::value::Value;
-use crate::avm2::ClassObject;
 use crate::avm2::{Error, Object};
 use crate::avm2_stub_method;
 use crate::backend::navigator::{NavigationMethod, Request};
@@ -22,6 +22,7 @@ use crate::display_object::MovieClip;
 use crate::loader::LoadManager;
 use crate::loader::MovieLoaderVMData;
 use crate::tag_utils::SwfMovie;
+use ruffle_common::tag_utils::LoadBytesInfo;
 use std::sync::Arc;
 
 pub fn loader_allocator<'gc>(
@@ -49,12 +50,14 @@ pub fn loader_allocator<'gc>(
         None,
         false,
     )?;
+
     loader.set_slot(
         loader_slots::_CONTENT_LOADER_INFO,
         loader_info.into(),
         activation,
     )?;
-    Ok(loader)
+
+    Ok(loader.into())
 }
 
 pub fn load<'gc>(
@@ -86,7 +89,7 @@ pub fn load<'gc>(
     }
 
     // Unload the loader, in case something was already loaded.
-    loader_info.unload(activation);
+    loader_info.unload(activation.context);
 
     // This is a dummy MovieClip, which will get overwritten in `Loader`
     let movie = &activation.context.root_swf;
@@ -107,18 +110,20 @@ pub fn load<'gc>(
 
     let request = request_from_url_request(activation, url_request)?;
 
-    let url = request.url().to_string();
+    let loader_url = activation.caller_movie_or_root().url().to_string();
+
     let future = activation.context.load_manager.load_movie_into_clip(
         activation.context.player_handle(),
         content.into(),
         request,
-        Some(url),
+        Some(loader_url),
         MovieLoaderVMData::Avm2 {
             loader_info,
             context,
             default_domain: activation
                 .caller_domain()
                 .expect("Missing caller domain in Loader.load"),
+            load_bytes_info: None,
         },
     );
     activation.context.navigator.spawn_future(future);
@@ -257,7 +262,7 @@ pub fn load_bytes<'gc>(
     }
 
     // Unload the loader, in case something was already loaded.
-    loader_info.unload(activation);
+    loader_info.unload(activation.context);
 
     // This is a dummy MovieClip, which will get overwritten in `Loader`
     let movie = &activation.context.root_swf;
@@ -270,14 +275,22 @@ pub fn load_bytes<'gc>(
         .caller_domain()
         .expect("Missing caller domain in Loader.loadBytes");
 
+    let loader_url = activation.caller_movie_or_root().url().to_string();
+
+    let loader_sandbox_type = activation.caller_movie_or_root().sandbox_type();
+
     if let Err(e) = LoadManager::load_movie_into_clip_bytes(
         activation.context,
         content.into(),
         bytes,
+        loader_url,
         MovieLoaderVMData::Avm2 {
             loader_info,
             context,
             default_domain,
+            load_bytes_info: Some(LoadBytesInfo {
+                loader_sandbox_type,
+            }),
         },
     ) {
         return Err(Error::rust_error(
@@ -305,7 +318,7 @@ pub fn unload<'gc>(
 
     let loader_info = loader_info.as_loader_info_object().unwrap();
 
-    loader_info.unload(activation);
+    loader_info.unload(activation.context);
 
     Ok(Value::Undefined)
 }

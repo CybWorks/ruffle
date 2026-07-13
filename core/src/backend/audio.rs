@@ -9,14 +9,15 @@ use crate::{
 };
 use gc_arena::Collect;
 pub use ruffle_common::buffer::Substream;
-use slotmap::{new_key_type, Key, SlotMap};
+use ruffle_common::duration::FloatDuration;
+use slotmap::{Key, SlotMap, new_key_type};
 
 #[cfg(feature = "audio")]
 pub mod decoders;
 pub mod swf {
     pub use swf::{
-        read, AudioCompression, CharacterId, Sound, SoundEnvelope, SoundEnvelopePoint, SoundEvent,
-        SoundFormat, SoundInfo, SoundStreamHead,
+        AudioCompression, CharacterId, Sound, SoundEnvelope, SoundEnvelopePoint, SoundEvent,
+        SoundFormat, SoundInfo, SoundStreamHead, read,
     };
 }
 
@@ -66,6 +67,13 @@ pub struct SoundStreamInfo {
     pub stream_format: swf::SoundFormat,
     pub num_samples_per_block: u16,
     pub latency_seek: i16,
+
+    /// Codec-specific configuration data ("decoder specific info"), demuxed out
+    /// of the container ahead of the audio data itself, if any.
+    ///
+    /// For AAC this holds the `AudioSpecificConfig` (from an FLV AAC sequence
+    /// header, or an MP4 `esds` box). Codecs that don't need it leave it `None`.
+    pub extra_data: Option<Box<[u8]>>,
 }
 
 impl From<swf::SoundStreamHead> for SoundStreamInfo {
@@ -75,6 +83,7 @@ impl From<swf::SoundStreamHead> for SoundStreamInfo {
             stream_format: swfhead.stream_format,
             num_samples_per_block: swfhead.num_samples_per_block,
             latency_seek: swfhead.latency_seek,
+            extra_data: None,
         }
     }
 }
@@ -143,9 +152,9 @@ pub trait AudioBackend: Any {
     /// Returns `None` if the sound is not/no longer playing
     fn get_sound_position(&self, instance: SoundInstanceHandle) -> Option<f64>;
 
-    /// Get the duration of a sound in milliseconds.
+    /// Get the duration of a sound.
     /// Returns `None` if the sound is not registered.
-    fn get_sound_duration(&self, sound: SoundHandle) -> Option<f64>;
+    fn get_sound_duration(&self, sound: SoundHandle) -> Option<FloatDuration>;
 
     /// Get the size of the data stored within a given sound.
     ///
@@ -197,8 +206,8 @@ pub trait AudioBackend: Any {
 
 /// Information about a sound provided to `NullAudioBackend`.
 struct NullSound {
-    /// The duration of the sound in milliseconds.
-    duration: f64,
+    /// The duration of the sound.
+    duration: FloatDuration,
 
     /// The compressed size of the sound data, excluding MP3 latency seek data.
     size: u32,
@@ -236,7 +245,7 @@ impl AudioBackend for NullAudioBackend {
         // AS duration does not subtract `skip_sample_frames`.
         let num_sample_frames: f64 = sound.num_samples.into();
         let sample_rate: f64 = sound.format.sample_rate.into();
-        let duration = num_sample_frames * 1000.0 / sample_rate;
+        let duration = FloatDuration::from_millis(num_sample_frames * 1000.0 / sample_rate);
 
         Ok(self.sounds.insert(NullSound {
             duration,
@@ -248,7 +257,7 @@ impl AudioBackend for NullAudioBackend {
     fn register_mp3(&mut self, _data: &[u8]) -> Result<SoundHandle, DecodeError> {
         Ok(self.sounds.insert(NullSound {
             size: 0,
-            duration: 0.0,
+            duration: FloatDuration::ZERO,
             format: swf::SoundFormat {
                 compression: swf::AudioCompression::Mp3,
                 sample_rate: 44100,
@@ -288,7 +297,7 @@ impl AudioBackend for NullAudioBackend {
     fn get_sound_position(&self, _instance: SoundInstanceHandle) -> Option<f64> {
         Some(0.0)
     }
-    fn get_sound_duration(&self, sound: SoundHandle) -> Option<f64> {
+    fn get_sound_duration(&self, sound: SoundHandle) -> Option<FloatDuration> {
         if let Some(sound) = self.sounds.get(sound) {
             Some(sound.duration)
         } else {
@@ -392,10 +401,10 @@ impl<'gc> AudioManager<'gc> {
                 // Sounds still playing; update position for AVM1 sounds.
                 // AVM2 sounds do not update position and instead grab the position on demand.
 
-                if let Some(object) = sound.avm1_object {
-                    if let NativeObject::Sound(sound) = object.native() {
-                        sound.set_position(pos.round() as u32);
-                    }
+                if let Some(object) = sound.avm1_object
+                    && let NativeObject::Sound(sound) = object.native()
+                {
+                    sound.set_position(pos.round() as u32);
                 }
                 true
             } else {
@@ -406,7 +415,7 @@ impl<'gc> AudioManager<'gc> {
                     .unwrap_or_default();
                 if let Some(object) = sound.avm1_object {
                     if let NativeObject::Sound(sound) = object.native() {
-                        sound.set_position(duration.round() as u32);
+                        sound.set_position(duration.as_millis().round() as u32);
                     }
 
                     // Fire soundComplete event.

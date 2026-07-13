@@ -1,10 +1,10 @@
 use ruffle_render::backend::Context3DTextureFormat;
 
 use super::atf_jpegxr::do_compressed_upload;
-use crate::avm2::object::TextureObject;
-use crate::avm2::parameters::ParametersExt;
 use crate::avm2::Activation;
 use crate::avm2::Value;
+use crate::avm2::object::TextureObject;
+use crate::avm2::parameters::ParametersExt;
 use crate::avm2::{Error, Object};
 use crate::avm2_stub_method;
 use crate::bitmap::bitmap_data::BitmapData;
@@ -40,7 +40,9 @@ pub fn do_copy<'gc>(
             let colors: Vec<_> = bytearray
                 .read_at((4 * width * height) as usize, byte_array_offset as usize)
                 .expect("Failed to read")
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|chunk| {
                     // The ByteArray is in BGRA format. FIXME - should this be premultiplied?
                     Color::rgba(chunk[2], chunk[1], chunk[0], chunk[3])

@@ -13,12 +13,13 @@ use crate::display_object::edit_text::EditText;
 use crate::display_object::loader_display::LoaderDisplay;
 use crate::display_object::movie_clip::MovieClip;
 use crate::display_object::stage::Stage;
+use crate::display_object::text_line::TextLine;
 use crate::display_object::{
-    DisplayObject, DisplayObjectBase, TDisplayObject, TDisplayObjectContainer,
+    BoundsMode, DisplayObject, DisplayObjectBase, TDisplayObject, TDisplayObjectContainer,
 };
 use crate::events::{ClipEvent, ClipEventResult, MouseButton};
-use crate::string::AvmString;
 use bitflags::bitflags;
+use either::Either;
 use gc_arena::barrier::unlock;
 use gc_arena::lock::Lock;
 use gc_arena::{Collect, Gc, Mutation};
@@ -137,6 +138,7 @@ impl<'gc> InteractiveObjectBase<'gc> {
         Avm2Button(Avm2Button<'gc>),
         MovieClip(MovieClip<'gc>),
         EditText(EditText<'gc>),
+        TextLine(TextLine<'gc>),
         LoaderDisplay(LoaderDisplay<'gc>),
     }
 )]
@@ -220,7 +222,7 @@ pub trait TInteractiveObject<'gc>:
     /// onto other siblings of the display object instead.
     fn filter_clip_event(
         self,
-        _context: &mut UpdateContext<'gc>,
+        context: &mut UpdateContext<'gc>,
         event: ClipEvent,
     ) -> ClipEventResult;
 
@@ -233,15 +235,22 @@ pub trait TInteractiveObject<'gc>:
         context: &mut UpdateContext<'gc>,
         event: ClipEvent<'gc>,
     ) -> ClipEventResult {
-        if event.propagates() {
-            if let Some(container) = self.as_displayobject().as_container() {
-                for child in container.iter_render_list() {
-                    if let Some(interactive) = child.as_interactive() {
-                        if interactive.handle_clip_event(context, event) == ClipEventResult::Handled
-                        {
-                            return ClipEventResult::Handled;
-                        }
-                    }
+        if event.propagates()
+            && let Some(container) = self.as_displayobject().as_container()
+        {
+            // Mouse events fire in reverse order (high depth to low depth).
+            // Button and key events fire in render list order (low depth to high depth).
+            let children = if event.is_mouse_event() {
+                Either::Left(container.iter_render_list().rev())
+            } else {
+                Either::Right(container.iter_render_list())
+            };
+
+            for child in children {
+                if let Some(interactive) = child.as_interactive()
+                    && interactive.handle_clip_event(context, event) == ClipEventResult::Handled
+                {
+                    return ClipEventResult::Handled;
                 }
             }
         }
@@ -257,8 +266,8 @@ pub trait TInteractiveObject<'gc>:
     /// if the event will be passed onto siblings and parents.
     fn event_dispatch(
         self,
-        _context: &mut UpdateContext<'gc>,
-        _event: ClipEvent<'gc>,
+        context: &mut UpdateContext<'gc>,
+        event: ClipEvent<'gc>,
     ) -> ClipEventResult;
 
     /// Convert the clip event into an AVM2 event and dispatch it into the
@@ -281,10 +290,11 @@ pub trait TInteractiveObject<'gc>:
         // that was originally created by the timeline. Normally, one of the ancestors
         // of the TextField would get targeted, but instead, the event isn't fired
         // (not even the Stage receives the event)
-        if let Some(text) = self.as_displayobject().as_edit_text() {
-            if text.is_selectable() && text.was_static() {
-                return ClipEventResult::NotHandled;
-            }
+        if let Some(text) = self.as_displayobject().as_edit_text()
+            && text.is_selectable()
+            && text.was_static()
+        {
+            return ClipEventResult::NotHandled;
         }
 
         let target = if let Some(target) = self.as_displayobject().object2() {
@@ -636,13 +646,13 @@ pub trait TInteractiveObject<'gc>:
         let self_do = self.as_displayobject();
         if let Some(object) = self_do.object1() {
             let other = other
-                .map(|d| d.as_displayobject().object1_or_undef())
+                .map(|d| d.as_displayobject().object1_or_null())
                 .unwrap_or(Avm1Value::Null);
 
             let method_name = if focused {
-                AvmString::new_ascii_static(context.gc(), b"onSetFocus")
+                istr!(context, "onSetFocus")
             } else {
-                AvmString::new_ascii_static(context.gc(), b"onKillFocus")
+                istr!(context, "onKillFocus")
             };
 
             Avm1::run_stack_frame_for_method(self_do, object, method_name, &[other], context);
@@ -675,7 +685,7 @@ pub trait TInteractiveObject<'gc>:
 
     /// Get the bounds of the focus highlight.
     fn highlight_bounds(self) -> Rectangle<Twips> {
-        self.as_displayobject().world_bounds()
+        self.as_displayobject().world_bounds(BoundsMode::Engine)
     }
 
     /// Whether this object is included in tab ordering.
@@ -785,14 +795,17 @@ impl<'gc> Avm2MousePick<'gc> {
     #[must_use]
     pub fn combine_with_parent(&self, parent: DisplayObjectContainer<'gc>) -> Avm2MousePick<'gc> {
         let parent_int = DisplayObject::from(parent).as_interactive().unwrap();
-        let res = match self {
+
+        match self {
             Avm2MousePick::Hit(target) => {
                 // If the parent has `mouseChildren=true` then propagate the existing
                 // Avm2MousePick::Hit, leaving the target unchanged. This is unaffected
                 // by the parent `mouseEnabled` property.
                 // However, the root object of a loader or stage is never a valid target of hit
                 // events (even if moved out of the loader's hierarchy).
-                if parent.raw_container().mouse_children() && !target.as_displayobject().is_root() {
+                if parent.raw_container().mouse_children()
+                    && target.as_displayobject().loader_info().is_none()
+                {
                     *self
                 // If the parent has `mouseChildren=false`, then the eventual
                 // MouseEvent (if it gets fired) will *not* have a `target`
@@ -803,7 +816,7 @@ impl<'gc> Avm2MousePick<'gc> {
                     // targeting the parent - it 'absorbs' child events.
                     if parent_int.mouse_enabled() {
                         Avm2MousePick::Hit(parent_int)
-                    // If the parent has `mouseChildren=false` and `mouseEnabled=true`,
+                    // If the parent has `mouseChildren=false` and `mouseEnabled=false`,
                     // we have a weird case. The event can propagate through this 'fully disabled'
                     // parent - if it reaches an ancestor with `mouseEnabled=true`, it will get
                     // 'absorbed' by that ancestor. Otherwise, no event will be fired.
@@ -825,8 +838,7 @@ impl<'gc> Avm2MousePick<'gc> {
             }
             // A miss in a child always stays a miss, regardless of parent settings.
             Avm2MousePick::Miss => Avm2MousePick::Miss,
-        };
-        res
+        }
     }
 }
 

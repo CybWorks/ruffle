@@ -1,6 +1,6 @@
 use crate::avm2::object::BitmapDataObject;
 use crate::context::RenderContext;
-use crate::display_object::{DisplayObject, DisplayObjectWeak, TDisplayObject};
+use crate::display_object::{BoundsMode, DisplayObject, DisplayObjectWeak, TDisplayObject};
 use bitflags::bitflags;
 use gc_arena::lock::GcRefLock;
 use gc_arena::{Collect, Gc, Mutation};
@@ -428,7 +428,7 @@ mod wrapper {
     use ruffle_render::commands::CommandHandler;
     use std::cell::Ref;
 
-    use super::{copy_pixels_to_bitmapdata, BitmapRawData, DirtyState};
+    use super::{BitmapRawData, DirtyState, copy_pixels_to_bitmapdata};
 
     /// A wrapper type that ensures that we always wait for a pending
     /// GPU -> CPU sync to complete (using `sync_handle`) before accessing
@@ -957,7 +957,7 @@ impl IBitmapDrawable<'_> {
                 y_min: Twips::ZERO,
                 y_max: Twips::from_pixels(bmd.height() as f64),
             },
-            IBitmapDrawable::DisplayObject(o) => o.bounds(),
+            IBitmapDrawable::DisplayObject(o) => o.bounds(BoundsMode::Engine),
         }
     }
 }

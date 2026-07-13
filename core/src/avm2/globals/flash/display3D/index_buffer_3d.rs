@@ -1,7 +1,7 @@
-use crate::avm2::parameters::ParametersExt;
 use crate::avm2::Activation;
 use crate::avm2::Error;
 use crate::avm2::Value;
+use crate::avm2::parameters::ParametersExt;
 
 pub fn upload_from_byte_array<'gc>(
     activation: &mut Activation<'_, 'gc>,
@@ -57,10 +57,10 @@ pub fn upload_from_vector<'gc>(
             .iter()
             .map(|val| {
                 // FIXME - use the low 16 bytes
-                val.coerce_to_u32(activation).map(|val| val as u16)
+                val.as_u32() as u16
             })
             .take(count as usize)
-            .collect::<Result<Vec<u16>, _>>()?;
+            .collect::<Vec<_>>();
 
         let data_bytes = bytemuck::cast_slice::<u16, u8>(&data);
 

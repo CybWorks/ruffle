@@ -5,12 +5,13 @@ use crate::html::iterators::TextSpanIter;
 use crate::string::{Integer, SwfStrExt as _, Units, WStr, WString};
 use crate::tag_utils::SwfMovie;
 use gc_arena::Collect;
-use quick_xml::{escape::escape, events::Event, Reader};
-use ruffle_wstr::utils::swf_is_newline;
+use quick_xml::{Reader, escape::escape, events::Event};
+use ruffle_wstr::utils::{swf_is_ascii_hexdigit, swf_is_newline, swf_is_whitespace};
 use std::borrow::Cow;
-use std::cmp::{min, Ordering};
+use std::cmp::{Ordering, min};
 use std::collections::VecDeque;
 use std::fmt::Write;
+use std::num::Wrapping;
 use std::sync::Arc;
 
 use super::StyleSheet;
@@ -52,17 +53,28 @@ fn process_html_entity(src: &WStr) -> Option<WString> {
                     result_str.push_byte(b'\xA0');
                 } else if s.len() >= 2 && s.at(0) == b'#' as u16 {
                     // Number entity: &#nnnn; or &#xhhhh;
-                    let (digits, radix) = if src.at(1) == b'x' as u16 {
-                        // Only trailing 4 hex digits are used.
-                        let start = usize::max(s.len(), 6) - 4;
-                        (&s[start..], 16)
+                    let (radix, start_index) = if s.at(1) == b'x' as u16 {
+                        (16, 2)
                     } else {
-                        // Only trailing 16 digits are used.
-                        let start = usize::max(s.len(), 17) - 16;
-                        (&s[start..], 10)
+                        (10, 1)
                     };
-                    if let Ok(n) = u32::from_wstr_radix(digits, radix) {
-                        if let Some(c) = std::char::from_u32(n) {
+                    let numeric_parse_start = s[start_index..].trim();
+                    let numeral_start_index = match s.get(start_index).map(u8::try_from) {
+                        Some(Ok(b'-')) | Some(Ok(b'+')) => 1,
+                        _ => 0,
+                    };
+                    let numeral_segment = &numeric_parse_start[numeral_start_index..];
+                    let end = numeral_segment
+                        .find(if radix == 16 {
+                            |c| !swf_is_ascii_hexdigit(c)
+                        } else {
+                            |c| c < b'0' as u16 || c > b'9' as u16
+                        })
+                        .unwrap_or(numeral_segment.len())
+                        + numeral_start_index;
+                    let digits = &numeric_parse_start[..end]; // using numeric_parse_start to include any potential sign
+                    if let Ok(n) = Wrapping::<u16>::from_wstr_radix(digits, radix) {
+                        if let Some(c) = std::char::from_u32(n.0 as u32) {
                             result_str.push_char(c);
                         }
                     } else {
@@ -119,7 +131,7 @@ pub enum TextDisplay {
 /// means that multiple regions of text apply. When setting the format of a
 /// particular region of text, `None` means that the existing setting for that
 /// property will be retained.
-#[derive(Clone, Debug, Collect, Default)]
+#[derive(Clone, Debug, Collect)]
 #[collect(require_static)]
 pub struct TextFormat {
     pub font: Option<WString>,
@@ -143,7 +155,40 @@ pub struct TextFormat {
     pub display: Option<TextDisplay>,
 }
 
+impl Default for TextFormat {
+    fn default() -> Self {
+        Self {
+            display: Some(TextDisplay::Block),
+            ..Self::empty()
+        }
+    }
+}
+
 impl TextFormat {
+    pub fn empty() -> Self {
+        Self {
+            font: None,
+            size: None,
+            color: None,
+            align: None,
+            bold: None,
+            italic: None,
+            underline: None,
+            left_margin: None,
+            right_margin: None,
+            indent: None,
+            block_indent: None,
+            kerning: None,
+            leading: None,
+            letter_spacing: None,
+            tab_stops: None,
+            bullet: None,
+            url: None,
+            target: None,
+            display: None,
+        }
+    }
+
     /// Construct a `TextFormat` from an `EditText`'s SWF tag.
     ///
     /// This requires an `UpdateContext` as we will need to retrieve some font
@@ -187,9 +232,6 @@ impl TextFormat {
             .map(|l| l.leading.to_pixels())
             .unwrap_or_default();
 
-        // TODO: Text fields that don't specify a font are assumed to be 12px
-        // Times New Roman non-bold, non-italic. This will need to be revised
-        // when we start supporting device fonts.
         Self {
             font: Some(font_class),
             size: Some(et.height().map(|h| h.to_pixels()).unwrap_or(12.0)),
@@ -214,14 +256,12 @@ impl TextFormat {
             left_margin: Some(left_margin),
             right_margin: Some(right_margin),
             indent: Some(indent),
-            block_indent: Some(0.0), // TODO: This isn't specified by the tag itself
+            block_indent: Some(0.0),
             kerning: Some(false),
             leading: Some(leading),
-            letter_spacing: Some(0.0), // TODO: This isn't specified by the tag itself
-            tab_stops: Some(vec![]),   // TODO: Are there default tab stops?
-            bullet: Some(false),       // TODO: Default tab stops?
-
-            // TODO: These are probably empty strings by default
+            letter_spacing: Some(0.0),
+            tab_stops: Some(vec![]),
+            bullet: Some(false),
             url: Some(WString::new()),
             target: Some(WString::new()),
         }
@@ -745,7 +785,10 @@ impl FormatSpans {
                         Ok(attributes) => attributes,
                         Err(e) => {
                             tracing::warn!("Error while parsing HTML: {}", e);
-                            return Default::default();
+                            return Self {
+                                default_format,
+                                ..Default::default()
+                            };
                         }
                     };
                     let attribute = move |name| {
@@ -824,7 +867,7 @@ impl FormatSpans {
 
                             if let Some(size) = attribute(b"size") {
                                 // if the number starts with + or -, the size is relative
-                                let (prefix, size) = if size.starts_with(&[b'+', b'-'][..]) {
+                                let (prefix, size) = if size.starts_with([b'+', b'-']) {
                                     (Some(size.at(0) as u8), &size[1..])
                                 } else {
                                     (None, &size[..])
@@ -859,22 +902,15 @@ impl FormatSpans {
                                 }
                             }
 
-                            if let Some(color) = attribute(b"color") {
-                                // FIXME - handle alpha
-                                if color.starts_with(b'#') {
-                                    let rval = color
-                                        .slice(1..3)
-                                        .and_then(|v| u8::from_wstr_radix(v, 16).ok());
-                                    let gval = color
-                                        .slice(3..5)
-                                        .and_then(|v| u8::from_wstr_radix(v, 16).ok());
-                                    let bval = color
-                                        .slice(5..7)
-                                        .and_then(|v| u8::from_wstr_radix(v, 16).ok());
-
-                                    if let (Some(r), Some(g), Some(b)) = (rval, gval, bval) {
-                                        format.color = Some(swf::Color { r, g, b, a: 0 });
-                                    }
+                            if let Some(color) = attribute(b"color")
+                                && let Some(hex) = color.strip_prefix(b'#')
+                            {
+                                let hex = hex.trim_start();
+                                let end =
+                                    hex.iter().take_while(|c| swf_is_ascii_hexdigit(*c)).count();
+                                let start = end.saturating_sub(6);
+                                if let Ok(rgb) = u32::from_wstr_radix(&hex[start..end], 16) {
+                                    format.color = Some(swf::Color::from_rgb(rgb, 0));
                                 }
                             }
 
@@ -1088,7 +1124,7 @@ impl FormatSpans {
         let mut result = WString::with_capacity(string.len(), string.is_wide());
         let mut last_white = false;
         for ch in string.iter() {
-            if ruffle_wstr::utils::swf_is_whitespace(ch) {
+            if swf_is_whitespace(ch) {
                 if !last_white {
                     result.push(HTML_SPACE);
                     last_white = true;

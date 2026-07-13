@@ -1,18 +1,19 @@
 use crate::avm1::Object as Avm1Object;
 use crate::avm2::StageObject as Avm2StageObject;
 use crate::context::{RenderContext, UpdateContext};
-use crate::display_object::DisplayObjectBase;
+use crate::display_object::{BoundsMode, DisplayObjectBase, MovieClip};
 use crate::font::{FontLike, TextRenderSettings};
 use crate::prelude::*;
 use crate::tag_utils::SwfMovie;
 use crate::vminterface::Instantiator;
 use core::fmt;
-use gc_arena::barrier::unlock;
 use gc_arena::Lock;
+use gc_arena::barrier::unlock;
 use gc_arena::{Collect, Gc, Mutation};
 use ruffle_common::utils::HasPrefixField;
 use ruffle_render::transform::Transform;
-use ruffle_wstr::WString;
+use ruffle_wstr::{WStr, WString};
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -74,26 +75,30 @@ impl<'gc> Text<'gc> {
         self.invalidate_cached_bitmap();
     }
 
-    pub fn text(self, context: &mut UpdateContext<'gc>) -> WString {
+    pub fn text(self, context: &mut UpdateContext<'gc>) -> Option<WString> {
         let mut ret = WString::new();
 
+        let mut font_id = None;
+
         for block in &self.0.shared.get().text_blocks {
-            let font_id = block.font_id.unwrap_or_default();
-            if let Some(font) = context
+            if block.font_id.is_some() {
+                font_id = block.font_id;
+            }
+
+            let font = context
                 .library
                 .library_for_movie(self.movie())
                 .unwrap()
-                .get_font(font_id)
-            {
-                for glyph in &block.glyphs {
-                    if let Some(g) = font.get_glyph(glyph.index as usize) {
-                        ret.push_char(g.character());
-                    }
+                .get_font(font_id?)?;
+
+            for glyph in &block.glyphs {
+                if let Some(g) = font.get_glyph(glyph.index as usize) {
+                    ret.push_char(g.character());
                 }
             }
         }
 
-        ret
+        if ret.is_empty() { None } else { Some(ret) }
     }
 }
 
@@ -179,7 +184,7 @@ impl<'gc> TDisplayObject<'gc> for Text<'gc> {
         context.transform_stack.pop();
     }
 
-    fn self_bounds(self) -> Rectangle<Twips> {
+    fn self_bounds(self, _mode: BoundsMode) -> Rectangle<Twips> {
         self.0.shared.get().bounds
     }
 
@@ -190,7 +195,7 @@ impl<'gc> TDisplayObject<'gc> for Text<'gc> {
         options: HitTestOptions,
     ) -> bool {
         if (!options.contains(HitTestOptions::SKIP_INVISIBLE) || self.visible())
-            && self.world_bounds().contains(point)
+            && self.world_bounds(BoundsMode::Engine).contains(point)
         {
             // Texts using the "Advanced text rendering" always hit test using their bounding box.
             if self.0.render_settings.borrow().is_advanced() {
@@ -300,4 +305,139 @@ struct TextShared {
     bounds: Rectangle<Twips>,
     text_transform: Matrix,
     text_blocks: Vec<swf::TextRecord>,
+}
+
+#[derive(Clone, Collect, Copy)]
+#[collect(no_drop)]
+pub struct TextSnapshot<'gc>(Gc<'gc, TextSnapshotData<'gc>>);
+
+impl fmt::Debug for TextSnapshot<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("TextSnapshot")
+            .field("ptr", &Gc::as_ptr(self.0))
+            .finish()
+    }
+}
+
+#[derive(Collect)]
+#[collect(no_drop)]
+pub struct TextSnapshotData<'gc> {
+    chunks: Vec<TextSnapshotChunk<'gc>>,
+}
+
+#[derive(Collect)]
+#[collect(no_drop)]
+struct TextSnapshotChunk<'gc> {
+    object: Text<'gc>,
+    #[collect(require_static)]
+    text: WString,
+    global_index: usize,
+}
+
+impl<'gc> TextSnapshotChunk<'gc> {
+    fn sub_string(&self, global_index_start: usize, global_index_end: usize) -> &WStr {
+        let start = global_index_start.saturating_sub(self.global_index);
+        let end = global_index_end
+            .saturating_sub(self.global_index)
+            .min(self.text.len());
+        &self.text[start..end]
+    }
+}
+
+impl<'gc> TextSnapshot<'gc> {
+    pub fn new(context: &mut UpdateContext<'gc>, target: MovieClip<'gc>) -> Self {
+        let mut chunks = Vec::new();
+        let mut index = 0;
+        for child in target.iter_render_list() {
+            if let Some(object) = child.as_text()
+                && let Some(text) = object.text(context)
+            {
+                let len = text.len();
+                chunks.push(TextSnapshotChunk {
+                    object,
+                    text,
+                    global_index: index,
+                });
+                index += len;
+            }
+        }
+
+        Self(Gc::new(context.gc(), TextSnapshotData { chunks }))
+    }
+
+    pub fn count(self) -> usize {
+        self.0.chunks.iter().map(|c| c.text.len()).sum()
+    }
+
+    pub fn get_text(self, from: i32, to: i32, include_newlines: bool) -> WString {
+        let count = self.count();
+        if count == 0 {
+            return WString::new();
+        }
+
+        let start = usize::try_from(from).unwrap_or_default().min(count - 1);
+        let end = usize::try_from(to)
+            .unwrap_or_default()
+            .min(count)
+            .max(start + 1);
+
+        let mut chunks = self
+            .0
+            .chunks
+            .iter()
+            .filter(|c| c.global_index < end)
+            .filter(|c| c.global_index + c.text.len() > start)
+            .map(|c| c.sub_string(start, end));
+
+        let mut ret = WString::new();
+
+        if let Some(chunk) = chunks.next() {
+            ret.push_str(chunk);
+        }
+
+        for chunk in chunks {
+            if include_newlines {
+                ret.push_char('\n');
+            }
+            ret.push_str(chunk);
+        }
+
+        ret
+    }
+
+    pub fn find_text(self, from: i32, text: &WStr, case_sensitive: bool) -> i32 {
+        if text.is_empty() {
+            return -1;
+        }
+
+        let Ok(from) = usize::try_from(from) else {
+            return -1;
+        };
+        let count = self.count();
+
+        let chunks = self
+            .0
+            .chunks
+            .iter()
+            .filter(|c| c.global_index + c.text.len() > from)
+            .map(|c| c.sub_string(from, count));
+
+        let mut full_text = WString::new();
+        for chunk in chunks {
+            full_text.push_str(chunk);
+        }
+
+        let text = if !case_sensitive {
+            full_text.make_ascii_lowercase();
+            Cow::Owned(text.to_ascii_lowercase())
+        } else {
+            Cow::Borrowed(text)
+        };
+
+        let Some(index) = full_text.find(text.as_ref()) else {
+            return -1;
+        };
+
+        i32::try_from(from + index).unwrap_or(-1)
+    }
 }

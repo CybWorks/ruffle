@@ -1,7 +1,7 @@
 use crate::avm2::object::{ScriptObject, TObject as _};
 use crate::avm2::parameters::ParametersExt;
 use crate::avm2::{Activation, Error, Value};
-use crate::html::{transform_dashes_to_camel_case, CssStream};
+use crate::html::{CssStream, transform_dashes_to_camel_case};
 use crate::string::AvmString;
 use ruffle_wstr::WStr;
 
@@ -47,10 +47,10 @@ pub fn inner_parse_color<'gc>(
 
     if let Some(stripped) = input.strip_prefix(WStr::from_units(b"#")) {
         let stripped = stripped.trim_end();
-        if stripped.len() <= 6 {
-            if let Ok(number) = u32::from_str_radix(&stripped.to_string(), 16) {
-                return Ok(number.into());
-            }
+        if stripped.len() <= 6
+            && let Ok(number) = u32::from_str_radix(&stripped.to_string(), 16)
+        {
+            return Ok(number.into());
         }
     }
 

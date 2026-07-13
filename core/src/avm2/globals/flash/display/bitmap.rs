@@ -1,11 +1,11 @@
 //! `flash.display.Bitmap` builtin/prototype
 
+use crate::avm2::Error;
 use crate::avm2::activation::Activation;
 use crate::avm2::globals::flash::display::bitmap_data::fill_bitmap_data_from_symbol;
 use crate::avm2::globals::flash::display::display_object::initialize_for_allocator;
 use crate::avm2::object::{BitmapDataObject, ClassObject, Object};
 use crate::avm2::value::Value;
-use crate::avm2::Error;
 use ruffle_macros::istr;
 use ruffle_render::bitmap::PixelSnapping;
 
@@ -34,11 +34,9 @@ pub fn bitmap_allocator<'gc>(
                 &activation.caller_movie_or_root(),
             )
             .into();
-            return Ok(initialize_for_allocator(
-                activation.context,
-                display_object,
-                orig_class,
-            ));
+            return Ok(
+                initialize_for_allocator(activation.context, display_object, orig_class).into(),
+            );
         }
 
         if let Some((movie, symbol)) = activation
@@ -46,32 +44,28 @@ pub fn bitmap_allocator<'gc>(
             .library
             .avm2_class_registry()
             .class_symbol(class)
-        {
-            if let Some(Character::Bitmap(bitmap)) = activation
+            && let Some(Character::Bitmap(bitmap)) = activation
                 .context
                 .library
                 .library_for_movie_mut(movie)
                 .character_by_id(symbol)
-            {
-                let new_bitmap_data = fill_bitmap_data_from_symbol(activation, bitmap.compressed());
-                let bitmap_data_obj =
-                    BitmapDataObject::from_bitmap_data(activation.context, new_bitmap_data);
-                new_bitmap_data.init_object2(activation.gc(), bitmap_data_obj);
+        {
+            let new_bitmap_data = fill_bitmap_data_from_symbol(activation, bitmap.compressed());
+            let bitmap_data_obj =
+                BitmapDataObject::from_bitmap_data(activation.context, new_bitmap_data);
+            new_bitmap_data.init_object2(activation.gc(), bitmap_data_obj);
 
-                let child = Bitmap::new_with_bitmap_data(
-                    activation.gc(),
-                    0,
-                    new_bitmap_data,
-                    false,
-                    &activation.caller_movie_or_root(),
-                );
+            let child = Bitmap::new_with_bitmap_data(
+                activation.gc(),
+                0,
+                new_bitmap_data,
+                false,
+                &activation.caller_movie_or_root(),
+            );
 
-                return Ok(initialize_for_allocator(
-                    activation.context,
-                    child.into(),
-                    orig_class,
-                ));
-            }
+            return Ok(
+                initialize_for_allocator(activation.context, child.into(), orig_class).into(),
+            );
         }
         class_def = class.super_class();
     }
@@ -88,17 +82,10 @@ pub fn init<'gc>(
 
     let bitmap_data = args.try_get_object(0).and_then(|o| o.as_bitmap_data());
 
-    let pixel_snapping = args.get_string(activation, 1);
-
-    let pixel_snapping = if &pixel_snapping == b"always" {
-        PixelSnapping::Always
-    } else if &pixel_snapping == b"auto" {
-        PixelSnapping::Auto
-    } else if &pixel_snapping == b"never" {
-        PixelSnapping::Never
-    } else {
-        return Err(make_error_2008(activation, "pixelSnapping"));
-    };
+    let pixel_snapping = args
+        .get_string(activation, 1)
+        .parse()
+        .map_err(|_| make_error_2008(activation, "pixelSnapping"))?;
 
     let smoothing = args.get_bool(2);
 
@@ -189,17 +176,10 @@ pub fn set_pixel_snapping<'gc>(
     let this = this.as_object().unwrap();
 
     if let Some(bitmap) = this.as_display_object().and_then(|dobj| dobj.as_bitmap()) {
-        let value = args.get_string(activation, 0);
-
-        let pixel_snapping = if &value == b"always" {
-            PixelSnapping::Always
-        } else if &value == b"auto" {
-            PixelSnapping::Auto
-        } else if &value == b"never" {
-            PixelSnapping::Never
-        } else {
-            return Err(make_error_2008(activation, "pixelSnapping"));
-        };
+        let pixel_snapping = args
+            .get_string(activation, 0)
+            .parse()
+            .map_err(|_| make_error_2008(activation, "pixelSnapping"))?;
 
         bitmap.set_pixel_snapping(pixel_snapping);
     }

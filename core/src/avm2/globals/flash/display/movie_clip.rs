@@ -1,12 +1,12 @@
 //! `flash.display.MovieClip` builtin/prototype
 
+use crate::avm2::Error;
 use crate::avm2::activation::Activation;
 use crate::avm2::array::ArrayStorage;
 use crate::avm2::error::make_error_2109;
 use crate::avm2::object::ArrayObject;
 use crate::avm2::parameters::ParametersExt;
 use crate::avm2::value::Value;
-use crate::avm2::Error;
 use crate::display_object::{MovieClip, Scene};
 use crate::string::{AvmString, WString};
 
@@ -23,7 +23,7 @@ pub fn add_frame_script<'gc>(
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
     {
-        for (frame_id, callable) in args.chunks_exact(2).map(|s| (s[0], s[1])) {
+        for (frame_id, callable) in args.as_chunks::<2>().0.iter().map(|s| (s[0], s[1])) {
             let frame_id = frame_id.coerce_to_u32(activation)? as u16 + 1;
             // This is correct; FP will attempt to call any Object when running
             // frame scripts
@@ -128,22 +128,23 @@ fn labels_for_scene<'gc>(
         length: scene_length,
     } = scene;
     let frame_label_class = activation.context.avm2.classes().framelabel;
-    let labels = mc.labels_in_range(*scene_start, scene_start + scene_length);
-    let mut frame_labels = Vec::with_capacity(labels.len());
 
-    for (name, frame) in labels {
-        let name: Value<'gc> = AvmString::new(activation.gc(), name).into();
-        let local_frame = frame - scene_start + 1;
-        let args = [name, local_frame.into()];
-        let frame_label = frame_label_class.construct(activation, &args)?;
+    let frame_labels = mc
+        .labels_in_range(*scene_start, scene_start + scene_length)
+        .into_iter()
+        .map(|(name, frame)| {
+            let name: Value<'gc> = AvmString::new(activation.gc(), name).into();
+            let local_frame = frame - scene_start + 1;
+            let args = [name, local_frame.into()];
 
-        frame_labels.push(Some(frame_label));
-    }
+            frame_label_class.construct(activation, &args)
+        })
+        .collect::<Result<ArrayStorage<'gc>, Error<'gc>>>()?;
 
     Ok((
         scene_name.to_string(),
         *scene_length,
-        ArrayObject::from_storage(activation.context, ArrayStorage::from_storage(frame_labels)),
+        ArrayObject::from_storage(activation.context, frame_labels),
     ))
 }
 
@@ -260,27 +261,23 @@ pub fn get_scenes<'gc>(
             });
         }
 
-        let mut scene_objects = Vec::with_capacity(mc_scenes.len());
-        for scene in mc_scenes {
-            let (scene_name, scene_length, scene_labels) =
-                labels_for_scene(activation, mc, &scene)?;
-            let scene_class = activation.context.avm2.classes().scene;
-            let args = [
-                AvmString::new_utf8(activation.gc(), scene_name).into(),
-                scene_labels.into(),
-                scene_length.into(),
-            ];
+        let scene_objects = mc_scenes
+            .into_iter()
+            .map(|scene| {
+                let (scene_name, scene_length, scene_labels) =
+                    labels_for_scene(activation, mc, &scene)?;
+                let scene_class = activation.context.avm2.classes().scene;
+                let args = [
+                    AvmString::new_utf8(activation.gc(), scene_name).into(),
+                    scene_labels.into(),
+                    scene_length.into(),
+                ];
 
-            let scene = scene_class.construct(activation, &args)?;
+                scene_class.construct(activation, &args)
+            })
+            .collect::<Result<ArrayStorage<'gc>, Error<'gc>>>()?;
 
-            scene_objects.push(Some(scene));
-        }
-
-        return Ok(ArrayObject::from_storage(
-            activation.context,
-            ArrayStorage::from_storage(scene_objects),
-        )
-        .into());
+        return Ok(ArrayObject::from_storage(activation.context, scene_objects).into());
     }
 
     Ok(Value::Undefined)
@@ -535,15 +532,13 @@ pub fn prev_scene<'gc>(
     if let Some(mc) = this
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
-    {
-        if let Some(Scene {
+        && let Some(Scene {
             name: _,
             start,
             length: _,
         }) = mc.previous_scene()
-        {
-            mc.goto_frame(activation.context, start, false);
-        }
+    {
+        mc.goto_frame(activation.context, start, false);
     }
 
     Ok(Value::Undefined)
@@ -560,15 +555,13 @@ pub fn next_scene<'gc>(
     if let Some(mc) = this
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
-    {
-        if let Some(Scene {
+        && let Some(Scene {
             name: _,
             start,
             length: _,
         }) = mc.next_scene()
-        {
-            mc.goto_frame(activation.context, start, false);
-        }
+    {
+        mc.goto_frame(activation.context, start, false);
     }
 
     Ok(Value::Undefined)

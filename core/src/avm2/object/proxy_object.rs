@@ -1,14 +1,14 @@
 //! Object representation for `Proxy`.
 
+use crate::avm2::Error;
+use crate::avm2::Multiname;
 use crate::avm2::activation::Activation;
 use crate::avm2::function::FunctionArgs;
 use crate::avm2::globals::methods::flash_utils_proxy as proxy_methods;
 use crate::avm2::object::script_object::ScriptObjectData;
 use crate::avm2::object::{ClassObject, Object, QNameObject, TObject};
-use crate::avm2::string::AvmString;
 use crate::avm2::value::Value;
-use crate::avm2::Error;
-use crate::avm2::Multiname;
+use crate::string::AvmString;
 use core::fmt;
 use gc_arena::{Collect, Gc, GcWeak};
 use ruffle_common::utils::HasPrefixField;

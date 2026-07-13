@@ -1,10 +1,10 @@
 //! Storage for AS3 Vectors
 
+use crate::avm2::Error;
 use crate::avm2::activation::Activation;
 use crate::avm2::class::Class;
 use crate::avm2::error::{make_error_1125, make_error_1126};
 use crate::avm2::value::Value;
-use crate::avm2::Error;
 use gc_arena::Collect;
 use std::cmp::{max, min};
 use std::ops::RangeBounds;
@@ -342,8 +342,19 @@ impl<'gc> VectorStorage<'gc> {
     }
 
     /// Replace this vector's storage with new values.
+    ///
+    /// See also [`Self::replace_storage_with_iter`] to avoid unnecessarily collecting to a Vec.
     pub fn replace_storage(&mut self, new_storage: Vec<Value<'gc>>) {
         self.storage = new_storage;
+    }
+
+    /// Replace the contents of the vector's storage with the contents of an iterator, reusing the existing allocation if possible.
+    pub fn replace_storage_with_iter<I>(&mut self, iter: I)
+    where
+        I: IntoIterator<Item = Value<'gc>>,
+    {
+        self.storage.clear();
+        self.storage.extend(iter);
     }
 
     pub fn splice<R>(

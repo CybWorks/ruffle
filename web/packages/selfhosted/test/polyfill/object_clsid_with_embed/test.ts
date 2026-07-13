@@ -12,6 +12,7 @@ describe("Object with clsid and embed", () => {
 
     it("polyfills with ruffle", async () => {
         await injectRuffleAndWait(browser);
+        await browser.$("<ruffle-embed />").waitForExist();
         const actual = await browser
             .$("#test-container")
             .getHTML({ includeSelectorTag: false, pierceShadowRoot: false });
@@ -25,7 +26,10 @@ describe("Object with clsid and embed", () => {
     it("Plays a movie", async () => {
         await playAndMonitor(
             browser,
-            await browser.$("#test-container").$("<ruffle-embed />"),
+            await browser
+                .$("#test-container")
+                .$("<ruffle-embed />")
+                .getElement(),
         );
     });
 });

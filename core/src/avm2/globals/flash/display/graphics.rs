@@ -1,10 +1,7 @@
 //! `flash.display.Graphics` builtin/prototype
 
-// See: https://github.com/rust-lang/rust-clippy/issues/12917
-#![allow(clippy::doc_lazy_continuation)]
-
 use crate::avm2::activation::Activation;
-use crate::avm2::error::{make_error_2004, make_error_2007, make_error_2008, Error2004Type};
+use crate::avm2::error::{Error2004Type, make_error_2004, make_error_2007, make_error_2008};
 use crate::avm2::globals::flash::geom::transform::object_to_matrix;
 use crate::avm2::globals::slots::flash_display_graphics_bitmap_fill as graphics_bitmap_fill_slots;
 use crate::avm2::globals::slots::flash_display_graphics_gradient_fill as graphics_gradient_fill_slots;
@@ -21,11 +18,12 @@ use crate::avm2_stub_method;
 use crate::display_object::TDisplayObject;
 use crate::drawing::Drawing;
 use crate::string::{AvmString, WStr};
+use either::Either;
 use ruffle_render::shape_utils::{DrawCommand, FillRule, GradientType};
 use std::f64::consts::FRAC_1_SQRT_2;
 use swf::{
-    Color, FillStyle, Fixed16, Fixed8, Gradient, GradientInterpolation, GradientRecord,
-    GradientSpread, LineCapStyle, LineJoinStyle, LineStyle, Matrix, Point, Twips,
+    Color, FillStyle, Fixed8, Gradient, GradientInterpolation, GradientRecord, GradientSpread,
+    LineCapStyle, LineJoinStyle, LineStyle, Matrix, Point, Twips,
 };
 
 /// Convert an RGB `color` and `alpha` argument pair into a `swf::Color`.
@@ -68,7 +66,7 @@ pub fn begin_bitmap_fill<'gc>(
             .as_bitmap_data()
             .expect("Bitmap argument is ensured to be a BitmapData from actionscript");
         let matrix = if let Some(matrix) = args.try_get_object(1) {
-            Matrix::from(object_to_matrix(matrix, activation)?)
+            Matrix::from(object_to_matrix(matrix))
         } else {
             // Users can explicitly pass in `null` to mean identity matrix
             Matrix::IDENTITY
@@ -125,7 +123,7 @@ pub fn begin_gradient_fill<'gc>(
         )?;
 
         let matrix = if let Some(matrix) = args.try_get_object(4) {
-            Matrix::from(object_to_matrix(matrix, activation)?)
+            Matrix::from(object_to_matrix(matrix))
         } else {
             // Users can explicitly pass in `null` to mean identity matrix
             Matrix::IDENTITY
@@ -260,10 +258,10 @@ pub fn clear<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let this = this.as_object().unwrap();
 
-    if let Some(this) = this.as_display_object() {
-        if let Some(mut draw) = this.as_drawing() {
-            draw.clear()
-        }
+    if let Some(this) = this.as_display_object()
+        && let Some(mut draw) = this.as_drawing()
+    {
+        draw.clear()
     }
 
     Ok(Value::Undefined)
@@ -302,10 +300,10 @@ pub fn end_fill<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let this = this.as_object().unwrap();
 
-    if let Some(this) = this.as_display_object() {
-        if let Some(mut draw) = this.as_drawing() {
-            draw.set_fill_style(None);
-        }
+    if let Some(this) = this.as_display_object()
+        && let Some(mut draw) = this.as_drawing()
+    {
+        draw.set_fill_style(None);
     }
 
     Ok(Value::Undefined)
@@ -903,7 +901,7 @@ pub fn line_gradient_style<'gc>(
             ratios,
         )?;
         let matrix = if let Some(matrix) = args.try_get_object(4) {
-            Matrix::from(object_to_matrix(matrix, activation)?)
+            Matrix::from(object_to_matrix(matrix))
         } else {
             // Users can explicitly pass in `null` to mean identity matrix
             Matrix::IDENTITY
@@ -1012,15 +1010,10 @@ pub fn draw_path<'gc>(
     let mut drawing = this.as_drawing().unwrap();
     let commands = args.get_object(activation, 0, "commands")?;
     let data = args.get_object(activation, 1, "data")?;
-    let winding = args.get_string(activation, 2);
-
-    let fill_rule = if winding == WStr::from_units(b"nonZero") {
-        FillRule::NonZero
-    } else if winding == WStr::from_units(b"evenOdd") {
-        FillRule::EvenOdd
-    } else {
-        return Err(make_error_2008(activation, "winding"));
-    };
+    let fill_rule = args
+        .get_string(activation, 2)
+        .parse()
+        .map_err(|_| make_error_2008(activation, "winding"))?;
 
     // FIXME - implement fill behavior described in the Flash docs
     // (which is different from just running each command sequentially on `Graphics`)
@@ -1049,32 +1042,178 @@ pub fn draw_triangles<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let this = this.as_object().unwrap();
 
-    if let Some(this) = this.as_display_object() {
-        if let Some(mut drawing) = this.as_drawing() {
-            let vertices = args.get_object(activation, 0, "vertices")?;
+    if let Some(this) = this.as_display_object()
+        && let Some(mut drawing) = this.as_drawing()
+    {
+        let vertices = args.get_object(activation, 0, "vertices")?;
 
-            let indices = args.try_get_object(1);
+        let indices = args.try_get_object(1);
 
-            let uvt_data = args.try_get_object(2);
+        let uvt_data = args.try_get_object(2);
 
-            let culling = {
-                let culling = args.get_string(activation, 3);
-                TriangleCulling::from_string(culling)
-                    .ok_or_else(|| make_error_2004(activation, Error2004Type::ArgumentError))?
-            };
+        let culling = {
+            let culling = args.get_string(activation, 3);
+            TriangleCulling::from_string(culling)
+                .ok_or_else(|| make_error_2004(activation, Error2004Type::ArgumentError))?
+        };
 
-            draw_triangles_internal(
+        // FIXME Triangles should be drawn using non-zero winding rule.
+        //   When fixed, update output.expected.png of avm2/graphics_draw_triangles.
+        avm2_stub_method!(
+            activation,
+            "flash.display.Graphics",
+            "drawTriangles",
+            "winding behavior"
+        );
+
+        if uvt_data.is_some() {
+            avm2_stub_method!(
                 activation,
-                &mut drawing,
-                &vertices,
-                indices.as_ref(),
-                uvt_data.as_ref(),
-                culling,
-            )?;
+                "flash.display.Graphics",
+                "drawTriangles",
+                "with uvt data"
+            );
         }
+
+        draw_triangles_internal(
+            activation,
+            &mut drawing,
+            &vertices,
+            indices.as_ref(),
+            uvt_data.as_ref(),
+            culling,
+        )?;
     }
 
     Ok(Value::Undefined)
+}
+
+/// Like [`slice::as_chunks`], but returns `None` if the slice length
+/// is not a multiple of `N`.
+trait AsChunksExact<T> {
+    fn as_chunks_exact<const N: usize>(&self) -> Option<&[[T; N]]>;
+}
+
+impl<T> AsChunksExact<T> for [T] {
+    fn as_chunks_exact<const N: usize>(&self) -> Option<&[[T; N]]> {
+        let (chunks, remainder) = self.as_chunks::<N>();
+
+        remainder.is_empty().then_some(chunks)
+    }
+}
+
+/// Parsed and validated triangle geometry for `Graphics.drawTriangles`.
+///
+/// # Invariants
+///
+/// * `vertices`, `indices`, and `triangles` are non-empty.
+/// * Every value in `indices` is `< vertices.len()`. Flash stops at the first
+///   out-of-bounds index, so any trailing triples that would have been out of
+///   bounds are dropped at construction time.
+enum TriangleData {
+    /// Triangles described by shared `vertices` and triples of indices into
+    /// that array.
+    Indexed {
+        vertices: Box<[Point<Twips>]>,
+        indices: Box<[[u32; 3]]>,
+    },
+    /// Triangles described as independent vertex triples.
+    Sequential { triangles: Box<[[Point<Twips>; 3]]> },
+}
+
+impl TriangleData {
+    /// Parses raw `Graphics.drawTriangles` arguments into a validated
+    /// [`TriangleData`].
+    ///
+    /// Returns `Ok(None)` for inputs that produce no triangles (empty
+    /// vertices, empty indices, or all indices out of bounds).
+    fn new<'gc>(
+        activation: &mut Activation<'_, 'gc>,
+        vertices: &Object<'gc>,
+        indices: Option<&Object<'gc>>,
+    ) -> Result<Option<Self>, Error<'gc>> {
+        let vertex_storage = vertices
+            .as_vector_storage()
+            .expect("vertices is not a Vector");
+
+        let vertex_pairs = vertex_storage
+            .storage()
+            .as_chunks_exact::<2>()
+            .ok_or_else(|| make_error_2004(activation, Error2004Type::ArgumentError))?;
+
+        if vertex_pairs.is_empty() {
+            return Ok(None);
+        }
+
+        if let Some(indices) = indices {
+            let indices_storage = indices
+                .as_vector_storage()
+                .expect("indices is not a Vector");
+
+            let index_triples = indices_storage
+                .storage()
+                .as_chunks_exact::<3>()
+                .ok_or_else(|| make_error_2004(activation, Error2004Type::ArgumentError))?;
+
+            if index_triples.is_empty() {
+                return Ok(None);
+            }
+
+            let vertices = vertex_pairs
+                .iter()
+                .map(|pair| make_point(pair))
+                .collect::<Box<_>>();
+
+            let num_vertices = vertices.len();
+
+            // `Vector.<int>` elements are always `Value::Integer`
+            let indices: Box<_> = index_triples
+                .iter()
+                .map(|[i0, i1, i2]| [i0.as_u32(), i1.as_u32(), i2.as_u32()])
+                // Flash stops at the first out-of-bounds index.
+                .take_while(|tri| tri.iter().all(|&i| (i as usize) < num_vertices))
+                .collect();
+
+            if indices.is_empty() {
+                return Ok(None);
+            }
+
+            Ok(Some(Self::Indexed { vertices, indices }))
+        } else {
+            let vertex_triples = vertex_pairs
+                .as_chunks_exact::<3>()
+                .ok_or_else(|| make_error_2004(activation, Error2004Type::ArgumentError))?;
+
+            let triangles = vertex_triples
+                .iter()
+                .map(|[p0, p1, p2]| [make_point(p0), make_point(p1), make_point(p2)])
+                .collect::<Box<_>>();
+
+            Ok(Some(Self::Sequential { triangles }))
+        }
+    }
+
+    fn iter_triangles(&self) -> impl Iterator<Item = [Point<Twips>; 3]> + '_ {
+        match self {
+            Self::Indexed { vertices, indices } => {
+                Either::Left(indices.iter().map(|&[i0, i1, i2]| {
+                    [
+                        vertices[i0 as usize],
+                        vertices[i1 as usize],
+                        vertices[i2 as usize],
+                    ]
+                }))
+            }
+            Self::Sequential { triangles } => Either::Right(triangles.iter().copied()),
+        }
+    }
+}
+
+fn make_point<'gc>([x, y]: &[Value<'gc>; 2]) -> Point<Twips> {
+    let x = Twips::from_pixels(x.as_f64());
+    let y = Twips::from_pixels(y.as_f64());
+
+    Point::new(x, y)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1097,8 +1236,9 @@ impl TriangleCulling {
         }
     }
 
-    fn cull(self, (a, b, c): Triangle) -> bool {
-        fn triangle_orientation((a, b, c): Triangle) -> i64 {
+    #[inline]
+    fn cull(self, points: [Point<Twips>; 3]) -> bool {
+        fn triangle_orientation([a, b, c]: [Point<Twips>; 3]) -> i64 {
             let ax = a.x.get() as i64;
             let ay = a.y.get() as i64;
             let bx = b.x.get() as i64;
@@ -1110,164 +1250,32 @@ impl TriangleCulling {
 
         match self {
             Self::None => false,
-            Self::Positive => triangle_orientation((a, b, c)) >= 0,
-            Self::Negative => triangle_orientation((a, b, c)) <= 0,
+            Self::Positive => triangle_orientation(points) >= 0,
+            Self::Negative => triangle_orientation(points) <= 0,
         }
     }
 }
-
-type Triangle = (Point<Twips>, Point<Twips>, Point<Twips>);
 
 fn draw_triangles_internal<'gc>(
     activation: &mut Activation<'_, 'gc>,
     drawing: &mut Drawing,
     vertices: &Object<'gc>,
     indices: Option<&Object<'gc>>,
-    uvt_data: Option<&Object<'gc>>,
+    _uvt_data: Option<&Object<'gc>>,
     culling: TriangleCulling,
 ) -> Result<(), Error<'gc>> {
-    // FIXME Triangles should be drawn using non-zero winding rule.
-    //   When fixed, update output.expected.png of avm2/graphics_draw_triangles.
-    avm2_stub_method!(
-        activation,
-        "flash.display.Graphics",
-        "drawTriangles",
-        "winding behavior"
-    );
+    let Some(data) = TriangleData::new(activation, vertices, indices)? else {
+        return Ok(());
+    };
 
-    if uvt_data.is_some() {
-        avm2_stub_method!(
-            activation,
-            "flash.display.Graphics",
-            "drawTriangles",
-            "with uvt data"
-        );
-    }
-
-    let vertices = vertices
-        .as_vector_storage()
-        .expect("vertices is not a Vector");
-
-    if let Some(indices) = indices {
-        if !vertices.length().is_multiple_of(2) {
-            return Err(make_error_2004(activation, Error2004Type::ArgumentError));
-        }
-
-        let indices = indices
-            .as_vector_storage()
-            .expect("indices is not a Vector");
-
-        fn read_point<'gc>(
-            vertices: &VectorStorage<'gc>,
-            index: usize,
-            activation: &mut Activation<'_, 'gc>,
-        ) -> Result<Point<Twips>, Error<'gc>> {
-            let x = {
-                let x = vertices
-                    .get(2 * index, activation)?
-                    .coerce_to_number(activation)?;
-                Twips::from_pixels(x)
-            };
-            let y = {
-                let y = vertices
-                    .get(2 * index + 1, activation)?
-                    .coerce_to_number(activation)?;
-                Twips::from_pixels(y)
-            };
-
-            Ok(Point::new(x, y))
-        }
-
-        fn next_triangle<'gc>(
-            vertices: &VectorStorage<'gc>,
-            indices: &mut impl Iterator<Item = Value<'gc>>,
-            activation: &mut Activation<'_, 'gc>,
-        ) -> Option<Triangle> {
-            match (indices.next(), indices.next(), indices.next()) {
-                (Some(i0), Some(i1), Some(i2)) => {
-                    let i0 = i0.coerce_to_u32(activation).ok()? as usize;
-                    let i1 = i1.coerce_to_u32(activation).ok()? as usize;
-                    let i2 = i2.coerce_to_u32(activation).ok()? as usize;
-
-                    let p0 = read_point(vertices, i0, activation).ok()?;
-                    let p1 = read_point(vertices, i1, activation).ok()?;
-                    let p2 = read_point(vertices, i2, activation).ok()?;
-
-                    Some((p0, p1, p2))
-                }
-                _ => None,
-            }
-        }
-
-        let indices = &mut indices.iter();
-
-        while let Some(triangle) = next_triangle(&vertices, indices, activation) {
-            draw_triangle_internal(triangle, drawing, culling);
-        }
-    } else {
-        if !vertices.length().is_multiple_of(6) {
-            return Err(make_error_2004(activation, Error2004Type::ArgumentError));
-        }
-
-        let mut vertices = vertices.iter();
-
-        fn read_point<'gc>(
-            vertices: &mut impl Iterator<Item = Value<'gc>>,
-            activation: &mut Activation<'_, 'gc>,
-        ) -> Result<Option<Point<Twips>>, Error<'gc>> {
-            let x = {
-                let x = vertices.next();
-                let x = match x {
-                    Some(x) => x.coerce_to_number(activation)?,
-                    None => return Ok(None),
-                };
-                Twips::from_pixels(x)
-            };
-            let y = {
-                let y = vertices.next();
-                let y = match y {
-                    Some(y) => y.coerce_to_number(activation)?,
-                    None => return Ok(None),
-                };
-                Twips::from_pixels(y)
-            };
-
-            Ok(Some(Point::new(x, y)))
-        }
-
-        fn next_triangle<'gc>(
-            vertices: &mut impl Iterator<Item = Value<'gc>>,
-            activation: &mut Activation<'_, 'gc>,
-        ) -> Result<Option<Triangle>, Error<'gc>> {
-            match (
-                read_point(vertices, activation)?,
-                read_point(vertices, activation)?,
-                read_point(vertices, activation)?,
-            ) {
-                (Some(p0), Some(p1), Some(p2)) => Ok(Some((p0, p1, p2))),
-                _ => Ok(None),
-            }
-        }
-
-        while let Some(triangle) = next_triangle(&mut vertices, activation)? {
-            draw_triangle_internal(triangle, drawing, culling);
-        }
+    for [a, b, c] in data.iter_triangles().filter(|&tri| !culling.cull(tri)) {
+        drawing.draw_command(DrawCommand::MoveTo(a));
+        drawing.draw_command(DrawCommand::LineTo(b));
+        drawing.draw_command(DrawCommand::LineTo(c));
+        drawing.draw_command(DrawCommand::LineTo(a));
     }
 
     Ok(())
-}
-
-#[inline]
-fn draw_triangle_internal((a, b, c): Triangle, drawing: &mut Drawing, culling: TriangleCulling) {
-    if culling.cull((a, b, c)) {
-        return;
-    }
-
-    drawing.draw_command(DrawCommand::MoveTo(a));
-
-    drawing.draw_command(DrawCommand::LineTo(b));
-    drawing.draw_command(DrawCommand::LineTo(c));
-    drawing.draw_command(DrawCommand::LineTo(a));
 }
 
 /// Implements `Graphics.drawGraphicsData`
@@ -1310,7 +1318,7 @@ pub fn line_bitmap_style<'gc>(
             .as_bitmap_data()
             .expect("Bitmap argument is ensured to be a BitmapData from actionscript");
         let matrix = if let Some(matrix) = args.try_get_object(1) {
-            Matrix::from(object_to_matrix(matrix, activation)?)
+            Matrix::from(object_to_matrix(matrix))
         } else {
             // Users can explicitly pass in `null` to mean identity matrix
             Matrix::IDENTITY
@@ -1326,8 +1334,8 @@ pub fn line_bitmap_style<'gc>(
             height: bitmap.height(),
         };
         let scale_matrix = Matrix::scale(
-            Fixed16::from_f64(bitmap.width as f64),
-            Fixed16::from_f64(bitmap.height as f64),
+            (Twips::TWIPS_PER_PIXEL as i16).into(),
+            (Twips::TWIPS_PER_PIXEL as i16).into(),
         );
 
         if let Some(mut draw) = this.as_drawing() {
@@ -1490,17 +1498,11 @@ fn handle_igraphics_data<'gc>(
 
         let data = obj.get_slot(graphics_path_slots::DATA).as_object();
 
-        let winding = obj
+        let fill_rule = obj
             .get_slot(graphics_path_slots::_WINDING)
-            .coerce_to_string(activation)?;
-
-        let fill_rule = if winding == WStr::from_units(b"nonZero") {
-            FillRule::NonZero
-        } else if winding == WStr::from_units(b"evenOdd") {
-            FillRule::EvenOdd
-        } else {
-            unreachable!("AS3 setter guarantees value of winding");
-        };
+            .coerce_to_string(activation)?
+            .parse()
+            .expect("AS3 setter guarantees value of winding");
 
         if let (Some(commands), Some(data)) = (commands, data) {
             process_commands(
@@ -1609,6 +1611,23 @@ fn handle_graphics_triangle_path<'gc>(
         .as_object();
 
     if let Some(vertices) = vertices {
+        // FIXME Triangles should be drawn using non-zero winding rule.
+        avm2_stub_method!(
+            activation,
+            "flash.display.Graphics",
+            "drawGraphicsData",
+            "GraphicsTrianglePath winding behavior"
+        );
+
+        if uvt_data.is_some() {
+            avm2_stub_method!(
+                activation,
+                "flash.display.Graphics",
+                "drawGraphicsData",
+                "GraphicsTrianglePath with uvt data"
+            );
+        }
+
         draw_triangles_internal(
             activation,
             drawing,
@@ -1703,7 +1722,7 @@ fn handle_gradient_fill<'gc>(
             .as_object();
 
         match matrix {
-            Some(matrix) => Matrix::from(object_to_matrix(matrix, activation)?),
+            Some(matrix) => Matrix::from(object_to_matrix(matrix)),
             None => Matrix::IDENTITY,
         }
     };
@@ -1770,11 +1789,7 @@ fn handle_bitmap_fill<'gc>(
     let matrix = obj
         .get_slot(graphics_bitmap_fill_slots::MATRIX)
         .as_object()
-        .and_then(|matrix| {
-            let matrix = Matrix::from(object_to_matrix(matrix, activation).ok()?);
-
-            Some(matrix)
-        })
+        .map(|matrix| Matrix::from(object_to_matrix(matrix)))
         .unwrap_or(Matrix::IDENTITY);
 
     let is_repeating = obj
@@ -1794,8 +1809,8 @@ fn handle_bitmap_fill<'gc>(
     };
 
     let scale_matrix = Matrix::scale(
-        Fixed16::from_f64(bitmap.width as f64),
-        Fixed16::from_f64(bitmap.height as f64),
+        (Twips::TWIPS_PER_PIXEL as i16).into(),
+        (Twips::TWIPS_PER_PIXEL as i16).into(),
     );
 
     let id = drawing.add_bitmap(bitmap);

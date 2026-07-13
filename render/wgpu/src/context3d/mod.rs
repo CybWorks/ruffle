@@ -1,11 +1,12 @@
+use naga_agal::AgalError;
 use ruffle_render::backend::{
-    Context3D, Context3DBlendFactor, Context3DCommand, Context3DCompareMode, Context3DProfile,
-    Context3DTextureFormat, Context3DVertexBufferFormat, IndexBuffer, ProgramType, VertexBuffer,
+    Context3D, Context3DBlendFactor, Context3DCommand, Context3DProfile, Context3DTextureFormat,
+    Context3DVertexBufferFormat, IndexBuffer, ProgramType, ShaderModule, VertexBuffer,
 };
 use ruffle_render::bitmap::BitmapHandle;
 use ruffle_render::error::Error;
 use std::any::Any;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use swf::{Rectangle, Twips};
 
 use wgpu::util::StagingBelt;
@@ -17,7 +18,7 @@ use wgpu::{
 use wgpu::{CommandEncoder, Extent3d, RenderPass};
 
 use crate::Texture;
-use crate::context3d::current_pipeline::{AGAL_FLOATS_PER_REGISTER, BoundTextureData};
+use crate::context3d::current_pipeline::{AGAL_FLOATS_PER_REGISTER, BoundTextureData, IntoWgpu};
 use crate::descriptors::Descriptors;
 use crate::utils::supported_sample_count;
 
@@ -164,7 +165,7 @@ impl WgpuContext3D {
         }
     }
 
-    fn create_depth_texture(&mut self, width: u32, height: u32, sample_count: u32) -> TextureView {
+    fn create_depth_texture(&self, width: u32, height: u32, sample_count: u32) -> TextureView {
         self.descriptors
             .device
             .create_texture(&wgpu::TextureDescriptor {
@@ -284,6 +285,8 @@ impl WgpuContext3D {
                 );
             }
         }
+
+        pass.set_stencil_reference(self.current_pipeline.stencil_ref_value());
 
         let mut seen = Vec::new();
 
@@ -475,6 +478,19 @@ impl Context3D for WgpuContext3D {
                 | TextureUsages::RENDER_ATTACHMENT,
         });
         Ok(Rc::new(TextureWrapper { texture }))
+    }
+
+    fn upload_shaders(
+        &mut self,
+        module: &RefCell<Option<Rc<dyn ShaderModule>>>,
+        vertex_shader_agal: Vec<u8>,
+        fragment_shader_agal: Vec<u8>,
+    ) -> Result<(), AgalError> {
+        let shader_pair = ShaderPairAgal::new(vertex_shader_agal, fragment_shader_agal)?;
+
+        *module.borrow_mut() = Some(Rc::new(shader_pair));
+
+        Ok(())
     }
 
     fn process_command(&mut self, command: Context3DCommand<'_>) {
@@ -906,23 +922,12 @@ impl Context3D for WgpuContext3D {
                     .update_vertex_buffer_at(index as usize);
             }
 
-            Context3DCommand::UploadShaders {
-                module,
-                vertex_shader_agal,
-                fragment_shader_agal,
-            } => {
-                *module.borrow_mut() = Some(Rc::new(ShaderPairAgal::new(
-                    vertex_shader_agal,
-                    fragment_shader_agal,
-                )));
-            }
-
             Context3DCommand::SetShaders { module } => {
                 let shaders = module.map(|shader| Rc::<dyn Any>::downcast(shader).unwrap());
 
                 self.current_pipeline.set_shaders(shaders)
             }
-            Context3DCommand::SetProgramConstantsFromVector {
+            Context3DCommand::SetProgramConstants {
                 program_type,
                 first_register,
                 matrix_raw_data_column_major,
@@ -943,19 +948,15 @@ impl Context3D for WgpuContext3D {
                     &mut self.buffer_command_encoder,
                     buffer,
                     offset,
-                    NonZeroU64::new(
-                        (matrix_raw_data_column_major.len() * std::mem::size_of::<f32>()) as u64,
-                    )
-                    .unwrap(),
+                    NonZeroU64::new(std::mem::size_of_val(matrix_raw_data_column_major) as u64)
+                        .unwrap(),
                     &self.descriptors.device,
                 );
                 // Despite what the docs claim, we copy in *column* major order, rather than *row* major order.
                 // See this code in OpenFL: https://github.com/openfl/openfl/blob/971a4c9e43b5472fd84d73920a2b7c1b3d8d9257/src/openfl/display3D/Context3D.hx#L1532-L1550
                 // When the 'transposedMatrix' flag is false, it copies data *directly* from matrix.rawData,
                 // which is stored in column-major order
-                buffer_view.copy_from_slice(bytemuck::cast_slice::<f32, u8>(
-                    &matrix_raw_data_column_major,
-                ));
+                buffer_view.copy_from_slice(matrix_raw_data_column_major.as_flattened());
             }
             Context3DCommand::SetCulling { face } => {
                 self.current_pipeline.set_culling(face);
@@ -1089,17 +1090,8 @@ impl Context3D for WgpuContext3D {
                 depth_mask,
                 pass_compare_mode,
             } => {
-                let function = match pass_compare_mode {
-                    Context3DCompareMode::Always => wgpu::CompareFunction::Always,
-                    Context3DCompareMode::Equal => wgpu::CompareFunction::Equal,
-                    Context3DCompareMode::Greater => wgpu::CompareFunction::Greater,
-                    Context3DCompareMode::GreaterEqual => wgpu::CompareFunction::GreaterEqual,
-                    Context3DCompareMode::Less => wgpu::CompareFunction::Less,
-                    Context3DCompareMode::LessEqual => wgpu::CompareFunction::LessEqual,
-                    Context3DCompareMode::Never => wgpu::CompareFunction::Never,
-                    Context3DCompareMode::NotEqual => wgpu::CompareFunction::NotEqual,
-                };
-                self.current_pipeline.update_depth(depth_mask, function);
+                self.current_pipeline
+                    .update_depth(depth_mask, pass_compare_mode.into_wgpu());
             }
             Context3DCommand::SetBlendFactors {
                 source_factor,
@@ -1174,6 +1166,32 @@ impl Context3D for WgpuContext3D {
             }
             Context3DCommand::SetScissorRectangle { rect } => {
                 self.scissor_rectangle = rect;
+            }
+            Context3DCommand::SetStencilActions {
+                triangle_face,
+                compare_mode,
+                on_both_pass,
+                on_depth_fail,
+                on_depth_pass_stencil_fail,
+            } => {
+                self.current_pipeline.update_stencil_actions(
+                    triangle_face,
+                    compare_mode,
+                    on_both_pass,
+                    on_depth_fail,
+                    on_depth_pass_stencil_fail,
+                );
+            }
+            Context3DCommand::SetStencilReferenceValue {
+                reference_value,
+                read_mask,
+                write_mask,
+            } => {
+                self.current_pipeline.update_stencil_reference_value(
+                    reference_value,
+                    read_mask,
+                    write_mask,
+                );
             }
         }
     }

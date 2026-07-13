@@ -12,7 +12,7 @@ use crate::context::{RenderContext, UpdateContext};
 use crate::display_object::avm1_button::{ButtonState, ButtonTracking};
 use crate::display_object::container::{dispatch_added_event, dispatch_removed_event};
 use crate::display_object::interactive::{InteractiveObjectBase, TInteractiveObject};
-use crate::display_object::{DisplayObjectBase, MovieClip};
+use crate::display_object::{BoundsMode, DisplayObjectBase, MovieClip};
 use crate::events::{ClipEvent, ClipEventResult};
 use crate::frame_lifecycle::{
     broadcast_frame_constructed, broadcast_frame_exited, catchup_display_object_to_frame,
@@ -371,12 +371,10 @@ impl<'gc> Avm2Button<'gc> {
             }
         }
 
-        if is_cur_state {
-            if let Some(child) = child {
-                child.run_frame_scripts(context);
-                // FIXME is this correct?
-                broadcast_frame_exited(context);
-            }
+        if is_cur_state && let Some(child) = child {
+            child.run_frame_scripts(context);
+            // FIXME is this correct?
+            broadcast_frame_exited(context);
         }
     }
 
@@ -572,16 +570,17 @@ impl<'gc> TDisplayObject<'gc> for Avm2Button<'gc> {
         let current_state = self.get_state_child(self.0.state.get().into());
 
         if let Some(state) = current_state {
+            state.pre_render(context);
             state.render(context);
         }
     }
 
-    fn self_bounds(self) -> Rectangle<Twips> {
+    fn self_bounds(self, _mode: BoundsMode) -> Rectangle<Twips> {
         // No inherent bounds; contains child DisplayObjects.
         Default::default()
     }
 
-    fn bounds_with_transform(self, matrix: &Matrix) -> Rectangle<Twips> {
+    fn bounds_with_transform(self, matrix: &Matrix, mode: BoundsMode) -> Rectangle<Twips> {
         // A scroll rect completely overrides an object's bounds,
         // and can even grow the bounding box to be larger than the actual content
         if let Some(scroll_rect) = self.scroll_rect() {
@@ -595,12 +594,12 @@ impl<'gc> TDisplayObject<'gc> for Avm2Button<'gc> {
         }
 
         // Get self bounds
-        let mut bounds = *matrix * self.self_bounds();
+        let mut bounds = *matrix * self.self_bounds(mode);
 
         // Add the bounds of the child, dictated by current state
         if let Some(child) = self.get_state_child(self.0.state.get().into()) {
             let matrix = *matrix * child.base().matrix();
-            let child_bounds = child.bounds_with_transform(&matrix);
+            let child_bounds = child.bounds_with_transform(&matrix, mode);
             bounds = bounds.union(&child_bounds);
         }
 
@@ -613,7 +612,7 @@ impl<'gc> TDisplayObject<'gc> for Avm2Button<'gc> {
         include_own_filters: bool,
         view_matrix: &Matrix,
     ) -> Rectangle<Twips> {
-        let mut bounds = *matrix * self.self_bounds();
+        let mut bounds = *matrix * self.self_bounds(BoundsMode::Engine);
 
         if let Some(child) = self.get_state_child(self.0.state.get().into()) {
             let matrix = *matrix * child.base().matrix();
@@ -636,23 +635,23 @@ impl<'gc> TDisplayObject<'gc> for Avm2Button<'gc> {
         point: Point<Twips>,
         options: HitTestOptions,
     ) -> bool {
-        if !options.contains(HitTestOptions::SKIP_INVISIBLE) || self.visible() {
-            if let Some(child) = self.get_state_child(self.0.state.get().into()) {
-                //TODO: the if below should probably always be taken, why does the hit area
-                // sometimes have a parent?
-                let mut point = point;
-                if child.parent().is_none() {
-                    // hit_area is not actually a child, so transform point into local space before passing it down.
-                    point = if let Some(point) = self.global_to_local(point) {
-                        point
-                    } else {
-                        return false;
-                    }
+        if (!options.contains(HitTestOptions::SKIP_INVISIBLE) || self.visible())
+            && let Some(child) = self.get_state_child(self.0.state.get().into())
+        {
+            //TODO: the if below should probably always be taken, why does the hit area
+            // sometimes have a parent?
+            let mut point = point;
+            if child.parent().is_none() {
+                // hit_area is not actually a child, so transform point into local space before passing it down.
+                point = if let Some(point) = self.global_to_local(point) {
+                    point
+                } else {
+                    return false;
                 }
+            }
 
-                if child.hit_test_shape(context, point, options) {
-                    return true;
-                }
+            if child.hit_test_shape(context, point, options) {
+                return true;
             }
         }
 
@@ -716,10 +715,10 @@ impl<'gc> TInteractiveObject<'gc> for Avm2Button<'gc> {
         if event.propagates() {
             let current_state = self.get_state_child(self.0.state.get().into());
 
-            if let Some(current_state) = current_state.and_then(|s| s.as_interactive()) {
-                if current_state.handle_clip_event(context, event) == ClipEventResult::Handled {
-                    return ClipEventResult::Handled;
-                }
+            if let Some(current_state) = current_state.and_then(|s| s.as_interactive())
+                && current_state.handle_clip_event(context, event) == ClipEventResult::Handled
+            {
+                return ClipEventResult::Handled;
             }
         }
 
@@ -812,7 +811,7 @@ impl<'gc> TInteractiveObject<'gc> for Avm2Button<'gc> {
     fn highlight_bounds(self) -> Rectangle<Twips> {
         let hit_area = self.0.hit_area.get();
         let hit_bounds = hit_area
-            .map(|hit| hit.bounds())
+            .map(|hit| hit.bounds(BoundsMode::Engine))
             .unwrap_or(Rectangle::INVALID);
         self.local_to_global_matrix() * hit_bounds
     }

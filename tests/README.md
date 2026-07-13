@@ -30,10 +30,25 @@ tick_rate = 16.666
 # Necessary for some timer tests.
 sleep_to_meet_frame_rate = false
 
+# If true, log AVM warnings.
+# Warnings are special AVM traces that can be produced by Flash Player (but
+# don't have to) and can provide insight into what AVM does.  This option can be
+# used to disable warnings in case the output does not contain them.
+log_warnings = true
+
 # If true, ignore this test.
 # Please comment why, ideally link to an issue, so we know what's up.
 # Prefer setting `known_failure = true` to ignoring the test.
 ignore = false
+
+# If specified, a cfg-like expression that checks if the test can run.
+# Useful for platform-specific tests.
+#
+# Available predicates:
+#  * os
+#  * arch
+#  * family
+filter = 'os = "windows"'
 
 # If true, this test is known to fail and the test runner will expect the check against
 # the trace output (specified `output_path`) to fail.
@@ -55,10 +70,13 @@ log_fetch = false
 
 # Sometimes floating point math doesn't exactly 100% match between Flash and Rust.
 # If you encounter this in a test, the following section will change the output
-# testing from "exact" to "approximate" (when it comes to floating point numbers, at least.)
+# testing from "exact" to "approximate" (when it comes to floating point numbers, at least).
 [approximations]
 
-# A list of regex patterns with capture groups to additionally treat as approximate numbers.
+# Should output lines solely consisting of a single number be subject to approximations?
+bare_numbers = false
+
+# A list of regex patterns with capture groups to treat as approximate numbers.
 number_patterns = []
 
 # The upper bound of any rounding errors.
@@ -134,13 +152,8 @@ tolerance = 0
 # Same as `image_comparisons.COMPARISON_NAME.max_outliers`, but for this particular check.
 max_outliers = 0
 
-# Filter is a cfg-like expression that checks if this particular check should be performed.
-# It can be used to add different checks for e.g. different platforms.
-#
-# Available predicates:
-#  * os
-#  * arch
-#  * family
+# Filter is a cfg-like expression (with the same format as the top-level `filter` key) that checks if this
+# particular check should be performed. It can be used to add different checks for e.g. different platforms.
 filter = 'arch = "aarch64"'
 
 # Which build features are required for this test to run.
@@ -151,6 +164,26 @@ lzma = false
 
 # If JPEG XR support is enabled in this build
 jpegxr = false
+
+# List of frame-based audio assertions.
+[audio_assertions.ASSERTION_NAME]
+
+# List of frames where the assertions should be performed.
+# Both `from` and `to` are inclusive.
+frames = [2, 3]
+# or
+frames = { from = 2, to = 4 }
+
+# The maximum allowed audio amplitude.
+max_amplitude = 0.5
+
+# The lowest acceptable maximum amplitude.
+# The max is calculated per frame.
+min_max_amplitude = 0.4
+
+# If true, this audio assertion is known to fail and the test runner will expect it to fail.
+# When the assertion passes in the future, it'll fail and alert that it now passes.
+known_failure = false
 
 # A single device font provided for this test.
 [fonts.FONT_NAME] # FONT_NAME is a name of this particular font
@@ -196,6 +229,82 @@ japanese_mincho = ["Test Font", "Test Font Fallback"]
 # Fields specified here will override the 'default' values provided in the rest of the document.
 [subtests.SUBTEST_NAME]
 # ...
+
+# To make tests easier to maintain, we encourage programmatic compilation of source files where possible.
+# This is currently limited to pure AVM1 code.
+# Multiple compiler steps can be included in a single test.
+[[compilers]]
+
+# Rascal can be used to compile AVM1 code.
+type = "Rascal"
+
+# The SWF to compile.
+target = "test.swf"
+
+# A list of AS scripts (not classes) to compile.
+scripts = ["test.as", "other.as"]
+
+# A list of class names (not paths) to compile.
+classes = ["foo.Bar", "SomeClass"]
+
+# A list of pcode files to compile.
+pcode = ["test.pcode"]
+
+# The SWF version to compile for (see https://github.com/ruffle-rs/ruffle/wiki/SWF-version-chart).
+# This is required!
+swf_version = 15
+
+# The frame rate to compile the swf with.
+frame_rate = 24
+
+# The display region of the stage, in pixels. You can usually get away with just specifying max, not min.
+stage_rect = { x_min = 0.0, y_min = 0.0, x_max = 550.0, y_max = 400.0 }
+
+# Whether the SWF is allowed to use the network.
+# If true, the SWF can access the network but not local files.
+# If false (default), the SWF can access local files but not the network.
+use_network = false
+
+# What optimization passes should run during code generation.
+# The default is to match Flash's compiler (all enabled), but this may not be desirable for some tests.
+optimizations = {
+  # Whether to evaluate constant expressions and fold in the results.
+  # For example, `1 + 2` will be folded to `3`.
+  fold_constants = true,
+
+  # Whether to promote variables to registers, enabling the `DefineFunction2` opcode.
+  promote_variables_to_registers = true,
+}
+
+[[compilers]]
+
+# asc can be used to compile AVM2 code.
+type = "Asc"
+
+# The SWF to compile.
+target = "test.swf"
+
+# The root class name to use.
+class = ""
+
+# A list of all source files to compile.
+scripts = ["test.as", "other.as"]
+
+# Same as in "Rascal".
+swf_version = 15
+
+# Translation of the display region of the stage, in pixels.
+stage_transform = { x = 0.0, y = 0.0 }
+
+# Same as in "Rascal".
+use_network = false
+
+# Whether to enable asc optimizations.
+optimize = true
+
+# Whether to include debug info in the bytecode.
+debug = false
+
 ```
 
 ## Multiple tests
@@ -206,6 +315,7 @@ each configuration will be ran as a separate test.
 
 For example, if `test.swf` has different output depending on the Flash Player version, the following
 `test.toml` could be used:
+
 ```toml
 num_ticks = 1
 # other common settings...

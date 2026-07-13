@@ -1,4 +1,4 @@
-use crate::custom_event::RuffleEvent;
+use crate::custom_event::{OpenType, RuffleEvent};
 use crate::gui::dialogs::Dialogs;
 use crate::gui::{DebugMessage, text};
 use crate::player::LaunchOptions;
@@ -7,10 +7,10 @@ use egui::{Button, Key, KeyboardShortcut, Modifiers, Widget};
 use ruffle_core::config::Letterbox;
 use ruffle_core::focus_tracker::DisplayObject;
 use ruffle_core::{Player, StageScaleMode};
+use ruffle_frontend_utils::content::ContentDescriptor;
 use ruffle_frontend_utils::recents::Recent;
 use ruffle_render::quality::StageQuality;
 use unic_langid::LanguageIdentifier;
-use url::Url;
 use winit::event_loop::EventLoopProxy;
 
 pub struct MenuBar {
@@ -19,7 +19,7 @@ pub struct MenuBar {
     preferences: GlobalPreferences,
 
     cached_recents: Option<Vec<Recent>>,
-    pub currently_opened: Option<(Url, LaunchOptions)>,
+    pub currently_opened: Option<(ContentDescriptor, LaunchOptions)>,
 }
 
 impl MenuBar {
@@ -48,7 +48,7 @@ impl MenuBar {
     }
 
     pub fn consume_shortcuts(
-        &mut self,
+        &self,
         egui_ctx: &egui::Context,
         dialogs: &mut Dialogs,
         mut player: Option<&mut Player>,
@@ -58,7 +58,7 @@ impl MenuBar {
             dialogs.open_file_advanced();
         }
         if egui_ctx.input_mut(|input| input.consume_shortcut(&Self::SHORTCUT_OPEN)) {
-            self.open_file();
+            self.browse_and_open(OpenType::File);
         }
         if egui_ctx.input_mut(|input| input.consume_shortcut(&Self::SHORTCUT_QUIT)) {
             self.request_exit();
@@ -106,9 +106,8 @@ impl MenuBar {
                     if Button::new(text(locale, "bookmarks-menu-add")).ui(ui).clicked() {
                         ui.close();
 
-                        let initial_url = self.currently_opened.as_ref().map(|(url, _)| url.clone());
-
-                        dialogs.open_add_bookmark(initial_url);
+                        let content_descriptor = self.currently_opened.as_ref().map(|(desc, _)| desc.clone());
+                        dialogs.open_add_bookmark(content_descriptor);
                     }
 
                     if Button::new(text(locale, "bookmarks-menu-manage")).ui(ui).clicked() {
@@ -122,7 +121,10 @@ impl MenuBar {
                             for bookmark in bookmarks.iter().filter(|x| !x.is_invalid()) {
                                 if Button::new(&bookmark.name).ui(ui).clicked() {
                                     ui.close();
-                                    let _ = self.event_loop.send_event(RuffleEvent::Open(bookmark.url.clone(), Box::new(self.default_launch_options.clone())));
+                                    let _ = self.event_loop.send_event(RuffleEvent::Open(
+                                        bookmark.content_descriptor.clone(),
+                                        Box::new(self.default_launch_options.clone()),
+                                    ));
                                 }
                             }
                         });
@@ -206,13 +208,21 @@ impl MenuBar {
         player_exists: bool,
     ) {
         ui.menu_button(text(locale, "file-menu"), |ui| {
-            if Button::new(text(locale, "file-menu-open-quick"))
+            if Button::new(text(locale, "file-menu-open-file"))
                 .shortcut_text(ui.ctx().format_shortcut(&Self::SHORTCUT_OPEN))
                 .ui(ui)
                 .clicked()
             {
                 ui.close();
-                self.open_file();
+                self.browse_and_open(OpenType::File);
+            }
+
+            if Button::new(text(locale, "file-menu-open-directory"))
+                .ui(ui)
+                .clicked()
+            {
+                ui.close();
+                self.browse_and_open(OpenType::Directory);
             }
 
             if Button::new(text(locale, "file-menu-open-advanced"))
@@ -223,6 +233,7 @@ impl MenuBar {
                 ui.close();
                 dialogs.open_file_advanced();
             }
+            ui.separator();
 
             if ui
                 .add_enabled(player_exists, Button::new(text(locale, "file-menu-reload")))
@@ -241,6 +252,9 @@ impl MenuBar {
 
             let recent_menu_response = ui
                 .menu_button(text(locale, "file-menu-recents"), |ui| {
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                    ui.set_min_width(250.0);
+
                     if self
                         .cached_recents
                         .as_ref()
@@ -255,7 +269,7 @@ impl MenuBar {
                             if ui.button(&recent.name).clicked() {
                                 ui.close();
                                 let _ = self.event_loop.send_event(RuffleEvent::Open(
-                                    recent.url.clone(),
+                                    recent.content_descriptor.clone(),
                                     Box::new(self.default_launch_options.clone()),
                                 ));
                             }
@@ -311,7 +325,7 @@ impl MenuBar {
     }
 
     fn view_menu(
-        &mut self,
+        &self,
         locale: &LanguageIdentifier,
         ui: &mut egui::Ui,
         player: &mut Option<&mut Player>,
@@ -319,7 +333,7 @@ impl MenuBar {
         ui.menu_button(text(locale, "view-menu"), |ui| {
             ui.add_enabled_ui(player.is_some(), |ui| {
                 ui.menu_button(text(locale, "scale-mode"), |ui| {
-                    let items = vec![
+                    let items = [
                         (
                             "scale-mode-noscale",
                             "scale-mode-noscale-tooltip",
@@ -403,7 +417,7 @@ impl MenuBar {
                 ui.separator();
 
                 ui.menu_button(text(locale, "quality"), |ui| {
-                    let items = vec![
+                    let items = [
                         ("quality-low", StageQuality::Low),
                         ("quality-medium", StageQuality::Medium),
                         ("quality-high", StageQuality::High),
@@ -433,7 +447,7 @@ impl MenuBar {
     }
 
     fn controls_menu(
-        &mut self,
+        &self,
         locale: &LanguageIdentifier,
         ui: &mut egui::Ui,
         dialogs: &mut Dialogs,
@@ -481,21 +495,20 @@ impl MenuBar {
         });
     }
 
-    fn open_file(&mut self) {
-        let _ = self
-            .event_loop
-            .send_event(RuffleEvent::BrowseAndOpen(Box::new(
-                self.default_launch_options.clone(),
-            )));
+    fn browse_and_open(&self, open_type: OpenType) {
+        let _ = self.event_loop.send_event(RuffleEvent::BrowseAndOpen(
+            Box::new(self.default_launch_options.clone()),
+            open_type,
+        ));
     }
 
-    fn close_movie(&mut self, ui: &mut egui::Ui) {
+    fn close_movie(&mut self, ui: &egui::Ui) {
         let _ = self.event_loop.send_event(RuffleEvent::CloseFile);
         self.currently_opened = None;
         ui.close();
     }
 
-    fn reload_movie(&mut self, ui: &mut egui::Ui) {
+    fn reload_movie(&mut self, ui: &egui::Ui) {
         let _ = self.event_loop.send_event(RuffleEvent::CloseFile);
         if let Some((movie_url, opts)) = self.currently_opened.take() {
             let _ = self
@@ -505,16 +518,16 @@ impl MenuBar {
         ui.close();
     }
 
-    fn request_exit(&mut self) {
+    fn request_exit(&self) {
         let _ = self.event_loop.send_event(RuffleEvent::ExitRequested);
     }
 
-    fn launch_website(&mut self, ui: &mut egui::Ui, url: &str) {
+    fn launch_website(&self, ui: &egui::Ui, url: &str) {
         let _ = webbrowser::open(url);
         ui.close();
     }
 
-    fn export_bundle(&mut self, ui: &mut egui::Ui) {
+    fn export_bundle(&self, ui: &egui::Ui) {
         let _ = self.event_loop.send_event(RuffleEvent::ExportBundle);
         ui.close();
     }

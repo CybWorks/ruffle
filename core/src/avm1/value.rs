@@ -1,12 +1,12 @@
+use crate::avm1::Object;
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::function::ExecutionReason;
 use crate::avm1::object::NativeObject;
-use crate::avm1::Object;
 use crate::display_object::TDisplayObject;
 use crate::ecma_conversions::{
-    f64_to_wrapping_i16, f64_to_wrapping_i32, f64_to_wrapping_u16, f64_to_wrapping_u32,
-    f64_to_wrapping_u8,
+    f64_to_wrapping_i16, f64_to_wrapping_i32, f64_to_wrapping_u8, f64_to_wrapping_u16,
+    f64_to_wrapping_u32,
 };
 use crate::string::{AvmAtom, AvmString, Integer, WStr};
 use gc_arena::Collect;
@@ -102,18 +102,6 @@ impl From<u32> for Value<'_> {
     }
 }
 
-impl From<u64> for Value<'_> {
-    fn from(value: u64) -> Self {
-        Value::Number(value as f64)
-    }
-}
-
-impl From<usize> for Value<'_> {
-    fn from(value: usize) -> Self {
-        Value::Number(value as f64)
-    }
-}
-
 impl PartialEq for Value<'_> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -131,6 +119,26 @@ impl PartialEq for Value<'_> {
 
 /// Value coercions and conversions.
 impl<'gc> Value<'gc> {
+    /// Do the best effort of converting the [`u64`] value to [`Value`].
+    ///
+    /// This is lossless for values less or equal to 2^53. For values greater
+    /// than that, it will return a value equivalent to the closest integer
+    /// representable as IEEE 754 64-bit.
+    #[inline(always)]
+    pub fn from_u64_lossy(value: u64) -> Self {
+        Value::Number(value as f64)
+    }
+
+    /// Do the best effort of converting the [`usize`] value to [`Value`].
+    ///
+    /// This is lossless on 32-bit architectures and for values less or equal to
+    /// 2^53. For values greater than that, it will return a value equivalent to
+    /// the closest integer representable as IEEE 754 64-bit.
+    #[inline(always)]
+    pub fn from_usize_lossy(value: usize) -> Self {
+        Value::Number(value as f64)
+    }
+
     /// Yields `true` if the given value is a primitive value.
     ///
     /// Note: Boxed primitive values are not considered primitive - it is
@@ -325,9 +333,9 @@ impl<'gc> Value<'gc> {
                         Value::String(s) => s,
                         _ => {
                             if object.as_function().is_some() {
-                                AvmString::new_ascii_static(activation.gc(), b"[type Function]")
+                                istr!("[type Function]")
                             } else {
-                                AvmString::new_ascii_static(activation.gc(), b"[type Object]")
+                                istr!("[type Object]")
                             }
                         }
                     }
@@ -447,6 +455,17 @@ impl<'gc> Value<'gc> {
             _ => None,
         }
     }
+
+    /// Converts a value to a SWF4-compatible variable.
+    ///
+    /// SWF4 variables do not support display objects.
+    pub fn as_swf4_variable(self) -> Self {
+        match self {
+            Value::MovieClip(_) => Value::Undefined,
+            Value::Object(obj) if obj.as_display_object().is_some() => Value::Undefined,
+            value => value,
+        }
+    }
 }
 
 /// Value operators.
@@ -484,11 +503,7 @@ impl<'gc> Value<'gc> {
         }
 
         let result = match (prim_self, prim_other) {
-            (Value::String(a), Value::String(b)) => {
-                let a = a.to_string();
-                let b = b.to_string();
-                a.bytes().lt(b.bytes()).into()
-            }
+            (Value::String(a), Value::String(b)) => (a.as_wstr() < b.as_wstr()).into(),
             (a, b) => {
                 // Coerce to number and compare, with any NaN resulting in undefined.
                 let a = a.primitive_as_number(activation);
@@ -564,12 +579,11 @@ impl<'gc> Value<'gc> {
     ) -> Result<bool, Error<'gc>> {
         if !self.is_primitive() {
             // These coercions happen even if `obj` is a dead `MovieClipReference`.
-            if let Some(class) = class.coerce_to_object(activation)? {
-                if let Some(p) = class.prototype(activation).coerce_to_object(activation)? {
-                    if let Some(obj) = self.as_object(activation) {
-                        return obj.is_instance_of(activation, p);
-                    }
-                }
+            if let Some(class) = class.coerce_to_object(activation)?
+                && let Some(p) = class.prototype(activation).coerce_to_object(activation)?
+                && let Some(obj) = self.as_object(activation)
+            {
+                return obj.is_instance_of(activation, p);
             }
         }
 
@@ -615,8 +629,7 @@ fn f64_to_string<'gc>(activation: &mut Activation<'_, 'gc>, mut n: f64) -> AvmSt
     } else if n == f64::INFINITY {
         istr!("Infinity")
     } else if n == f64::NEG_INFINITY {
-        // FIXME is there an easy way to use istr! here?
-        AvmString::new_utf8_bytes(activation.gc(), b"-Infinity")
+        istr!("-Infinity")
     } else if n == 0.0 {
         istr!("0")
     } else if n >= -2147483648.0 && n <= 2147483647.0 && n.fract() == 0.0 {
@@ -964,13 +977,13 @@ fn string_to_f64(mut s: &WStr, swf_version: u8) -> f64 {
 #[cfg(test)]
 #[expect(clippy::unreadable_literal)] // Large numeric literals in tests
 mod test {
+    use crate::avm1::Value;
     use crate::avm1::error::Error;
     use crate::avm1::function::FunctionObject;
     use crate::avm1::globals::create_globals;
     use crate::avm1::object::Object;
     use crate::avm1::property::Attribute;
     use crate::avm1::test_utils::with_avm;
-    use crate::avm1::Value;
     use crate::string::AvmString;
     use ruffle_macros::istr;
 

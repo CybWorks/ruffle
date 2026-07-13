@@ -1,7 +1,7 @@
-use crate::avm2::activation::Activation;
-use crate::avm2::parameters::ParametersExt;
 use crate::avm2::Error;
 use crate::avm2::Value;
+use crate::avm2::activation::Activation;
+use crate::avm2::parameters::ParametersExt;
 
 pub fn upload_from_byte_array<'gc>(
     activation: &mut Activation<'_, 'gc>,
@@ -57,9 +57,9 @@ pub fn upload_from_vector<'gc>(
 
         let data = vector
             .iter()
-            .map(|val| val.coerce_to_number(activation).map(|val| val as f32))
+            .map(|val| val.as_f64() as f32)
             .take(num_vertices as usize * vertex_buffer.data32_per_vertex() as usize)
-            .collect::<Result<Vec<f32>, _>>()?;
+            .collect::<Vec<_>>();
 
         let data_bytes = bytemuck::cast_slice::<f32, u8>(&data);
 

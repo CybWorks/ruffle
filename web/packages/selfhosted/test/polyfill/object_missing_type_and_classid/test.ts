@@ -12,6 +12,7 @@ describe("Object without type and classid attributes", () => {
 
     it("polyfills with ruffle", async () => {
         await injectRuffleAndWait(browser);
+        await browser.$("<ruffle-object />").waitForExist();
         const actual = await browser
             .$("#test-container")
             .getHTML({ includeSelectorTag: false, pierceShadowRoot: false });
@@ -25,7 +26,10 @@ describe("Object without type and classid attributes", () => {
     it("Plays a movie", async () => {
         await playAndMonitor(
             browser,
-            await browser.$("#test-container").$("<ruffle-object />"),
+            await browser
+                .$("#test-container")
+                .$("<ruffle-object />")
+                .getElement(),
         );
     });
 });

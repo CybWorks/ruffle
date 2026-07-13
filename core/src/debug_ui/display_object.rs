@@ -6,13 +6,13 @@ pub use search::DisplayObjectSearchWindow;
 use crate::avm2::object::TObject as _;
 use crate::bitmap::bitmap_data::DirtyState;
 use crate::context::UpdateContext;
+use crate::debug_ui::Message;
 use crate::debug_ui::handle::{AVM1ObjectHandle, AVM2ObjectHandle, DisplayObjectHandle};
 use crate::debug_ui::movie::open_movie_button;
-use crate::debug_ui::Message;
 use crate::display_object::{
-    AutoSizeMode, Avm2Button, Bitmap, ButtonState, DisplayObject, EditText, InteractiveObject,
-    LayoutDebugBoxesFlag, MovieClip, RenderMask, Stage, TDisplayObject, TDisplayObjectContainer,
-    TInteractiveObject,
+    AutoSizeMode, Avm2Button, Bitmap, BoundsMode, ButtonState, DisplayObject, EditText,
+    InteractiveObject, LayoutDebugBoxesFlag, MovieClip, RenderMask, Stage, TDisplayObject,
+    TDisplayObjectContainer, TInteractiveObject,
 };
 use crate::focus_tracker::Highlight;
 use crate::font::{FontDescriptor, FontLike};
@@ -167,14 +167,14 @@ impl DisplayObjectWindow {
                             display_object_type(object),
                         );
                     }
-                    if let Some(ctr) = object.as_container() {
-                        if !ctr.is_empty() {
-                            ui.selectable_value(
-                                &mut self.open_panel,
-                                Panel::Children,
-                                format!("Children ({})", ctr.num_children()),
-                            );
-                        }
+                    if let Some(ctr) = object.as_container()
+                        && !ctr.is_empty()
+                    {
+                        ui.selectable_value(
+                            &mut self.open_panel,
+                            Panel::Children,
+                            format!("Children ({})", ctr.num_children()),
+                        );
                     }
                 });
                 ui.separator();
@@ -326,6 +326,14 @@ impl DisplayObjectWindow {
         Grid::new(ui.id().with("edittext"))
             .num_columns(2)
             .show(ui, |ui| {
+                ui.label("Is FTE");
+                if object.is_fte() {
+                    ui.label("Yes");
+                } else {
+                    ui.label("No");
+                }
+                ui.end_row();
+
                 ui.label("Border");
                 ui.horizontal(|ui| {
                     let mut has_border = object.has_border();
@@ -561,7 +569,7 @@ impl DisplayObjectWindow {
                     if ui.button(format!("{:p}", style_sheet.as_ptr())).clicked() {
                         messages.push(Message::TrackAVM2Object(AVM2ObjectHandle::new(
                             context,
-                            crate::avm2::Object::StyleSheetObject(style_sheet),
+                            style_sheet.into(),
                         )));
                     }
                 } else {
@@ -766,9 +774,9 @@ impl DisplayObjectWindow {
                                             .text_style(egui::TextStyle::Monospace),
                                     );
                                     ui.label(format!("{ch}"));
-                                    if let Some(glyph_data) = font_set.get_glyph_render_data(ch) {
+                                    if let Some(resolution) = font_set.resolve_glyph(ch) {
                                         ui.label(format_font_descriptor(
-                                            glyph_data.font.descriptor(),
+                                            resolution.font.descriptor(),
                                         ));
                                     } else {
                                         ui.weak("None");
@@ -1510,13 +1518,9 @@ impl DisplayObjectWindow {
                         .library
                         .library_for_movie(object.movie())
                         .and_then(|l| {
-                            l.export_characters().iter().find_map(|(k, v)| {
-                                if *v == id {
-                                    Some(k)
-                                } else {
-                                    None
-                                }
-                            })
+                            l.export_characters()
+                                .iter()
+                                .find_map(|(k, v)| if *v == id { Some(k) } else { None })
                         })
                 {
                     ui.label(format!("{id} {name}"));
@@ -1542,7 +1546,7 @@ impl DisplayObjectWindow {
                 ui.end_row();
 
                 ui.label("Self Bounds");
-                bounds_label(ui, object.self_bounds(), &mut None);
+                bounds_label(ui, object.self_bounds(BoundsMode::Engine), &mut None);
                 ui.end_row();
 
                 ui.label("Scroll Rect");
@@ -1578,7 +1582,7 @@ impl DisplayObjectWindow {
                 let no_hover = &mut None;
                 bounds_label(
                     ui,
-                    object.bounds_with_transform(matrix),
+                    object.bounds_with_transform(matrix, BoundsMode::Engine),
                     if hoverable_bounds {
                         &mut self.hovered_bounds
                     } else {
@@ -1701,9 +1705,6 @@ fn summary_color_transform(ct: ColorTransform) -> Cow<'static, str> {
         if let Some(entry) = summary_color_transform_entry("C", ct.r_multiply, ct.r_add) {
             lines.push(entry);
         }
-        if let Some(entry) = summary_color_transform_entry("A", ct.a_multiply, ct.a_add) {
-            lines.push(entry);
-        }
     } else {
         if let Some(entry) = summary_color_transform_entry("R", ct.r_multiply, ct.r_add) {
             lines.push(entry);
@@ -1714,9 +1715,10 @@ fn summary_color_transform(ct: ColorTransform) -> Cow<'static, str> {
         if let Some(entry) = summary_color_transform_entry("B", ct.b_multiply, ct.b_add) {
             lines.push(entry);
         }
-        if let Some(entry) = summary_color_transform_entry("A", ct.a_multiply, ct.a_add) {
-            lines.push(entry);
-        }
+    }
+
+    if let Some(entry) = summary_color_transform_entry("A", ct.a_multiply, ct.a_add) {
+        lines.push(entry);
     }
 
     if lines.is_empty() {
@@ -1769,6 +1771,7 @@ fn display_object_type(object: DisplayObject) -> &'static str {
         DisplayObject::MorphShape(_) => "MorphShape",
         DisplayObject::MovieClip(_) => "MovieClip",
         DisplayObject::Text(_) => "Text",
+        DisplayObject::TextLine(_) => "TextLine",
         DisplayObject::Video(_) => "Video",
         DisplayObject::LoaderDisplay(_) => "LoaderDisplay",
     }

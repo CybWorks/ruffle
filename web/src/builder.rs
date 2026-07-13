@@ -360,7 +360,7 @@ impl RuffleInstanceBuilder {
 
     // TODO: This should be split into two methods that either load url or load data
     // Right now, that's done immediately afterwards in TS
-    pub async fn build(&self, parent: HtmlElement, js_player: JavascriptPlayer) -> Promise {
+    pub fn build(&self, parent: HtmlElement, js_player: JavascriptPlayer) -> Promise {
         let copy = self.clone();
         wasm_bindgen_futures::future_to_promise(async move {
             if RUFFLE_GLOBAL_PANIC.is_completed() {
@@ -480,7 +480,8 @@ impl RuffleInstanceBuilder {
         player.register_device_font(FontDefinition::FontFile {
             name,
             is_bold: face.is_bold(),
-            is_italic: face.is_italic(),
+            // Note: do not use is_italic() here, as we don't care about italic_angle
+            is_italic: face.style() != ttf_parser::Style::Normal,
             data: FontFileData::new(bytes),
             index,
         });
@@ -496,6 +497,7 @@ impl RuffleInstanceBuilder {
         Arc::new(tracing_subscriber::registry().with(layer))
     }
 
+    #[allow(clippy::unused_async)]
     pub async fn create_renderer(
         &self,
     ) -> Result<(Box<dyn RenderBackend>, HtmlCanvasElement), Box<dyn Error>> {
@@ -509,7 +511,7 @@ impl RuffleInstanceBuilder {
         )))]
         std::compile_error!("You must enable one of the render backend features (e.g., webgl).");
 
-        let _is_transparent = self.wmode.as_deref() == Some("transparent");
+        let is_transparent = self.wmode.as_deref() == Some("transparent");
 
         let mut renderer_list = vec!["wgpu-webgl", "webgpu", "webgl", "canvas"];
         if let Some(preferred_renderer) = &self.preferred_renderer {
@@ -591,7 +593,7 @@ impl RuffleInstanceBuilder {
                         .map_err(|_| "Expected HtmlCanvasElement")?;
                     match ruffle_render_webgl::WebGlRenderBackend::new(
                         &canvas,
-                        _is_transparent,
+                        is_transparent,
                         self.quality,
                     ) {
                         Ok(renderer) => {
@@ -610,10 +612,8 @@ impl RuffleInstanceBuilder {
                         .into_js_result()?
                         .dyn_into()
                         .map_err(|_| "Expected HtmlCanvasElement")?;
-                    match ruffle_render_canvas::WebCanvasRenderBackend::new(
-                        &canvas,
-                        _is_transparent,
-                    ) {
+                    match ruffle_render_canvas::WebCanvasRenderBackend::new(&canvas, is_transparent)
+                    {
                         Ok(renderer) => {
                             return Ok((Box::new(renderer), canvas));
                         }

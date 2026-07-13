@@ -1,5 +1,5 @@
 use crate::avm1::clamp::Clamp;
-use crate::avm1::property_decl::{DeclContext, StaticDeclarations, SystemClass};
+use crate::avm1::property_decl::{DeclContext, PropertyOrder, StaticDeclarations, SystemClass};
 use crate::avm1::{Activation, Error, NativeObject, Object, Value};
 use crate::locale::{get_current_date_time, get_timezone};
 use crate::string::AvmString;
@@ -10,11 +10,7 @@ use std::fmt;
 #[inline]
 fn rem_euclid_i32(lhs: f64, rhs: i32) -> i32 {
     let result = (lhs % f64::from(rhs)).clamp_to_i32();
-    if result < 0 {
-        result + rhs
-    } else {
-        result
-    }
+    if result < 0 { result + rhs } else { result }
 }
 
 /// Date and time, represented by milliseconds since epoch.
@@ -343,7 +339,12 @@ pub fn create_class<'gc>(
     context: &mut DeclContext<'_, 'gc>,
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
-    let class = context.native_class(table_constructor!(method), Some(function), super_proto);
+    let class = context.native_class(
+        table_constructor!(method),
+        Some(function),
+        super_proto,
+        PropertyOrder::PrototypeFirst,
+    );
     context.define_properties_on(class.proto, PROTO_DECLS(context));
     context.define_properties_on(class.constr, OBJECT_DECLS(context));
     class

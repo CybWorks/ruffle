@@ -8,7 +8,7 @@ use crate::avm2::object::VectorObject;
 use crate::avm2::parameters::ParametersExt;
 use crate::avm2::vector::VectorStorage;
 use crate::avm2::{Activation, Error, Object, TObject as _, Value};
-use crate::display_object::TDisplayObject;
+use crate::display_object::{BoundsMode, TDisplayObject};
 use crate::prelude::{DisplayObject, Matrix, Twips};
 use crate::{avm2_stub_getter, avm2_stub_method, avm2_stub_setter};
 use ruffle_render::matrix3d::Matrix3D;
@@ -42,12 +42,12 @@ pub fn set_color_transform<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let this = this.as_object().unwrap();
 
-    let ct = object_to_color_transform(
-        args.get_object(activation, 0, "colorTransform")?,
-        activation,
-    )?;
+    let ct = args.get_object(activation, 0, "colorTransform")?;
+    let ct = object_to_color_transform(ct);
+
     let dobj = get_display_object(this);
     dobj.set_color_transform(ct);
+    dobj.set_transformed_by_script(true);
     if let Some(parent) = dobj.parent() {
         parent.invalidate_cached_bitmap();
     }
@@ -70,7 +70,7 @@ pub fn get_matrix<'gc>(
 }
 
 pub fn set_matrix<'gc>(
-    activation: &mut Activation<'_, 'gc>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -82,8 +82,9 @@ pub fn set_matrix<'gc>(
         return Ok(Value::Undefined);
     };
 
-    let matrix = object_to_matrix(obj, activation)?;
+    let matrix = object_to_matrix(obj);
     dobj.set_matrix(matrix);
+    dobj.set_transformed_by_script(true);
     if let Some(parent) = dobj.parent() {
         // Self-transform changes are automatically handled,
         // we only want to inform ancestors to avoid unnecessary invalidations for tx/ty
@@ -151,36 +152,17 @@ pub fn color_transform_from_transform_object(transform_object: Object<'_>) -> Co
 
 // FIXME - handle clamping. We're throwing away precision here in converting to an integer:
 // is that what we should be doing?
-pub fn object_to_color_transform<'gc>(
-    object: Object<'gc>,
-    activation: &mut Activation<'_, 'gc>,
-) -> Result<ColorTransform, Error<'gc>> {
-    let red_multiplier = object
-        .get_slot(ct_slots::RED_MULTIPLIER)
-        .coerce_to_number(activation)?;
-    let green_multiplier = object
-        .get_slot(ct_slots::GREEN_MULTIPLIER)
-        .coerce_to_number(activation)?;
-    let blue_multiplier = object
-        .get_slot(ct_slots::BLUE_MULTIPLIER)
-        .coerce_to_number(activation)?;
-    let alpha_multiplier = object
-        .get_slot(ct_slots::ALPHA_MULTIPLIER)
-        .coerce_to_number(activation)?;
-    let red_offset = object
-        .get_slot(ct_slots::RED_OFFSET)
-        .coerce_to_number(activation)?;
-    let green_offset = object
-        .get_slot(ct_slots::GREEN_OFFSET)
-        .coerce_to_number(activation)?;
-    let blue_offset = object
-        .get_slot(ct_slots::BLUE_OFFSET)
-        .coerce_to_number(activation)?;
-    let alpha_offset = object
-        .get_slot(ct_slots::ALPHA_OFFSET)
-        .coerce_to_number(activation)?;
+pub fn object_to_color_transform<'gc>(object: Object<'gc>) -> ColorTransform {
+    let red_multiplier = object.get_slot(ct_slots::RED_MULTIPLIER).as_f64();
+    let green_multiplier = object.get_slot(ct_slots::GREEN_MULTIPLIER).as_f64();
+    let blue_multiplier = object.get_slot(ct_slots::BLUE_MULTIPLIER).as_f64();
+    let alpha_multiplier = object.get_slot(ct_slots::ALPHA_MULTIPLIER).as_f64();
+    let red_offset = object.get_slot(ct_slots::RED_OFFSET).as_f64();
+    let green_offset = object.get_slot(ct_slots::GREEN_OFFSET).as_f64();
+    let blue_offset = object.get_slot(ct_slots::BLUE_OFFSET).as_f64();
+    let alpha_offset = object.get_slot(ct_slots::ALPHA_OFFSET).as_f64();
 
-    Ok(ColorTransform {
+    ColorTransform {
         r_multiply: Fixed8::from_f64(red_multiplier),
         g_multiply: Fixed8::from_f64(green_multiplier),
         b_multiply: Fixed8::from_f64(blue_multiplier),
@@ -189,7 +171,7 @@ pub fn object_to_color_transform<'gc>(
         g_add: green_offset as i16,
         b_add: blue_offset as i16,
         a_add: alpha_offset as i16,
-    })
+    }
 }
 
 pub fn color_transform_to_object<'gc>(
@@ -295,34 +277,15 @@ pub fn matrix_to_object<'gc>(
     Ok(object)
 }
 
-pub fn object_to_matrix<'gc>(
-    object: Object<'gc>,
-    activation: &mut Activation<'_, 'gc>,
-) -> Result<Matrix, Error<'gc>> {
-    let a = object
-        .get_slot(matrix_slots::A)
-        .coerce_to_number(activation)? as f32;
-    let b = object
-        .get_slot(matrix_slots::B)
-        .coerce_to_number(activation)? as f32;
-    let c = object
-        .get_slot(matrix_slots::C)
-        .coerce_to_number(activation)? as f32;
-    let d = object
-        .get_slot(matrix_slots::D)
-        .coerce_to_number(activation)? as f32;
-    let tx = Twips::from_pixels(
-        object
-            .get_slot(matrix_slots::TX)
-            .coerce_to_number(activation)?,
-    );
-    let ty = Twips::from_pixels(
-        object
-            .get_slot(matrix_slots::TY)
-            .coerce_to_number(activation)?,
-    );
+pub fn object_to_matrix<'gc>(object: Object<'gc>) -> Matrix {
+    let a = object.get_slot(matrix_slots::A).as_f64() as f32;
+    let b = object.get_slot(matrix_slots::B).as_f64() as f32;
+    let c = object.get_slot(matrix_slots::C).as_f64() as f32;
+    let d = object.get_slot(matrix_slots::D).as_f64() as f32;
+    let tx = Twips::from_pixels(object.get_slot(matrix_slots::TX).as_f64());
+    let ty = Twips::from_pixels(object.get_slot(matrix_slots::TY).as_f64());
 
-    Ok(Matrix { a, b, c, d, tx, ty })
+    Matrix { a, b, c, d, tx, ty }
 }
 
 pub fn get_pixel_bounds<'gc>(
@@ -333,7 +296,7 @@ pub fn get_pixel_bounds<'gc>(
     let this = this.as_object().unwrap();
 
     let display_object = get_display_object(this);
-    rectangle_to_object(display_object.pixel_bounds(), activation)
+    rectangle_to_object(display_object.pixel_bounds(BoundsMode::Script), activation)
 }
 
 fn rectangle_to_object<'gc>(

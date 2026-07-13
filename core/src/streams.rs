@@ -3,7 +3,6 @@
 use crate::avm1::{
     Activation as Avm1Activation, ActivationIdentifier as Avm1ActivationIdentifier,
     ExecutionReason as Avm1ExecutionReason, FlvValueAvm1Ext, Object as Avm1Object,
-    Value as Avm1Value,
 };
 use crate::avm2::object::NetStreamObject;
 use crate::avm2::{
@@ -28,10 +27,11 @@ use flv_rs::{
 use gc_arena::barrier::unlock;
 use gc_arena::{Collect, DynamicRoot, Gc, Lock, Mutation, Rootable};
 use ruffle_common::buffer::{Buffer, Slice, Substream, SubstreamError};
+use ruffle_common::duration::FloatDuration;
 use ruffle_macros::istr;
 use ruffle_render::bitmap::BitmapInfo;
-use ruffle_video::frame::EncodedFrame;
 use ruffle_video::VideoStreamHandle;
+use ruffle_video::frame::EncodedFrame;
 use std::cell::{Cell, RefCell};
 use std::cmp::max;
 use std::io::{Seek, SeekFrom};
@@ -127,7 +127,7 @@ impl<'gc> StreamManager<'gc> {
     /// support video framerates separate from the Stage frame rate.
     ///
     /// This does not borrow `&mut self` as we need the `UpdateContext`, too.
-    pub fn tick(context: &mut UpdateContext<'gc>, dt: f64) {
+    pub fn tick(context: &mut UpdateContext<'gc>, dt: FloatDuration) {
         let streams = context.stream_manager.active_streams.clone();
         for stream in streams {
             stream.tick(context, dt)
@@ -354,7 +354,7 @@ impl<'gc> NetStream<'gc> {
     ///
     /// Externally visible AVM state must not be reinitialized here - i.e. the
     /// AS3 `client` doesn't go away because you played a new video file.
-    pub fn reset_buffer(self, context: &mut UpdateContext<'gc>) {
+    fn reset_buffer(self, context: &mut UpdateContext<'gc>) {
         if let Some(instance) = self.source().sound_instance.get() {
             // We stop the sound twice because sounds may have either been
             // played through the audio manager or through the backend directly
@@ -601,6 +601,8 @@ impl<'gc> NetStream<'gc> {
             };
             self.0.url.replace(Some(request.url().to_string()));
             self.source().preload_offset.set(0);
+            self.reset_buffer(context);
+
             let future = crate::loader::load_netstream(context, self, request);
 
             context.navigator.spawn_future(future);
@@ -688,6 +690,8 @@ impl<'gc> NetStream<'gc> {
         slice: &Slice,
         audio_data: FlvAudioData<'_>,
     ) -> Result<(), NetstreamError> {
+        let is_aac_sequence_header =
+            matches!(audio_data.data, FlvAudioDataType::AacSequenceHeader(_));
         let data = match audio_data.data {
             FlvAudioDataType::Raw(data)
             | FlvAudioDataType::AacSequenceHeader(data)
@@ -695,25 +699,8 @@ impl<'gc> NetStream<'gc> {
         };
         let source = self.source();
         let audio_stream = &mut *source.audio_stream.borrow_mut();
-        let substream = match audio_stream {
-            Some((substream, _sound_stream_info)) => {
-                if substream
-                    .last_chunk()
-                    .map(|lc| lc.end() > data.start())
-                    .unwrap_or(false)
-                {
-                    // Reject repeats of existing tags.
-                    // We need to do this because of lookahead - we will
-                    // encounter the same audio tag multiple times as we buffer
-                    // a few ahead for the audio backend.
-                    // This assumes that tags are processed in-order - which
-                    // should always be the case. Seeks should cancel the audio
-                    // stream before processing new tags.
-                    return Ok(());
-                }
-
-                substream
-            }
+        let (substream, sound_stream_info) = match audio_stream {
+            Some(audio_stream) => audio_stream,
             audio_stream => {
                 // None
                 let substream = Substream::new(slice.buffer().clone());
@@ -728,15 +715,17 @@ impl<'gc> NetStream<'gc> {
                         FlvSoundFormat::Nellymoser16kHz => AudioCompression::Nellymoser16Khz,
                         FlvSoundFormat::Nellymoser8kHz => AudioCompression::Nellymoser8Khz,
                         FlvSoundFormat::Nellymoser => AudioCompression::Nellymoser,
-                        FlvSoundFormat::G711ALawPCM => return Err(NetstreamError::UnknownCodec),
-                        FlvSoundFormat::G711MuLawPCM => return Err(NetstreamError::UnknownCodec),
+                        FlvSoundFormat::G711ALawPCM => AudioCompression::G711ALawPCM,
+                        FlvSoundFormat::G711MuLawPCM => AudioCompression::G711MuLawPCM,
                         FlvSoundFormat::Aac => AudioCompression::Aac,
                         FlvSoundFormat::Speex => AudioCompression::Speex,
                         FlvSoundFormat::MP38kHz => AudioCompression::Mp3,
                         FlvSoundFormat::DeviceSpecific => return Err(NetstreamError::UnknownCodec),
                     },
                     sample_rate: match (audio_data.format, audio_data.rate) {
-                        (FlvSoundFormat::MP38kHz, _) => 8_000,
+                        (FlvSoundFormat::G711ALawPCM, _)
+                        | (FlvSoundFormat::G711MuLawPCM, _)
+                        | (FlvSoundFormat::MP38kHz, _) => 8_000,
                         (_, FlvSoundRate::R5_500) => 5_500,
                         (_, FlvSoundRate::R11_000) => 11_000,
                         (_, FlvSoundRate::R22_000) => 22_000,
@@ -757,13 +746,42 @@ impl<'gc> NetStream<'gc> {
                     stream_format: swf_format,
                     num_samples_per_block: 0,
                     latency_seek: 0,
+                    extra_data: None,
                 };
 
-                *audio_stream = Some((substream, sound_stream_head));
-
-                &mut audio_stream.as_mut().unwrap().0
+                audio_stream.insert((substream, sound_stream_head))
             }
         };
+
+        // An AAC sequence header carries the decoder configuration
+        // (`AudioSpecificConfig`), not playable audio. We demux it out-of-band
+        // into the stream info instead of appending it to the audio substream,
+        // so the decoder only ever sees raw AAC access units and never has to
+        // deal with FLV's packet framing.
+        //
+        // The decoder reads this config once, when it's constructed. A re-sent
+        // header just refreshes the field (a no-op for the identical configs FLV
+        // actually uses); a genuine mid-stream config *change* is not supported,
+        // but doesn't occur in practice.
+        if is_aac_sequence_header {
+            sound_stream_info.extra_data = Some((*data.data()).into());
+            return Ok(());
+        }
+
+        if substream
+            .last_chunk()
+            .map(|lc| lc.end() > data.start())
+            .unwrap_or(false)
+        {
+            // Reject repeats of existing tags.
+            // We need to do this because of lookahead - we will
+            // encounter the same audio tag multiple times as we buffer
+            // a few ahead for the audio backend.
+            // This assumes that tags are processed in-order - which
+            // should always be the case. Seeks should cancel the audio
+            // stream before processing new tags.
+            return Ok(());
+        }
 
         Ok(substream.append(data)?)
     }
@@ -803,22 +821,22 @@ impl<'gc> NetStream<'gc> {
     /// avoid audio underruns.
     fn commit_sound_stream(self, context: &mut UpdateContext<'gc>) -> Result<(), NetstreamError> {
         let source = self.source();
-        if !Self::sound_currently_playing(context, source.sound_instance.get()) {
-            if let Some((substream, sound_stream_head)) = &mut *source.audio_stream.borrow_mut() {
-                let sound_instance = if let Some(mc) = self.0.attached_to.get() {
-                    context.audio_manager.start_substream(
-                        context.audio,
-                        substream.clone(),
-                        mc,
-                        sound_stream_head,
-                    )?
-                } else {
-                    context
-                        .audio
-                        .start_substream(substream.clone(), sound_stream_head)?
-                };
-                source.sound_instance.set(Some(sound_instance));
-            }
+        if !Self::sound_currently_playing(context, source.sound_instance.get())
+            && let Some((substream, sound_stream_head)) = &mut *source.audio_stream.borrow_mut()
+        {
+            let sound_instance = if let Some(mc) = self.0.attached_to.get() {
+                context.audio_manager.start_substream(
+                    context.audio,
+                    substream.clone(),
+                    mc,
+                    sound_stream_head,
+                )?
+            } else {
+                context
+                    .audio
+                    .start_substream(substream.clone(), sound_stream_head)?
+            };
+            source.sound_instance.set(Some(sound_instance));
         }
 
         Ok(())
@@ -920,11 +938,11 @@ impl<'gc> NetStream<'gc> {
         let buffer = slice.data();
 
         match (video_handle, codec, video_data.data) {
-            (maybe_video_handle, Some(codec), FlvVideoPacket::Data(mut data))
-            | (
+            (
                 maybe_video_handle,
                 Some(codec),
-                FlvVideoPacket::Vp6Data {
+                FlvVideoPacket::Data(mut data)
+                | FlvVideoPacket::Vp6Data {
                     hadjust: _,
                     vadjust: _,
                     mut data,
@@ -1073,9 +1091,7 @@ impl<'gc> NetStream<'gc> {
         }
 
         match &mut *source.stream_type.borrow_mut() {
-            Some(NetStreamType::Flv {
-                ref mut frame_id, ..
-            }) => *frame_id += 1,
+            Some(NetStreamType::Flv { frame_id, .. }) => *frame_id += 1,
             _ => unreachable!(),
         };
     }
@@ -1133,44 +1149,43 @@ impl<'gc> NetStream<'gc> {
             // Any errors while trying to lookup or call AVM2 properties are silently swallowed.
         }
 
-        if tag_needs_preloading {
-            if let (
+        if tag_needs_preloading
+            && let (
                 Some(width),
                 Some(height),
                 Some(video_codec_id),
                 Some(frame_rate),
                 Some(duration),
             ) = (width, height, video_codec_id, frame_rate, duration)
-            {
-                let num_frames = frame_rate * duration;
-                if let Some(video_codec) = VideoCodec::from_u8(video_codec_id as u8) {
-                    match context.video.register_video_stream(
-                        num_frames as u32,
-                        (width as u16, height as u16),
-                        video_codec,
-                        VideoDeblocking::UseVideoPacketValue,
-                    ) {
-                        Ok(stream_handle) => match &mut *source.stream_type.borrow_mut() {
-                            Some(NetStreamType::Flv { video_stream, .. }) => {
-                                *video_stream = Some(stream_handle)
-                            }
-                            _ => unreachable!(),
-                        },
-                        Err(e) => {
-                            tracing::error!("Got error when registering FLV video stream: {}", e)
+        {
+            let num_frames = frame_rate * duration;
+            if let Some(video_codec) = VideoCodec::from_u8(video_codec_id as u8) {
+                match context.video.register_video_stream(
+                    num_frames as u32,
+                    (width as u16, height as u16),
+                    video_codec,
+                    VideoDeblocking::UseVideoPacketValue,
+                ) {
+                    Ok(stream_handle) => match &mut *source.stream_type.borrow_mut() {
+                        Some(NetStreamType::Flv { video_stream, .. }) => {
+                            *video_stream = Some(stream_handle)
                         }
+                        _ => unreachable!(),
+                    },
+                    Err(e) => {
+                        tracing::error!("Got error when registering FLV video stream: {}", e)
                     }
-                } else {
-                    tracing::error!("FLV video stream has invalid codec ID {}", video_codec_id);
                 }
+            } else {
+                tracing::error!("FLV video stream has invalid codec ID {}", video_codec_id);
             }
         }
     }
 
     /// Process stream data.
     ///
-    /// `dt` is in milliseconds.
-    pub fn tick(self, context: &mut UpdateContext<'gc>, dt: f64) {
+    /// `dt` is the elapsed time since the last tick.
+    pub fn tick(self, context: &mut UpdateContext<'gc>, dt: FloatDuration) {
         let source = self.source();
         let seek_offset = source.queued_seek_time.take();
         if let Some(offset) = seek_offset {
@@ -1192,7 +1207,7 @@ impl<'gc> NetStream<'gc> {
         let slice = source.buffer.borrow().to_full_slice();
         let buffer = slice.data();
 
-        let max_time = source.stream_time.get() + dt;
+        let max_time = source.stream_time.get() + dt.as_millis();
         let mut buffer_underrun = false;
         let mut error = false;
         let mut max_lookahead_audio_tags = 5;
@@ -1290,13 +1305,16 @@ impl<'gc> NetStream<'gc> {
                 );
             }
 
-            self.trigger_status_event(
-                context,
-                [("code", "NetStream.Buffer.Empty"), ("level", "status")],
-            );
+            // Check if AVM code in the event handler invoked stream.play() and replaced the source.
+            if Gc::ptr_eq(source, self.source()) {
+                self.trigger_status_event(
+                    context,
+                    [("code", "NetStream.Buffer.Empty"), ("level", "status")],
+                );
 
-            if is_end_of_video {
-                self.pause(context, false);
+                if is_end_of_video {
+                    self.pause(context, false);
+                }
             }
         }
 
@@ -1333,7 +1351,7 @@ impl<'gc> NetStream<'gc> {
                     let value = AvmString::new_utf8(activation.gc(), value);
 
                     info_object
-                        .set(key, Avm1Value::String(value), &mut activation)
+                        .set(key, value, &mut activation)
                         .expect("valid set");
                 }
 

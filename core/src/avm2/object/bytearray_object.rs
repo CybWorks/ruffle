@@ -1,10 +1,10 @@
+use crate::avm2::Error;
+use crate::avm2::Multiname;
 use crate::avm2::activation::Activation;
 use crate::avm2::bytearray::ByteArrayStorage;
 use crate::avm2::object::script_object::ScriptObjectData;
 use crate::avm2::object::{ArrayObject, ClassObject, Object, TObject};
 use crate::avm2::value::Value;
-use crate::avm2::Error;
-use crate::avm2::Multiname;
 use crate::character::Character;
 use crate::context::UpdateContext;
 use core::fmt;
@@ -128,12 +128,11 @@ impl<'gc> TObject<'gc> for ByteArrayObject<'gc> {
         name: &Multiname<'gc>,
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
-        if name.valid_dynamic_name() {
-            if let Some(name) = name.local_name() {
-                if let Some(index) = ArrayObject::as_array_index(&name) {
-                    return Ok(self.get_index_property(index).unwrap());
-                }
-            }
+        if name.valid_dynamic_name()
+            && let Some(name) = name.local_name()
+            && let Some(index) = ArrayObject::as_array_index(&name)
+        {
+            return Ok(self.get_index_property(index).unwrap());
         }
 
         self.base().get_property_local(name, activation)
@@ -166,41 +165,22 @@ impl<'gc> TObject<'gc> for ByteArrayObject<'gc> {
         value: Value<'gc>,
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<(), Error<'gc>> {
-        if name.valid_dynamic_name() {
-            if let Some(name) = name.local_name() {
-                if let Some(index) = ArrayObject::as_array_index(&name) {
-                    return self.set_element(activation, index, value);
-                }
-            }
+        if name.valid_dynamic_name()
+            && let Some(name) = name.local_name()
+            && let Some(index) = ArrayObject::as_array_index(&name)
+        {
+            return self.set_element(activation, index, value);
         }
 
         self.base().set_property_local(name, value, activation)
     }
 
-    fn init_property_local(
-        self,
-        name: &Multiname<'gc>,
-        value: Value<'gc>,
-        activation: &mut Activation<'_, 'gc>,
-    ) -> Result<(), Error<'gc>> {
-        if name.valid_dynamic_name() {
-            if let Some(name) = name.local_name() {
-                if let Some(index) = ArrayObject::as_array_index(&name) {
-                    return self.set_element(activation, index, value);
-                }
-            }
-        }
-
-        self.base().init_property_local(name, value, activation)
-    }
-
     fn has_own_property(self, name: &Multiname<'gc>) -> bool {
-        if name.valid_dynamic_name() {
-            if let Some(name) = name.local_name() {
-                if let Some(index) = ArrayObject::as_array_index(&name) {
-                    return self.0.storage.borrow().get(index).is_some();
-                }
-            }
+        if name.valid_dynamic_name()
+            && let Some(name) = name.local_name()
+            && let Some(index) = ArrayObject::as_array_index(&name)
+        {
+            return self.0.storage.borrow().get(index).is_some();
         }
 
         self.base().has_own_property(name)

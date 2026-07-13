@@ -5,9 +5,9 @@ use ruffle_macros::istr;
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::property::Attribute;
-use crate::avm1::property_decl::{DeclContext, StaticDeclarations, SystemClass};
+use crate::avm1::property_decl::{DeclContext, PropertyOrder, StaticDeclarations, SystemClass};
 use crate::avm1::{ArrayBuilder, NativeObject, Object, Value};
-use crate::string::{utils as string_utils, AvmString, WString};
+use crate::string::{AvmString, WString, utils as string_utils};
 
 const PROTO_DECLS: StaticDeclarations = declare_static_properties! {
     "valueOf" => method(to_string_value_of; DONT_ENUM | DONT_DELETE);
@@ -33,7 +33,12 @@ pub fn create_class<'gc>(
     context: &mut DeclContext<'_, 'gc>,
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
-    let class = context.native_class(constructor, Some(function), super_proto);
+    let class = context.native_class(
+        constructor,
+        Some(function),
+        super_proto,
+        PropertyOrder::PrototypeFirst,
+    );
     context.define_properties_on(class.proto, PROTO_DECLS(context));
     context.define_properties_on(class.constr, OBJECT_DECLS(context));
     class
@@ -58,7 +63,7 @@ pub fn constructor<'gc>(
     this.define_value(
         activation.gc(),
         istr!("length"),
-        value.len().into(),
+        Value::from_usize_lossy(value.len()),
         Attribute::DONT_ENUM | Attribute::DONT_DELETE,
     );
 
@@ -175,7 +180,9 @@ fn index_of<'gc>(
 
     this.slice(start_index..)
         .and_then(|s| s.find(&pattern))
-        .map(|i| Ok((i + start_index).into()))
+        .map(|i| i + start_index)
+        .map(Value::from_usize_lossy)
+        .map(Ok)
         .unwrap_or_else(|| Ok((-1).into())) // Out of range or not found
 }
 
@@ -201,7 +208,8 @@ fn last_index_of<'gc>(
     this.slice(..start_index)
         .unwrap_or(&this)
         .rfind(&pattern)
-        .map(|i| Ok(i.into()))
+        .map(Value::from_usize_lossy)
+        .map(Ok)
         .unwrap_or_else(|| Ok((-1).into())) // Not found
 }
 
@@ -265,12 +273,11 @@ fn split<'gc>(
                 )
                 .into())
         } else {
-            // TODO(moulins): make dependent AvmStrings instead of reallocating.
             Ok(ArrayBuilder::new(activation)
                 .with(
-                    this.split(&delimiter)
+                    this.split_dependent(activation.strings(), delimiter.as_wstr())
                         .take(limit)
-                        .map(|c| AvmString::new(activation.gc(), c).into()),
+                        .map(Value::from),
                 )
                 .into())
         }
@@ -388,11 +395,7 @@ fn to_upper_case<'gc>(
 /// Normalizes an  index parameter used in `String` functions such as `substring`.
 /// The returned index will be within the range of `[0, len]`.
 fn string_index(i: i32, len: usize) -> usize {
-    if i < 0 {
-        0
-    } else {
-        (i as usize).min(len)
-    }
+    if i < 0 { 0 } else { (i as usize).min(len) }
 }
 
 /// Normalizes an wrapping index parameter used in `String` functions such as `slice`.

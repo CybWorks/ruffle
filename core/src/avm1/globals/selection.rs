@@ -38,7 +38,7 @@ pub fn get_begin_index<'gc>(
         .get_as_edit_text()
         .and_then(EditText::selection)
     {
-        Ok(selection.start().into())
+        Ok(Value::from_usize_lossy(selection.start()))
     } else {
         Ok((-1).into())
     }
@@ -55,7 +55,7 @@ pub fn get_end_index<'gc>(
         .get_as_edit_text()
         .and_then(EditText::selection)
     {
-        Ok(selection.end().into())
+        Ok(Value::from_usize_lossy(selection.end()))
     } else {
         Ok((-1).into())
     }
@@ -72,7 +72,7 @@ pub fn get_caret_index<'gc>(
         .get_as_edit_text()
         .and_then(EditText::selection)
     {
-        Ok(selection.to().into())
+        Ok(Value::from_usize_lossy(selection.to()))
     } else {
         Ok((-1).into())
     }
@@ -138,11 +138,12 @@ pub fn set_focus<'gc>(
         Some(focus) => {
             let start_clip = activation.target_clip_or_root();
             let object = activation.resolve_target_display_object(start_clip, *focus, false)?;
-            if let Some(object) = object.and_then(|o| o.as_interactive()) {
-                if object.is_focusable(activation.context) {
-                    tracker.set(Some(object), activation.context);
-                    return Ok(true.into());
-                }
+            if let Some(object) = object
+                && let Some(object) = object.as_interactive()
+                && object.is_focusable(activation.context)
+            {
+                tracker.set(Some(object), activation.context);
+                return Ok(true.into());
             }
             Ok(false.into())
         }

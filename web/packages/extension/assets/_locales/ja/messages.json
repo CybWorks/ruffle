@@ -38,11 +38,26 @@
     "settings_player_version": {
         "message": "エミュレートするFlashプレーヤーのバージョン(1~32)"
     },
+    "settings_background_execution_mode": {
+        "message": "バックグラウンドで実行"
+    },
+    "settings_background_execution_mode_none": {
+        "message": "一時停止"
+    },
+    "settings_background_execution_mode_main_thread": {
+        "message": "メインスレッドで実行"
+    },
     "settings_preferred_renderer": {
         "message": "優先するレンダラー"
     },
     "settings_preferred_renderer_auto": {
         "message": "自動"
+    },
+    "settings_device_font_renderer": {
+        "message": "デバイスフォントのレンダラ"
+    },
+    "device_font_renderer_embedded": {
+        "message": "埋め込み"
     },
     "settings_advanced_options": {
         "message": "詳細設定"

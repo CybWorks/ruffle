@@ -69,8 +69,8 @@ pub fn to_exponential<'gc>(
     let string = match (number, digits) {
         (0.0, 0) => "1e-15".to_owned(),
         (0.0, _) => format!("0.{}e-16", "0".repeat(digits)),
-        (f64::INFINITY, _) => "Infinity".to_owned(),
-        (f64::NEG_INFINITY, _) => "-Infinity".to_owned(),
+        (f64::INFINITY, _) => return Ok(istr!("Infinity").into()),
+        (f64::NEG_INFINITY, _) => return Ok(istr!("-Infinity").into()),
         _ => format!("{number:.digits$e}")
             .replace('e', "e+")
             .replace("e+-", "e-")
@@ -157,7 +157,7 @@ pub fn print_with_radix<'gc>(
 
     if number.is_infinite() {
         if number < 0.0 {
-            return Ok(AvmString::new_ascii_static(activation.gc(), b"-Infinity"));
+            return Ok(istr!("-Infinity"));
         } else if number > 0.0 {
             return Ok(istr!("Infinity"));
         }

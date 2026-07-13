@@ -1,8 +1,8 @@
+use crate::avm2::Activation;
 use crate::avm2::bytearray::{ByteArrayError, Endian, ObjectEncoding};
-use crate::avm2::error::{make_error_2006, Error};
+use crate::avm2::error::{Error, Error2006Type, make_error_2006};
 use crate::avm2::object::script_object::ScriptObjectData;
 use crate::avm2::object::{ClassObject, Object, TObject};
-use crate::avm2::Activation;
 use crate::socket::SocketHandle;
 use gc_arena::GcWeak;
 use gc_arena::{Collect, Gc};
@@ -147,7 +147,7 @@ impl<'gc> SocketObject<'gc> {
             self.write_bytes(utf_string.as_bytes());
             Ok(())
         } else {
-            Err(make_error_2006(activation))
+            Err(make_error_2006(activation, Error2006Type::RangeError))
         }
     }
 }

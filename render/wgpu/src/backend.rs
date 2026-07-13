@@ -32,10 +32,35 @@ use ruffle_render::tessellator::ShapeTessellator;
 use std::any::Any;
 use std::borrow::Cow;
 use std::cell::Cell;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use swf::Color;
 use tracing::instrument;
 use wgpu::SubmissionIndex;
+
+/// Creates a wgpu instance with Ruffle's required configuration.
+///
+/// This disables indirect call validation because wgpu's validation runs a compute
+/// shader that uses `array<u32>`, which requires the `DYNAMIC_ARRAY_SIZE` feature.
+/// However, wgpu runs this shader without first checking if the device supports
+/// that feature, causing device creation to fail on GPUs that lack it.
+/// Since Ruffle doesn't use indirect draws, disabling this validation has no
+/// functional impact.
+///
+/// See <https://github.com/gfx-rs/wgpu/issues/8799>
+pub fn create_wgpu_instance(
+    backends: wgpu::Backends,
+    backend_options: wgpu::BackendOptions,
+) -> wgpu::Instance {
+    wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends,
+        flags: wgpu::InstanceFlags::default()
+            .difference(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL)
+            .with_env(),
+        backend_options,
+        ..Default::default()
+    })
+}
 
 pub struct WgpuRenderBackend<T: RenderTarget> {
     pub(crate) descriptors: Arc<Descriptors>,
@@ -64,9 +89,9 @@ impl WgpuRenderBackend<SwapChainTarget> {
         } else {
             wgpu::Backends::GL
         };
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        let instance = create_wgpu_instance(
             backends,
-            backend_options: wgpu::BackendOptions {
+            wgpu::BackendOptions {
                 gl: wgpu::GlBackendOptions {
                     // See <https://github.com/gfx-rs/wgpu/releases/tag/v25.0.0>
                     fence_behavior: wgpu::GlFenceBehavior::AutoFinish,
@@ -74,8 +99,7 @@ impl WgpuRenderBackend<SwapChainTarget> {
                 },
                 ..Default::default()
             },
-            ..Default::default()
-        });
+        );
         let surface = instance.create_surface(wgpu::SurfaceTarget::Canvas(canvas))?;
         let (adapter, device, queue) = request_adapter_and_device(
             backends,
@@ -105,10 +129,7 @@ impl WgpuRenderBackend<SwapChainTarget> {
                 format_list(&get_backend_names(backend), "and")
             );
         }
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: backend,
-            ..Default::default()
-        });
+        let instance = create_wgpu_instance(backend, wgpu::BackendOptions::default());
         let surface = unsafe { instance.create_surface_unsafe(window)? };
         let (adapter, device, queue) = futures::executor::block_on(request_adapter_and_device(
             backend,
@@ -150,10 +171,7 @@ impl WgpuRenderBackend<crate::target::TextureTarget> {
                 format_list(&get_backend_names(backend), "and")
             );
         }
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: backend,
-            ..Default::default()
-        });
+        let instance = create_wgpu_instance(backend, wgpu::BackendOptions::default());
         let (adapter, device, queue) = futures::executor::block_on(request_adapter_and_device(
             backend,
             &instance,
@@ -237,11 +255,12 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
         &mut self,
         shape: DistilledShape,
         bitmap_source: &dyn BitmapSource,
+        scale: f32,
     ) -> Mesh {
         let shape_id = shape.id;
-        let lyon_mesh = self
-            .shape_tessellator
-            .tessellate_shape(shape, bitmap_source);
+        let lyon_mesh =
+            self.shape_tessellator
+                .tessellate_shape_with_scale(shape, bitmap_source, scale);
 
         let mut draws = Vec::with_capacity(lyon_mesh.draws.len());
         let mut uniform_buffer = BufferBuilder::new_for_uniform(&self.descriptors.limits);
@@ -301,7 +320,7 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
         }
     }
 
-    fn clamp_bitmap(&mut self, bitmap: &mut Bitmap) -> bool {
+    fn clamp_bitmap(&self, bitmap: &mut Bitmap) -> bool {
         let max_size = self.descriptors.limits.max_texture_dimension_2d;
         if bitmap.width() > max_size || bitmap.height() > max_size {
             let image =
@@ -474,7 +493,18 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         shape: DistilledShape,
         bitmap_source: &dyn BitmapSource,
     ) -> ShapeHandle {
-        let mesh = self.register_shape_internal(shape, bitmap_source);
+        let mesh = self.register_shape_internal(shape, bitmap_source, 1.0);
+        ShapeHandle(Arc::new(mesh))
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    fn register_shape_with_scale(
+        &mut self,
+        shape: DistilledShape,
+        bitmap_source: &dyn BitmapSource,
+        scale: f32,
+    ) -> ShapeHandle {
+        let mesh = self.register_shape_internal(shape, bitmap_source, scale);
         ShapeHandle(Arc::new(mesh))
     }
 
@@ -501,7 +531,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
 
         for entry in cache_entries {
             let texture = as_texture(&entry.handle);
-            let mut surface = Surface::new(
+            let surface = Surface::new(
                 &self.descriptors,
                 self.surface.quality(),
                 texture.texture.width(),
@@ -564,7 +594,6 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                 }
                 run_copy_pipeline(
                     &self.descriptors,
-                    target.color_texture().format(),
                     texture.texture.format(),
                     &texture.texture.create_view(&Default::default()),
                     target.color_view(),
@@ -574,6 +603,10 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                     &mut self.active_frame.command_encoder,
                 );
             }
+            // Periodically flush GPU work to prevent OOM when many cache entries
+            // accumulate (e.g. when a large container's cacheAsBitmap is skipped
+            // but its hundreds of children each have their own bitmap caches).
+            self.active_frame.maybe_flush(&self.descriptors);
         }
 
         self.surface.draw_commands_and_copy_to(
@@ -663,6 +696,12 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         bitmap: Bitmap<'_>,
         mut region: PixelRegion,
     ) -> Result<(), BitmapError> {
+        if region.width() == 0 || region.height() == 0 {
+            // Nothing to do. It's important to bail out now, as the
+            // write_texture call panics when the source buffer is of zero size.
+            return Ok(());
+        }
+
         let texture = as_texture(handle);
 
         let mut bitmap = bitmap.to_rgba();
@@ -730,7 +769,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             .get_next_texture()
             .expect("TextureTargetFrame.get_next_texture is infallible");
 
-        let mut surface = Surface::new(
+        let surface = Surface::new(
             &self.descriptors,
             quality,
             texture.texture.width(),
@@ -777,7 +816,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         source_point: (u32, u32),
         source_size: (u32, u32),
         destination: BitmapHandle,
-        dest_point: (u32, u32),
+        dest_point: (i32, i32),
         filter: Filter,
     ) -> Option<Box<dyn SyncHandle>> {
         let source_texture = as_texture(&source);
@@ -811,26 +850,51 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             },
             filter,
         );
+
+        let (dest_x, dest_y) = dest_point;
+
+        let src_offset_x = dest_x.min(0).unsigned_abs();
+        let src_offset_y = dest_y.min(0).unsigned_abs();
+
+        let final_dest_x = dest_x.max(0) as u32;
+        let final_dest_y = dest_y.max(0) as u32;
+
+        let available_width = applied_filter.width().saturating_sub(src_offset_x);
+        let available_height = applied_filter.height().saturating_sub(src_offset_y);
+        let dest_available_width = dest_texture.texture.width().saturating_sub(final_dest_x);
+        let dest_available_height = dest_texture.texture.height().saturating_sub(final_dest_y);
+
+        let copy_width = available_width.min(dest_available_width);
+        let copy_height = available_height.min(dest_available_height);
+
+        if copy_width == 0 || copy_height == 0 {
+            return None;
+        }
+
         self.active_frame.command_encoder.copy_texture_to_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: applied_filter.color_texture(),
                 mip_level: 0,
-                origin: wgpu::Origin3d { x: 0, y: 0, z: 0 },
+                origin: wgpu::Origin3d {
+                    x: src_offset_x,
+                    y: src_offset_y,
+                    z: 0,
+                },
                 aspect: Default::default(),
             },
             wgpu::TexelCopyTextureInfo {
                 texture: &dest_texture.texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d {
-                    x: dest_point.0,
-                    y: dest_point.1,
+                    x: final_dest_x,
+                    y: final_dest_y,
                     z: 0,
                 },
                 aspect: Default::default(),
             },
             wgpu::Extent3d {
-                width: (applied_filter.width()).min(dest_texture.texture.width() - dest_point.0),
-                height: (applied_filter.height()).min(dest_texture.texture.height() - dest_point.1),
+                width: copy_width,
+                height: copy_height,
                 depth_or_array_layers: 1,
             },
         );
@@ -984,8 +1048,9 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                             for row in raw_pixels.chunks(buffer_width as usize) {
                                 let actual_row = &row[0..(width * std::mem::size_of::<[f32; 4]>())];
 
-                                for pixel in
-                                    actual_row.chunks_exact(std::mem::size_of::<[f32; 4]>())
+                                for pixel in actual_row
+                                    .as_chunks::<{ std::mem::size_of::<[f32; 4]>() }>()
+                                    .0
                                 {
                                     if has_padding {
                                         // Take the first three channels
@@ -1011,12 +1076,12 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
 
     fn create_empty_texture(
         &mut self,
-        width: u32,
-        height: u32,
+        width: NonZeroU32,
+        height: NonZeroU32,
     ) -> Result<BitmapHandle, BitmapError> {
-        if width == 0 || height == 0 {
-            return Err(BitmapError::InvalidSize);
-        }
+        let width = width.get();
+        let height = height.get();
+
         if width > self.descriptors.limits.max_texture_dimension_2d
             || height > self.descriptors.limits.max_texture_dimension_2d
         {

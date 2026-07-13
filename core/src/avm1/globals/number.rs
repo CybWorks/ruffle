@@ -6,7 +6,7 @@ use crate::avm1::activation::Activation;
 use crate::avm1::clamp::Clamp;
 use crate::avm1::error::Error;
 use crate::avm1::object::BoxedF64;
-use crate::avm1::property_decl::{DeclContext, StaticDeclarations, SystemClass};
+use crate::avm1::property_decl::{DeclContext, PropertyOrder, StaticDeclarations, SystemClass};
 use crate::avm1::{NativeObject, Object, Value};
 use crate::string::AvmString;
 
@@ -16,20 +16,25 @@ const PROTO_DECLS: StaticDeclarations = declare_static_properties! {
 };
 
 const OBJECT_DECLS: StaticDeclarations = declare_static_properties! {
-    "MAX_VALUE" => float(f64::MAX; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "MAX_VALUE" => value(f64::MAX; DONT_ENUM | DONT_DELETE | READ_ONLY);
     // Note this is actually the smallest positive denormalized f64.
     // Rust doesn't provide a constant for this (`MIN_POSITIVE` is a normal f64).
-    "MIN_VALUE" => float(5e-324; DONT_ENUM | DONT_DELETE | READ_ONLY);
-    "NaN" => float(f64::NAN; DONT_ENUM | DONT_DELETE | READ_ONLY);
-    "NEGATIVE_INFINITY" => float(f64::NEG_INFINITY; DONT_ENUM | DONT_DELETE | READ_ONLY);
-    "POSITIVE_INFINITY" => float(f64::INFINITY; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "MIN_VALUE" => value(5e-324; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "NaN" => value(f64::NAN; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "NEGATIVE_INFINITY" => value(f64::NEG_INFINITY; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "POSITIVE_INFINITY" => value(f64::INFINITY; DONT_ENUM | DONT_DELETE | READ_ONLY);
 };
 
 pub fn create_class<'gc>(
     context: &mut DeclContext<'_, 'gc>,
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
-    let class = context.native_class(constructor, Some(function), super_proto);
+    let class = context.native_class(
+        constructor,
+        Some(function),
+        super_proto,
+        PropertyOrder::PrototypeFirst,
+    );
     context.define_properties_on(class.proto, PROTO_DECLS(context));
     context.define_properties_on(class.constr, OBJECT_DECLS(context));
     class
@@ -85,11 +90,7 @@ fn to_string<'gc>(
         [] => 10,
         [radix, ..] => {
             let radix = radix.coerce_to_f64(activation)? as i32;
-            if (2..=36).contains(&radix) {
-                radix
-            } else {
-                10
-            }
+            if (2..=36).contains(&radix) { radix } else { 10 }
         }
     };
 

@@ -3,7 +3,7 @@
 use crate::avm1::{NativeObject as Avm1NativeObject, Object as Avm1Object};
 use crate::avm2::StageObject as Avm2StageObject;
 use crate::context::{RenderContext, UpdateContext};
-use crate::display_object::{Avm1TextFieldBinding, DisplayObjectBase, RenderOptions};
+use crate::display_object::{Avm1TextFieldBinding, BoundsMode, DisplayObjectBase, RenderOptions};
 use crate::prelude::*;
 use crate::streams::NetStream;
 use crate::tag_utils::{SwfMovie, SwfSlice};
@@ -16,9 +16,9 @@ use ruffle_common::utils::HasPrefixField;
 use ruffle_render::bitmap::{BitmapInfo, PixelSnapping};
 use ruffle_render::commands::CommandHandler;
 use ruffle_render::quality::StageQuality;
+use ruffle_video::VideoStreamHandle;
 use ruffle_video::error::Error;
 use ruffle_video::frame::EncodedFrame;
-use ruffle_video::VideoStreamHandle;
 use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -211,7 +211,7 @@ impl<'gc> Video<'gc> {
 
         match self.0.source.get() {
             VideoSource::Swf(swf_source) => {
-                let subslice = SwfSlice::from(movie).to_unbounded_subslice(tag.data);
+                let subslice = SwfSlice::from(movie).to_subslice(tag.data);
                 let mut frames = swf_source.frames.borrow_mut();
 
                 if frames.contains_key(&tag.frame_num.into()) {
@@ -467,7 +467,7 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
         }
     }
 
-    fn self_bounds(self) -> Rectangle<Twips> {
+    fn self_bounds(self, _mode: BoundsMode) -> Rectangle<Twips> {
         let (size_x, size_y) = self.0.size.get();
         Rectangle {
             x_min: Twips::ZERO,
@@ -477,8 +477,25 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
         }
     }
 
+    // FP-compat: clamp the width/height readback at `unscaled * 32768`
+    fn width(self) -> f64 {
+        let aabb = self.local_bounds(BoundsMode::Script).width().to_pixels();
+        let (size_x, _) = self.0.size.get();
+        aabb.min(size_x as f64 * 32768.0)
+    }
+
+    fn height(self) -> f64 {
+        let aabb = self.local_bounds(BoundsMode::Script).height().to_pixels();
+        let (_, size_y) = self.0.size.get();
+        aabb.min(size_y as f64 * 32768.0)
+    }
+
     fn render_with_options(self, context: &mut RenderContext<'_, 'gc>, options: RenderOptions) {
-        if !context.is_offscreen && !self.world_bounds().intersects(&context.stage.view_bounds()) {
+        if !context.is_offscreen
+            && !self
+                .world_bounds(BoundsMode::Engine)
+                .intersects(&context.stage.view_bounds())
+        {
             // Off-screen; culled
             return;
         }
@@ -489,7 +506,7 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
         }
 
         let mut transform = context.transform_stack.transform();
-        let bounds = self.self_bounds();
+        let bounds = self.self_bounds(BoundsMode::Engine);
 
         // TODO: smoothing flag should be a video property
         let (smoothed_flag, num_frames, version, decoded_frame, codec) = match self.0.source.get() {

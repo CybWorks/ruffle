@@ -3,10 +3,10 @@
 use std::borrow::Cow;
 use std::num::NonZero;
 
+use crate::avm2::Error;
 use crate::avm2::activation::Activation;
 use crate::avm2::function::FunctionArgs;
 use crate::avm2::object::FunctionObject;
-use crate::avm2::Error;
 use crate::avm2::{ArrayObject, ArrayStorage, Value};
 use crate::context::UpdateContext;
 use crate::string::WString;
@@ -187,15 +187,15 @@ impl<'gc> RegExp<'gc> {
                         }
                         let mut grp_index = d_u;
                         let mut second_char = None;
-                        if let Some(&Ok(next_char)) = chars.peek() {
-                            if let Some(d1) = next_char.to_digit(10) {
-                                let d1_u = usize::try_from(d1).unwrap_or(0);
-                                let two_digit_index = d_u * 10 + d1_u;
-                                if two_digit_index <= m.captures.len() && two_digit_index != 0 {
-                                    chars.next();
-                                    grp_index = two_digit_index;
-                                    second_char = Some(next_char);
-                                }
+                        if let Some(&Ok(next_char)) = chars.peek()
+                            && let Some(d1) = next_char.to_digit(10)
+                        {
+                            let d1_u = usize::try_from(d1).unwrap_or(0);
+                            let two_digit_index = d_u * 10 + d1_u;
+                            if two_digit_index <= m.captures.len() && two_digit_index != 0 {
+                                chars.next();
+                                grp_index = two_digit_index;
+                                second_char = Some(next_char);
                             }
                         }
                         if grp_index == 0 {
@@ -238,7 +238,7 @@ impl<'gc> RegExp<'gc> {
                     Some(r) => activation.strings().substring(txt, r.clone()).into(),
                     None => istr!("").into(),
                 })
-                .chain(std::iter::once(m.range.start.into()))
+                .chain(std::iter::once(m.range.start).map(Value::from_usize_lossy))
                 .chain(std::iter::once(txt.into()))
                 .collect::<Vec<_>>();
 
@@ -360,8 +360,9 @@ impl<'gc> RegExp<'gc> {
             for c in m.captures.iter().filter_map(Option::as_ref) {
                 storage.push(context.strings.substring(text, c.clone()).into());
                 if storage.length() >= limit {
-                    break; // Intentional bug to match Flash.
-                           // Causes adding parts past limit.
+                    // Intentional bug to match Flash.
+                    // Causes adding parts past limit.
+                    break;
                 }
             }
 

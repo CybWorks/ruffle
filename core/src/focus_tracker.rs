@@ -1,13 +1,13 @@
+use crate::Player;
 use crate::avm1::Avm1;
 use crate::avm1::Value;
 use crate::avm2::{Activation, Avm2, EventObject};
 use crate::context::{RenderContext, UpdateContext};
 pub use crate::display_object::{
-    DisplayObject, TDisplayObject, TDisplayObjectContainer, TextSelection,
+    BoundsMode, DisplayObject, TDisplayObject, TDisplayObjectContainer, TextSelection,
 };
 use crate::display_object::{EditText, InteractiveObject, TInteractiveObject};
 use crate::events::{ClipEvent, KeyCode};
-use crate::Player;
 use either::Either;
 use gc_arena::barrier::unlock;
 use gc_arena::lock::Lock;
@@ -159,10 +159,24 @@ impl<'gc> FocusTracker<'gc> {
         if let Some(obj) = new {
             // Flash has to access the object's bounds somewhere around here,
             // because TextField's lazy autosize bounds are flushed when it's focused.
-            obj.as_displayobject().world_bounds();
+            obj.as_displayobject().world_bounds(BoundsMode::Engine);
         }
 
         let old = self.0.focus.get();
+
+        fn handle_focus_change<'gc>(
+            int: Option<InteractiveObject<'gc>>,
+            focused: bool,
+            other: Option<InteractiveObject<'gc>>,
+            filter: fn(&DisplayObject<'gc>) -> bool,
+            context: &mut UpdateContext<'gc>,
+        ) {
+            if let Some(int) = int.filter(|int| filter(&int.as_displayobject())) {
+                int.set_has_focus(focused);
+                int.on_focus_changed(context, focused, other);
+                int.call_focus_handler(context, focused, other);
+            }
+        }
 
         // Check if the focused element changed.
         if !InteractiveObject::option_ptr_eq(old, new) {
@@ -172,18 +186,10 @@ impl<'gc> FocusTracker<'gc> {
             // The highlight always follows the focus.
             self.update_highlight(context);
 
-            if let Some(old) = old {
-                old.set_has_focus(false);
-                old.on_focus_changed(context, false, new);
-                old.call_focus_handler(context, false, new);
-            }
-            if let Some(new) = new {
-                new.set_has_focus(true);
-                new.on_focus_changed(context, true, old);
-                new.call_focus_handler(context, true, old);
-            }
-
-            tracing::info!("Focus is now on {:?}", new);
+            // AVM2's focus events shouldn't fire yet, as that only happens
+            // after all of AVM1's focus handlers have been fired.
+            handle_focus_change(old, false, new, |dobj| dobj.object1().is_some(), context);
+            handle_focus_change(new, true, old, |dobj| dobj.object1().is_some(), context);
 
             if let Some(level0) = context.stage.root_clip() {
                 Avm1::notify_system_listeners(
@@ -192,15 +198,21 @@ impl<'gc> FocusTracker<'gc> {
                     istr!(context, "onSetFocus"),
                     &[
                         old.map(|o| o.as_displayobject())
-                            .map(|v| v.object1_or_undef())
+                            .map(|v| v.object1_or_null())
                             .unwrap_or(Value::Null),
                         new.map(|o| o.as_displayobject())
-                            .map(|v| v.object1_or_undef())
+                            .map(|v| v.object1_or_null())
                             .unwrap_or(Value::Null),
                     ],
                     context,
                 );
             }
+
+            // Now we fire the AVM2 focus events.
+            handle_focus_change(old, false, new, |dobj| dobj.object2().is_some(), context);
+            handle_focus_change(new, true, old, |dobj| dobj.object2().is_some(), context);
+
+            tracing::info!("Focus is now on {:?}", new);
         }
 
         self.update_virtual_keyboard(context);
@@ -227,11 +239,11 @@ impl<'gc> FocusTracker<'gc> {
         // Note that this may suggest we should reorder operations on the text field:
         // first run this logic (and not care whether it's a mouse focus),
         // and then handle placing the caret.
-        if let Some(text_field) = self.get_as_edit_text() {
-            if !text_field.movie().is_action_script_3() {
-                let length = text_field.text_length();
-                text_field.set_selection(Some(TextSelection::for_range(0, length)));
-            }
+        if let Some(text_field) = self.get_as_edit_text()
+            && !text_field.movie().is_action_script_3()
+        {
+            let length = text_field.text_length();
+            text_field.set_selection(Some(TextSelection::for_range(0, length)));
         }
     }
 
@@ -247,8 +259,19 @@ impl<'gc> FocusTracker<'gc> {
     ) -> bool {
         let target = target
             .map(|int| int.as_displayobject())
-            .unwrap_or_else(|| context.stage.as_displayobject())
-            .object2();
+            .or_else(|| {
+                // The current focus as the stage is only used
+                // if the interactive object is AVM2.
+                if related_object
+                    .is_none_or(|ro| ro.as_displayobject().movie().is_action_script_3())
+                {
+                    Some(context.stage.as_displayobject())
+                } else {
+                    None
+                }
+            })
+            .and_then(|t| t.object2());
+
         let Some(target) = target else {
             return false;
         };
@@ -259,8 +282,7 @@ impl<'gc> FocusTracker<'gc> {
             EventObject::focus_event(&mut activation, event_type, true, related_object, key_code);
         Avm2::dispatch_event(activation.context, event, target.into());
 
-        let canceled = event.event().is_cancelled();
-        canceled
+        event.event().is_cancelled()
     }
 
     fn roll_over(context: &mut UpdateContext<'gc>, new: Option<InteractiveObject<'gc>>) {

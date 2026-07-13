@@ -12,6 +12,7 @@ describe("Object with another object tag", () => {
 
     it("polyfills only the first tag with ruffle", async () => {
         await injectRuffleAndWait(browser);
+        await browser.$("<ruffle-object />").waitForExist();
         const actual = await browser
             .$("#test-container")
             .getHTML({ includeSelectorTag: false, pierceShadowRoot: false });
@@ -25,7 +26,10 @@ describe("Object with another object tag", () => {
     it("Plays a movie", async () => {
         await playAndMonitor(
             browser,
-            await browser.$("#test-container").$("<ruffle-object />"),
+            await browser
+                .$("#test-container")
+                .$("<ruffle-object />")
+                .getElement(),
         );
     });
 });

@@ -3,6 +3,7 @@
 use crate::cli_options::ExecuteReportOpt;
 use crate::file_results::{AvmType, FileResults, Step};
 use crate::logging::{LOCAL_LOGGER, ScanLogBackend, ThreadLocalScanLogger};
+use ruffle_core::FloatDuration;
 use ruffle_core::PlayerBuilder;
 use ruffle_core::backend::navigator::{NullExecutor, NullNavigatorBackend};
 use ruffle_core::limits::ExecutionLimit;
@@ -18,7 +19,7 @@ fn execute_swf(file: &Path) {
     let base_path = file.parent().unwrap();
     let executor = NullExecutor::new();
     let movie = movie_from_path(file, None).unwrap();
-    let frame_time = 1000.0 / movie.frame_rate().to_f64();
+    let frame_time = FloatDuration::from_millis(1000.0 / movie.frame_rate().to_f64());
     let player = PlayerBuilder::new()
         .with_log(ScanLogBackend::new())
         .with_navigator(NullNavigatorBackend::with_base_path(base_path, &executor).unwrap())
@@ -62,7 +63,7 @@ pub fn execute_report_main(execute_report_opt: ExecuteReportOpt) -> Result<(), s
         .into_owned();
 
     LOCAL_LOGGER.with(|log_buffer| {
-        log_buffer.borrow_mut().truncate(0);
+        log_buffer.borrow_mut().clear();
     });
 
     let mut file_result = FileResults::new(&name);

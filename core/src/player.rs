@@ -1,3 +1,5 @@
+use crate::DEFAULT_PLAYER_VERSION;
+use crate::avm_rng::AvmRng;
 use crate::avm1::Attribute;
 use crate::avm1::Avm1;
 use crate::avm1::Object;
@@ -6,7 +8,6 @@ use crate::avm1::VariableDumper;
 use crate::avm1::{Activation, ActivationIdentifier};
 use crate::avm2::object::EventObject as Avm2EventObject;
 use crate::avm2::{Activation as Avm2Activation, Avm2, CallStack, SharedObjectObject};
-use crate::avm_rng::AvmRng;
 use crate::backend::navigator::ErrorResponse;
 use crate::backend::navigator::FetchReason;
 use crate::backend::navigator::OwnedFuture;
@@ -38,7 +39,7 @@ use crate::external::{ExternalInterface, ExternalInterfaceProvider, NullFsComman
 use crate::external::{FsCommandProvider, Value as ExternalValue};
 use crate::focus_tracker::NavigationDirection;
 use crate::font::DefaultFont;
-use crate::frame_lifecycle::{run_all_phases_avm2, FramePhase};
+use crate::frame_lifecycle::{FramePhase, run_all_phases_avm2};
 use crate::input::InputEvent;
 use crate::input::InputManager;
 use crate::library::Library;
@@ -56,13 +57,13 @@ use crate::system_properties::SystemProperties;
 use crate::tag_utils::SwfMovie;
 use crate::timer::Timers;
 use crate::vminterface::Instantiator;
-use crate::DEFAULT_PLAYER_VERSION;
 use async_channel::Sender;
 use enumset::EnumSet;
 use gc_arena::lock::GcRefLock;
 use gc_arena::{Collect, DynamicRootSet, Mutation, Rootable};
+use ruffle_common::duration::FloatDuration;
 use ruffle_macros::istr;
-use ruffle_render::backend::{null::NullRenderer, RenderBackend, ViewportDimensions};
+use ruffle_render::backend::{RenderBackend, ViewportDimensions, null::NullRenderer};
 use ruffle_render::commands::CommandList;
 use ruffle_render::quality::StageQuality;
 use ruffle_render::transform::TransformStack;
@@ -95,15 +96,15 @@ pub struct StaticCallstack {
 
 impl StaticCallstack {
     pub fn avm2(&self, f: impl for<'gc> FnOnce(&CallStack<'gc>)) {
-        if let Some(arena) = self.arena.upgrade() {
-            if let Ok(arena) = arena.try_borrow() {
-                arena.mutate(|_, root| {
-                    let callstack = root.avm2_callstack.borrow();
-                    if !callstack.is_empty() {
-                        f(&callstack);
-                    }
-                })
-            }
+        if let Some(arena) = self.arena.upgrade()
+            && let Ok(arena) = arena.try_borrow()
+        {
+            arena.mutate(|_, root| {
+                let callstack = root.avm2_callstack.borrow();
+                if !callstack.is_empty() {
+                    f(&callstack);
+                }
+            })
         }
     }
 }
@@ -334,7 +335,7 @@ pub struct Player {
     /// Gained by passage of time between host frames, spent by executing SWF frames.
     /// This is how we support custom SWF framerates
     /// and compensate for small lags by "catching up" (up to MAX_FRAMES_PER_TICK).
-    frame_accumulator: f64,
+    frame_accumulator: FloatDuration,
     recent_run_frame_timings: VecDeque<f64>,
 
     /// Faked time passage for fooling hand-written busy-loop FPS limiters.
@@ -513,32 +514,37 @@ impl Player {
         }
     }
 
-    pub fn tick(&mut self, dt: f64) {
+    /// Returns the duration of a single frame.
+    fn frame_duration(&self) -> FloatDuration {
+        FloatDuration::from_millis(self.frame_time(1000.0))
+    }
+
+    pub fn tick(&mut self, dt: FloatDuration) {
         if !self.is_playing() {
             return;
         }
 
         self.frame_accumulator += dt;
-        let frame_time = self.frame_time(1000.0);
+        let frame_duration = self.frame_duration();
 
         let max_frames_per_tick = self.max_frames_per_tick();
         let mut frame = 0;
 
-        while frame < max_frames_per_tick && self.frame_accumulator >= frame_time {
+        while frame < max_frames_per_tick && self.frame_accumulator >= frame_duration {
             let timer = Instant::now();
             self.run_frame();
             let elapsed = timer.elapsed().as_millis() as f64;
 
             self.add_frame_timing(elapsed);
 
-            self.frame_accumulator -= frame_time;
+            self.frame_accumulator -= frame_duration;
             frame += 1;
             // The script probably tried implementing an FPS limiter with a busy loop.
             // We fooled the busy loop by pretending that more time has passed that actually did.
             // Then we need to actually pass this time, by decreasing frame_accumulator
             // to delay the future frame.
             if self.time_offset > 0 {
-                self.frame_accumulator -= self.time_offset as f64;
+                self.frame_accumulator -= FloatDuration::from_millis(self.time_offset as f64);
             }
 
             // If we are stepping a single frame, immediately suspend ourselves.
@@ -559,18 +565,18 @@ impl Player {
 
         // Sanity: If we had too many frames to tick, just reset the accumulator
         // to prevent running at turbo speed.
-        if self.frame_accumulator >= frame_time {
-            self.frame_accumulator = 0.0;
+        if self.frame_accumulator >= frame_duration {
+            self.frame_accumulator = FloatDuration::ZERO;
         }
 
         // Adjust playback speed for next frame to stay in sync with timeline audio tracks ("stream" sounds).
-        let cur_frame_offset = self.frame_accumulator;
-        self.frame_accumulator += self.mutate_with_update_context(|context| {
+        let cur_frame_offset = self.frame_accumulator.as_millis();
+        let audio_skew = self.mutate_with_update_context(|context| {
             context
                 .audio_manager
                 .audio_skew_time(context.audio, cur_frame_offset)
-                * 1000.0
         });
+        self.frame_accumulator += FloatDuration::from_secs(audio_skew);
 
         self.update_sockets();
         self.update_net_connections();
@@ -587,23 +593,21 @@ impl Player {
 
     /// Returns the approximate duration of time until the next frame is due to run.
     /// This is only an approximation to be used for sleep durations.
-    pub fn time_til_next_frame(&self) -> std::time::Duration {
-        let frame_time = self.frame_time(1000.0);
-        let mut dt = if self.frame_accumulator <= 0.0 {
-            frame_time
-        } else if self.frame_accumulator >= frame_time {
-            0.0
+    pub fn time_til_next_frame(&self) -> Duration {
+        let frame_duration = self.frame_duration();
+        let mut time_til_next = if self.frame_accumulator.as_millis() <= 0.0 {
+            frame_duration
+        } else if self.frame_accumulator >= frame_duration {
+            FloatDuration::ZERO
         } else {
-            frame_time - self.frame_accumulator
+            frame_duration - self.frame_accumulator
         };
 
         if let Some(time_til_next_timer) = self.time_til_next_timer {
-            dt = dt.min(time_til_next_timer)
+            time_til_next = time_til_next.min(FloatDuration::from_millis(time_til_next_timer));
         }
 
-        dt = dt.max(0.0);
-
-        std::time::Duration::from_micros(dt as u64 * 1000)
+        time_til_next.max(FloatDuration::ZERO).to_std()
     }
 
     pub fn is_playing(&self) -> bool {
@@ -712,7 +716,7 @@ impl Player {
     pub fn run_context_menu_callback(&mut self, index: usize) {
         self.mutate_with_update_context(|context| {
             let menu = &context.current_context_menu;
-            if let Some(ref menu) = menu {
+            if let Some(menu) = menu {
                 match menu.callback(index) {
                     ContextMenuCallback::Avm1 { item, callback } => {
                         Self::run_context_menu_custom_callback(*item, *callback, context)
@@ -776,23 +780,23 @@ impl Player {
         callback: Object<'gc>,
         context: &mut UpdateContext<'gc>,
     ) {
-        if let Some(menu_state) = context.current_context_menu {
-            if let Some(display_object) = menu_state.get_display_object() {
-                let mut activation = Activation::from_nothing(
-                    context,
-                    ActivationIdentifier::root("[Context Menu Callback]"),
-                    display_object,
-                );
+        if let Some(menu_state) = context.current_context_menu
+            && let Some(display_object) = menu_state.get_display_object()
+        {
+            let mut activation = Activation::from_nothing(
+                context,
+                ActivationIdentifier::root("[Context Menu Callback]"),
+                display_object,
+            );
 
-                let params = vec![display_object.object1_or_undef(), Value::Object(item)];
+            let params = [display_object.object1_or_undef(), Value::Object(item)];
 
-                let _ = callback.call(
-                    "[Context Menu Callback]",
-                    &mut activation,
-                    Value::Undefined,
-                    &params,
-                );
-            }
+            let _ = callback.call(
+                "[Context Menu Callback]",
+                &mut activation,
+                Value::Undefined,
+                &params,
+            );
         }
     }
 
@@ -1064,7 +1068,7 @@ impl Player {
         let changed_mouse_buttons = self
             .input
             .get_mouse_down_buttons()
-            .symmetrical_difference(prev_mouse_buttons);
+            .symmetric_difference(prev_mouse_buttons);
 
         if cfg!(feature = "avm_debug") {
             match event {
@@ -1270,26 +1274,25 @@ impl Player {
             };
 
             // Fire clip event on all clips.
-            if let Some(clip_event) = clip_event {
-                if context.stage.handle_clip_event(context, clip_event) == ClipEventResult::Handled
-                {
-                    player_event_handled = true;
-                }
+            if let Some(clip_event) = clip_event
+                && context.stage.handle_clip_event(context, clip_event) == ClipEventResult::Handled
+            {
+                player_event_handled = true;
             }
 
             // Fire event listener on appropriate object
-            if let Some((listener_type, event_name, args)) = listener {
-                if let Some(root_clip) = context.stage.root_clip() {
-                    context.action_queue.queue_action(
-                        root_clip,
-                        ActionType::NotifyListeners {
-                            listener: listener_type,
-                            method: event_name,
-                            args,
-                        },
-                        false,
-                    );
-                }
+            if let Some((listener_type, event_name, args)) = listener
+                && let Some(root_clip) = context.stage.root_clip()
+            {
+                context.action_queue.queue_action(
+                    root_clip,
+                    ActionType::NotifyListeners {
+                        listener: listener_type,
+                        method: event_name,
+                        args,
+                    },
+                    false,
+                );
             }
 
             // Propagate button events.
@@ -1306,56 +1309,54 @@ impl Player {
             }
 
             // KeyPress events take precedence over text input.
-            if !key_press_handled {
-                if let Some(text) = context.focus_tracker.get_as_edit_text() {
-                    if let InputEvent::TextInput { codepoint } = &event {
-                        text.text_input((*codepoint).to_string(), context);
-                    }
-                    if let InputEvent::TextControl { code } = &event {
-                        text.text_control_input(*code, context);
-                    }
-                    if let InputEvent::Ime(ime) = &event {
-                        text.ime(ime.clone(), context);
-                    }
+            if !key_press_handled && let Some(text) = context.focus_tracker.get_as_edit_text() {
+                if let InputEvent::TextInput { codepoint } = &event {
+                    text.text_input((*codepoint).to_string(), context);
+                }
+                if let InputEvent::TextControl { code } = &event {
+                    text.text_control_input(*code, context);
+                }
+                if let InputEvent::Ime(ime) = &event {
+                    text.ime(ime.clone(), context);
                 }
             }
 
             // KeyPress events also take precedence over tabbing.
-            if !key_press_handled {
-                if let InputEvent::KeyDown {
+            if !key_press_handled
+                && let InputEvent::KeyDown {
                     key_code: KeyCode::TAB,
                     ..
                 } = &event
-                {
-                    let reversed = context.input.is_key_down(KeyCode::SHIFT);
-                    let tracker = context.focus_tracker;
-                    tracker.cycle(context, reversed);
-                }
+            {
+                let reversed = context.input.is_key_down(KeyCode::SHIFT);
+                let tracker = context.focus_tracker;
+                tracker.cycle(context, reversed);
             }
 
             // KeyPress events also take precedence over keyboard navigation.
             // Note that keyboard navigation works only when the highlight is visible.
-            if !key_press_handled && context.focus_tracker.highlight().is_visible() {
-                if let Some(focus) = context.focus_tracker.get() {
-                    if matches!(
-                        &event,
-                        InputEvent::KeyDown {
-                            key_code: KeyCode::ENTER,
-                            ..
-                        } | InputEvent::TextInput { codepoint: ' ' }
-                    ) {
-                        // The button/clip is pressed and then immediately released.
-                        // We do not have to wait for KeyUp.
-                        focus.handle_clip_event(context, ClipEvent::Press { index: 0 });
-                        focus.handle_clip_event(context, ClipEvent::Release { index: 0 });
-                    }
+            if !key_press_handled
+                && context.focus_tracker.highlight().is_visible()
+                && let Some(focus) = context.focus_tracker.get()
+            {
+                if matches!(
+                    &event,
+                    InputEvent::KeyDown {
+                        key_code: KeyCode::ENTER,
+                        ..
+                    } | InputEvent::TextInput { codepoint: ' ' }
+                ) {
+                    // The button/clip is pressed and then immediately released.
+                    // We do not have to wait for KeyUp.
+                    focus.handle_clip_event(context, ClipEvent::Press { index: 0 });
+                    focus.handle_clip_event(context, ClipEvent::Release { index: 0 });
+                }
 
-                    if let InputEvent::KeyDown { key_code, .. } = &event {
-                        if let Some(direction) = NavigationDirection::from_key_code(*key_code) {
-                            let tracker = context.focus_tracker;
-                            tracker.navigate(context, direction);
-                        }
-                    }
+                if let InputEvent::KeyDown { key_code, .. } = &event
+                    && let Some(direction) = NavigationDirection::from_key_code(*key_code)
+                {
+                    let tracker = context.focus_tracker;
+                    tracker.navigate(context, direction);
                 }
             }
 
@@ -1414,10 +1415,10 @@ impl Player {
             });
         }
 
-        if let InputEvent::MouseLeave = event {
-            if self.update_mouse_state(changed_mouse_buttons, true, &mut player_event_handled) {
-                self.needs_render = true;
-            }
+        if let InputEvent::MouseLeave = event
+            && self.update_mouse_state(changed_mouse_buttons, true, &mut player_event_handled)
+        {
+            self.needs_render = true;
         }
 
         if self.should_reset_highlight(event) {
@@ -1556,17 +1557,17 @@ impl Player {
                     && hovered.as_displayobject().avm1_removed()
                 {
                     context.mouse_data.hovered = None;
-                    if let Some(new_object) = new_over_object {
-                        if Self::check_display_object_equality(
+                    if let Some(new_object) = new_over_object
+                        && Self::check_display_object_equality(
                             new_object.as_displayobject(),
                             hovered.as_displayobject(),
-                        ) {
-                            if let Some(state) = hovered.as_displayobject().state() {
-                                new_object.as_displayobject().set_state(context, state);
-                            }
-                            context.mouse_data.hovered = Some(new_object);
-                            new_over_object_updated = true;
+                        )
+                    {
+                        if let Some(state) = hovered.as_displayobject().state() {
+                            new_object.as_displayobject().set_state(context, state);
                         }
+                        context.mouse_data.hovered = Some(new_object);
+                        new_over_object_updated = true;
                     }
                 }
 
@@ -1577,26 +1578,23 @@ impl Player {
                 }
             }
 
-            if let Some(pressed) = context.mouse_data.pressed {
-                if !pressed.as_displayobject().movie().is_action_script_3()
-                    && pressed.as_displayobject().avm1_removed()
-                {
-                    context.mouse_data.pressed = None;
-                    let mut display_object = None;
-                    if let Some(root_clip) = context.stage.root_clip() {
-                        display_object = Self::find_first_character_instance(
-                            root_clip,
-                            pressed.as_displayobject(),
-                        );
+            if let Some(pressed) = context.mouse_data.pressed
+                && !pressed.as_displayobject().movie().is_action_script_3()
+                && pressed.as_displayobject().avm1_removed()
+            {
+                context.mouse_data.pressed = None;
+                let mut display_object = None;
+                if let Some(root_clip) = context.stage.root_clip() {
+                    display_object =
+                        Self::find_first_character_instance(root_clip, pressed.as_displayobject());
+                }
+
+                if let Some(new_down_object) = display_object {
+                    if let Some(state) = pressed.as_displayobject().state() {
+                        new_down_object.set_state(context, state);
                     }
 
-                    if let Some(new_down_object) = display_object {
-                        if let Some(state) = pressed.as_displayobject().state() {
-                            new_down_object.set_state(context, state);
-                        }
-
-                        context.mouse_data.pressed = new_down_object.as_interactive();
-                    }
+                    context.mouse_data.pressed = new_down_object.as_interactive();
                 }
             }
 
@@ -1788,15 +1786,14 @@ impl Player {
                         context.mouse_data.pressed(button),
                         context.mouse_data.hovered,
                     );
-                    if let Some(down) = context.mouse_data.pressed(button) {
-                        if let Some(over) = context.mouse_data.hovered {
-                            if !released_inside {
-                                released_inside = Self::check_display_object_equality(
-                                    down.as_displayobject(),
-                                    over.as_displayobject(),
-                                );
-                            }
-                        }
+                    if let Some(down) = context.mouse_data.pressed(button)
+                        && let Some(over) = context.mouse_data.hovered
+                        && !released_inside
+                    {
+                        released_inside = Self::check_display_object_equality(
+                            down.as_displayobject(),
+                            over.as_displayobject(),
+                        );
                     }
                     if released_inside {
                         let event = match button {
@@ -2175,24 +2172,24 @@ impl Player {
                         action.clip,
                     );
                     // TODO(moulins): should this use `Object::prototype`?
-                    if let Ok(prototype) = constructor.get(istr!("prototype"), &mut activation) {
-                        if let Some(object) = action.clip.object1() {
-                            object.define_value(
-                                activation.gc(),
-                                istr!("__proto__"),
-                                prototype,
-                                Attribute::DONT_ENUM | Attribute::DONT_DELETE,
+                    if let Ok(prototype) = constructor.get(istr!("prototype"), &mut activation)
+                        && let Some(object) = action.clip.object1()
+                    {
+                        object.define_value(
+                            activation.gc(),
+                            istr!("__proto__"),
+                            prototype,
+                            Attribute::DONT_ENUM | Attribute::DONT_DELETE,
+                        );
+                        for event in events {
+                            let _ = activation.run_child_frame_for_action(
+                                "[Actions]",
+                                action.clip,
+                                event,
                             );
-                            for event in events {
-                                let _ = activation.run_child_frame_for_action(
-                                    "[Actions]",
-                                    action.clip,
-                                    event,
-                                );
-                            }
-
-                            let _ = constructor.construct_on_existing(&mut activation, object, &[]);
                         }
+
+                        let _ = constructor.construct_on_existing(&mut activation, object, &[]);
                     }
                 }
                 // Run constructor events without changing the prototype.
@@ -2225,9 +2222,6 @@ impl Player {
                     Avm1::notify_system_listeners(action.clip, listener, method, &args, context);
                 }
             }
-
-            // Do not let garbage values accumulate across multiple executions and/or frames.
-            context.avm1.clear();
         }
     }
 
@@ -2235,7 +2229,7 @@ impl Player {
     /// This takes cares of populating the `UpdateContext` struct, avoiding borrow issues.
     pub fn mutate_with_update_context<F, R>(&mut self, f: F) -> R
     where
-        F: for<'a, 'gc> FnOnce(&mut UpdateContext<'gc>) -> R,
+        F: for<'gc> FnOnce(&mut UpdateContext<'gc>) -> R,
     {
         self.enter_arena_mut(|gc_context, gc_root, this| {
             #[allow(unused_variables)]
@@ -2371,7 +2365,7 @@ impl Player {
     /// hover state up to date, and running garbage collection.
     pub fn update<F, R>(&mut self, func: F) -> R
     where
-        F: for<'a, 'gc> FnOnce(&mut UpdateContext<'gc>) -> R,
+        F: for<'gc> FnOnce(&mut UpdateContext<'gc>) -> R,
     {
         let rval = self.mutate_with_update_context(|context| {
             let rval = func(context);
@@ -2424,7 +2418,7 @@ impl Player {
 
     /// Update all AVM-based timers (such as created via setInterval).
     /// Returns the approximate amount of time until the next timer tick.
-    pub fn update_timers(&mut self, dt: f64) {
+    pub fn update_timers(&mut self, dt: FloatDuration) {
         self.time_til_next_timer =
             self.mutate_with_update_context(|context| Timers::update_timers(context, dt));
     }
@@ -2467,6 +2461,7 @@ impl Player {
             if let Some(callback) = context.external_interface.get_callback(name) {
                 callback.call(context, name, args)
             } else {
+                tracing::warn!("Calling unknown internal interface: {}", name);
                 ExternalValue::Null
             }
         })
@@ -3013,7 +3008,7 @@ impl PlayerBuilder {
                 frame_rate,
                 forced_frame_rate,
                 frame_phase: Default::default(),
-                frame_accumulator: 0.0,
+                frame_accumulator: FloatDuration::ZERO,
                 recent_run_frame_timings: VecDeque::with_capacity(10),
                 start_time: Instant::now(),
                 time_offset: 0,
@@ -3115,6 +3110,7 @@ impl PlayerBuilder {
             context
                 .avm2
                 .set_optimizer_enabled(self.avm2_optimizer_enabled);
+            Avm1::load_player_globals(context);
             Avm2::load_player_globals(context);
 
             let stage = context.stage;

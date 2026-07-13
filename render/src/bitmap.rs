@@ -1,4 +1,5 @@
 use h263_rs_yuv::bt601::yuv420_to_rgba;
+use ruffle_wstr::{FromWStr, WStr};
 use std::any::Any;
 use std::borrow::Cow;
 use std::fmt::Debug;
@@ -64,6 +65,22 @@ pub enum PixelSnapping {
 
     /// Never snap the bitmap to the pixel grid
     Never,
+}
+
+impl FromWStr for PixelSnapping {
+    type Err = ();
+
+    fn from_wstr(s: &WStr) -> Result<Self, Self::Err> {
+        if s == b"always" {
+            Ok(PixelSnapping::Always)
+        } else if s == b"auto" {
+            Ok(PixelSnapping::Auto)
+        } else if s == b"never" {
+            Ok(PixelSnapping::Never)
+        } else {
+            Err(())
+        }
+    }
 }
 
 impl PixelSnapping {
@@ -155,7 +172,9 @@ impl<'a> Bitmap<'a> {
                 let v = &self.data[luma_len + chroma_len..luma_len + 2 * chroma_len];
 
                 self.data = yuv420_to_rgba(y, u, v, self.width as usize)
-                    .chunks_exact(4)
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
                     .flat_map(|rgba| [rgba[0], rgba[1], rgba[2]])
                     .collect();
             }
@@ -173,7 +192,9 @@ impl<'a> Bitmap<'a> {
             BitmapFormat::Rgb => {
                 self.data = self
                     .data
-                    .chunks_exact(3)
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
                     .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
                     .collect();
             }
@@ -201,7 +222,9 @@ impl<'a> Bitmap<'a> {
 
                 // RGB components need to be clamped to alpha to avoid invalid premultiplied colors
                 self.data = rgba
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .zip(a)
                     .flat_map(|(rgba, a)| [rgba[0].min(*a), rgba[1].min(*a), rgba[2].min(*a), *a])
                     .collect()
@@ -291,6 +314,15 @@ impl BitmapFormat {
             BitmapFormat::Yuva420p => {
                 width * height * 2 + width.div_ceil(2) * height.div_ceil(2) * 2
             }
+        }
+    }
+
+    pub fn supports_transparency(self) -> bool {
+        match self {
+            BitmapFormat::Rgb => false,
+            BitmapFormat::Rgba => true,
+            BitmapFormat::Yuv420p => false,
+            BitmapFormat::Yuva420p => true,
         }
     }
 }
@@ -515,15 +547,15 @@ impl PixelRegion {
 
         // Mutate.
 
-        self.x_min = r1_result.0 as u32;
-        self.y_min = r1_result.1 as u32;
-        self.x_max = r1_result.2 as u32;
-        self.y_max = r1_result.3 as u32;
+        self.x_min = u32::try_from(r1_result.0).unwrap_or(0);
+        self.y_min = u32::try_from(r1_result.1).unwrap_or(0);
+        self.x_max = u32::try_from(r1_result.2).unwrap_or(0);
+        self.y_max = u32::try_from(r1_result.3).unwrap_or(0);
 
-        other.x_min = r2_result.0 as u32;
-        other.y_min = r2_result.1 as u32;
-        other.x_max = r2_result.2 as u32;
-        other.y_max = r2_result.3 as u32;
+        other.x_min = u32::try_from(r2_result.0).unwrap_or(0);
+        other.y_min = u32::try_from(r2_result.1).unwrap_or(0);
+        other.x_max = u32::try_from(r2_result.2).unwrap_or(0);
+        other.y_max = u32::try_from(r2_result.3).unwrap_or(0);
     }
 }
 

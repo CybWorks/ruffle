@@ -9,11 +9,18 @@ pub enum Error<'gc> {
     #[error("A script in this movie has taken too long to execute and has been terminated.")]
     ExecutionTimeout,
 
-    #[error("{0} levels of function recursion were exceeded in one action list. This is probably an infinite loop.")]
+    #[error(
+        "{0} levels of function recursion were exceeded in one action list. This is probably an infinite loop."
+    )]
     FunctionRecursionLimit(u16),
 
-    #[error("66 levels of special recursion were exceeded in one action list. This is probably an infinite loop.")]
+    #[error(
+        "66 levels of special recursion were exceeded in one action list. This is probably an infinite loop."
+    )]
     SpecialRecursionLimit,
+
+    #[error("Property recursion limit has been hit.")]
+    PropertyRecursionLimit,
 
     #[error("Couldn't parse SWF")]
     InvalidSwf(#[from] swf::error::Error),

@@ -1,17 +1,17 @@
 //! Array-structured objects
 
+use crate::avm2::Error;
+use crate::avm2::Multiname;
 use crate::avm2::activation::Activation;
 use crate::avm2::array::ArrayStorage;
 use crate::avm2::object::script_object::ScriptObjectData;
 use crate::avm2::object::{ClassObject, Object, TObject};
 use crate::avm2::value::Value;
-use crate::avm2::Error;
-use crate::avm2::Multiname;
 use crate::context::UpdateContext;
 use crate::string::{AvmString, WStr};
 use core::fmt;
 use gc_arena::barrier::unlock;
-use gc_arena::{lock::RefLock, Collect, Gc, GcWeak, Mutation};
+use gc_arena::{Collect, Gc, GcWeak, Mutation, lock::RefLock};
 use ruffle_common::utils::HasPrefixField;
 use std::cell::{Ref, RefMut};
 
@@ -142,14 +142,12 @@ impl<'gc> TObject<'gc> for ArrayObject<'gc> {
         name: &Multiname<'gc>,
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
-        if name.valid_dynamic_name() {
-            if let Some(name) = name.local_name() {
-                if let Some(index) = ArrayObject::as_array_index(&name) {
-                    if let Some(result) = self.get_index_property(index) {
-                        return Ok(result);
-                    }
-                }
-            }
+        if name.valid_dynamic_name()
+            && let Some(name) = name.local_name()
+            && let Some(index) = ArrayObject::as_array_index(&name)
+            && let Some(result) = self.get_index_property(index)
+        {
+            return Ok(result);
         }
 
         self.base().get_property_local(name, activation)
@@ -178,38 +176,16 @@ impl<'gc> TObject<'gc> for ArrayObject<'gc> {
     ) -> Result<(), Error<'gc>> {
         let mc = activation.gc();
 
-        if name.valid_dynamic_name() {
-            if let Some(name) = name.local_name() {
-                if let Some(index) = ArrayObject::as_array_index(&name) {
-                    self.set_element(mc, index, value);
+        if name.valid_dynamic_name()
+            && let Some(name) = name.local_name()
+            && let Some(index) = ArrayObject::as_array_index(&name)
+        {
+            self.set_element(mc, index, value);
 
-                    return Ok(());
-                }
-            }
+            return Ok(());
         }
 
         self.base().set_property_local(name, value, activation)
-    }
-
-    fn init_property_local(
-        self,
-        name: &Multiname<'gc>,
-        value: Value<'gc>,
-        activation: &mut Activation<'_, 'gc>,
-    ) -> Result<(), Error<'gc>> {
-        let mc = activation.gc();
-
-        if name.valid_dynamic_name() {
-            if let Some(name) = name.local_name() {
-                if let Some(index) = ArrayObject::as_array_index(&name) {
-                    self.set_element(mc, index, value);
-
-                    return Ok(());
-                }
-            }
-        }
-
-        self.base().init_property_local(name, value, activation)
     }
 
     fn delete_property_local(
@@ -219,28 +195,26 @@ impl<'gc> TObject<'gc> for ArrayObject<'gc> {
     ) -> Result<bool, Error<'gc>> {
         let mc = activation.gc();
 
-        if name.valid_dynamic_name() {
-            if let Some(name) = name.local_name() {
-                if let Some(index) = ArrayObject::as_array_index(&name) {
-                    unlock!(Gc::write(mc, self.0), ArrayObjectData, array)
-                        .borrow_mut()
-                        .delete(index);
+        if name.valid_dynamic_name()
+            && let Some(name) = name.local_name()
+            && let Some(index) = ArrayObject::as_array_index(&name)
+        {
+            unlock!(Gc::write(mc, self.0), ArrayObjectData, array)
+                .borrow_mut()
+                .delete(index);
 
-                    return Ok(true);
-                }
-            }
+            return Ok(true);
         }
 
         Ok(self.base().delete_property_local(mc, name))
     }
 
     fn has_own_property(self, name: &Multiname<'gc>) -> bool {
-        if name.valid_dynamic_name() {
-            if let Some(name) = name.local_name() {
-                if let Some(index) = ArrayObject::as_array_index(&name) {
-                    return self.0.array.borrow().get(index).is_some();
-                }
-            }
+        if name.valid_dynamic_name()
+            && let Some(name) = name.local_name()
+            && let Some(index) = ArrayObject::as_array_index(&name)
+        {
+            return self.0.array.borrow().get(index).is_some();
         }
 
         self.base().has_own_property(name)

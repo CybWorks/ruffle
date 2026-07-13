@@ -1,15 +1,15 @@
 use std::rc::Rc;
 
+use crate::avm2::Avm2StrRepresentable;
+use crate::avm2::Error;
 use crate::avm2::activation::Activation;
-use crate::avm2::bytearray::{Endian, ObjectEncoding};
+use crate::avm2::bytearray::{CompressionAlgorithm, Endian, ObjectEncoding};
 use crate::avm2::error::{make_error_2008, make_error_2058};
 use crate::avm2::object::Object;
 use crate::avm2::parameters::ParametersExt;
 use crate::avm2::value::Value;
-use crate::avm2::Error;
 use crate::string::AvmString;
-use encoding_rs::Encoding;
-use encoding_rs::UTF_8;
+use encoding_rs::{Encoding, UTF_8, UTF_16BE, UTF_16LE};
 use flash_lso::amf0::read::AMF0Decoder;
 use flash_lso::amf3::read::AMF3Decoder;
 use flash_lso::types::{AMFVersion, Element};
@@ -210,14 +210,18 @@ pub fn strip_bom<'gc>(activation: &mut Activation<'_, 'gc>, mut bytes: &[u8]) ->
     // Little-endian UTF-16 BOM
     } else if let Some(without_bom) = bytes.strip_prefix(&[0xFF, 0xFE]) {
         let utf16_bytes: Vec<_> = without_bom
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect();
         return AvmString::new(activation.gc(), WString::from_buf(utf16_bytes));
     // Big-endian UTF-16 BOM
     } else if let Some(without_bom) = bytes.strip_prefix(&[0xFE, 0xFF]) {
         let utf16_bytes: Vec<_> = without_bom
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
             .collect();
         return AvmString::new(activation.gc(), WString::from_buf(utf16_bytes));
@@ -263,7 +267,7 @@ pub fn get_position<'gc>(
     let this = this.as_object().unwrap();
 
     if let Some(bytearray) = this.as_bytearray() {
-        return Ok(bytearray.position().into());
+        return Ok(Value::from_usize_lossy(bytearray.position()));
     }
 
     Ok(Value::Undefined)
@@ -292,7 +296,7 @@ pub fn get_bytes_available<'gc>(
     let this = this.as_object().unwrap();
 
     if let Some(bytearray) = this.as_bytearray() {
-        return Ok(bytearray.bytes_available().into());
+        return Ok(Value::from_usize_lossy(bytearray.bytes_available()));
     }
 
     Ok(Value::Undefined)
@@ -306,7 +310,7 @@ pub fn get_length<'gc>(
     let this = this.as_object().unwrap();
 
     if let Some(bytearray) = this.as_bytearray() {
-        return Ok(bytearray.len().into());
+        return Ok(Value::from_usize_lossy(bytearray.len()));
     }
 
     Ok(Value::Undefined)
@@ -652,7 +656,24 @@ pub fn write_multi_byte<'gc>(
         let encoder =
             Encoding::for_label(charset_label.to_utf8_lossy().as_bytes()).unwrap_or(UTF_8);
         let utf8 = string.to_utf8_lossy();
-        let (encoded_bytes, _, _) = encoder.encode(&utf8);
+
+        // encoding_rs doesn't support encoding to UTF-16, so we have to handle it manually
+        let encoded_bytes = if encoder == UTF_16LE || encoder == UTF_16BE {
+            let mut bytes = Vec::with_capacity(utf8.len() * 2);
+            for c in utf8.encode_utf16() {
+                let encoded = if encoder == UTF_16LE {
+                    c.to_le_bytes()
+                } else {
+                    c.to_be_bytes()
+                };
+                bytes.extend_from_slice(&encoded);
+            }
+            std::borrow::Cow::Owned(bytes)
+        } else {
+            let (encoded_bytes, _, _) = encoder.encode(&utf8);
+            encoded_bytes
+        };
+
         bytearray
             .write_bytes(&encoded_bytes)
             .map_err(|e| e.to_avm(activation))?;
@@ -671,19 +692,22 @@ pub fn read_multi_byte<'gc>(
     if let Some(bytearray) = this.as_bytearray() {
         let len = args.get_u32(0);
         let charset_label = args.get_string_non_null(activation, 1, "charSet")?;
-        let mut bytes = bytearray
+        let bytes = bytearray
             .read_bytes(len as usize)
             .map_err(|e| e.to_avm(activation))?;
-
-        // Flash cuts off the string at the first null byte (after checking that
-        // the original length fits in the ByteArray)
-        if let Some(null) = bytes.iter().position(|b| *b == b'\0') {
-            bytes = &bytes[..null];
-        }
 
         let encoder =
             Encoding::for_label(charset_label.to_utf8_lossy().as_bytes()).unwrap_or(UTF_8);
         let (decoded_str, _, _) = encoder.decode(bytes);
+
+        // Flash cuts off the string at the first null character (after checking that
+        // the original length fits in the ByteArray)
+        let decoded_str = if let Some(null_pos) = decoded_str.find('\0') {
+            &decoded_str[..null_pos]
+        } else {
+            &decoded_str
+        };
+
         return Ok(AvmString::new_utf8(activation.gc(), decoded_str).into());
     }
 
@@ -716,9 +740,9 @@ pub fn compress<'gc>(
 
     if let Some(mut bytearray) = this.as_bytearray_mut() {
         let algorithm = args.get_string_non_null(activation, 0, "algorithm")?;
-        let algorithm = match algorithm.parse() {
-            Ok(algorithm) => algorithm,
-            Err(_) => return Err(make_error_2058(activation)),
+        let algorithm = match CompressionAlgorithm::from_avm2_str(&algorithm) {
+            Some(algorithm) => algorithm,
+            None => return Err(make_error_2058(activation)),
         };
         let buffer = bytearray.compress(algorithm);
         bytearray.clear();
@@ -740,9 +764,9 @@ pub fn uncompress<'gc>(
 
     if let Some(mut bytearray) = this.as_bytearray_mut() {
         let algorithm = args.get_string_non_null(activation, 0, "algorithm")?;
-        let algorithm = match algorithm.parse() {
-            Ok(algorithm) => algorithm,
-            Err(_) => return Err(make_error_2058(activation)),
+        let algorithm = match CompressionAlgorithm::from_avm2_str(&algorithm) {
+            Some(algorithm) => algorithm,
+            None => return Err(make_error_2058(activation)),
         };
         let buffer = match bytearray.decompress(algorithm) {
             Some(buffer) => buffer,
@@ -819,8 +843,7 @@ pub fn write_object<'gc>(
             obj,
             amf_version,
             &mut Default::default(),
-        )
-        .unwrap_or(flash_lso::types::Value::Undefined);
+        );
 
         let element = Element::new("", Rc::new(amf));
         let mut lso = flash_lso::types::Lso::new(vec![element], "", amf_version);

@@ -9,7 +9,6 @@
 # This is because some languages may use different wording for one or the other, especially with things like capitalisation.
 
 file-menu = Datoteka
-file-menu-open-quick = Odpri...
 file-menu-open-advanced = Odpri napredno...
 file-menu-close = Zapri
 file-menu-reload = Ponovno naloži
@@ -33,6 +32,7 @@ bookmarks-menu = Zaznamki
 bookmarks-menu-add = Dodaj...
 bookmarks-menu-manage = Upravljaj zaznamke...
 debug-menu = Orodja za odpravljanje napak
+debug-menu-open-stage = Ogled informacij odra
 debug-menu-open-root-movie-clip = Poglej korenski MovieClip
 debug-menu-open-movie = Ogled filma
 debug-menu-open-movie-list = Pokaži znane filme

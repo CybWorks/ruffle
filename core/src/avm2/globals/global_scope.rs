@@ -4,12 +4,12 @@
 //! public methods, but are the class that the script global scope is an
 //! instance of.
 
+use crate::avm2::QName;
 use crate::avm2::activation::Activation;
 use crate::avm2::class::{BuiltinType, Class, ClassAttributes};
 use crate::avm2::error::Error;
 use crate::avm2::method::Method;
 use crate::avm2::traits::Trait;
-use crate::avm2::QName;
 use ruffle_macros::istr;
 
 /// Construct `global`'s class.
@@ -34,7 +34,9 @@ pub fn create_class<'gc>(
 
     // `global` classes have no interfaces, so use `init_vtable_with_interfaces`
     // and pass an empty list
-    class.init_vtable_with_interfaces(activation.context, Box::new([]));
+    class
+        .init_vtable_with_interfaces(activation.context, Box::new([]))
+        .map_err(|e| e.into_avm(activation))?;
 
     class.mark_builtin_type(BuiltinType::ScriptTraits);
 

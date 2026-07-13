@@ -1,5 +1,5 @@
 use crate::custom_event::RuffleEvent;
-use crate::gui::widgets::PathOrUrlField;
+use crate::gui::widgets::path_or_url_field::PathOrUrlField;
 use crate::gui::{FilePicker, LocalizableText, text};
 use crate::player::LaunchOptions;
 use egui::{
@@ -11,6 +11,7 @@ use ruffle_core::{
     DEFAULT_PLAYER_VERSION, LoadBehavior, NEWEST_PLAYER_VERSION, PlayerRuntime, StageAlign,
     StageScaleMode,
 };
+use ruffle_frontend_utils::content::ContentDescriptor;
 use ruffle_render::quality::StageQuality;
 use std::borrow::Cow;
 use std::ops::RangeInclusive;
@@ -51,7 +52,7 @@ pub struct OpenDialog {
 impl OpenDialog {
     pub fn new(
         defaults: LaunchOptions,
-        default_url: Option<Url>,
+        default_content: Option<ContentDescriptor>,
         picker: FilePicker,
         event_loop: EventLoopProxy<RuffleEvent>,
     ) -> Self {
@@ -75,7 +76,11 @@ impl OpenDialog {
             defaults.proxy.as_ref().map(Url::to_string),
             UrlField::new("socks5://localhost:8080"),
         );
-        let path = PathOrUrlField::new(default_url, "path/to/movie.swf", picker);
+        let path = PathOrUrlField::new(
+            default_content,
+            LocalizableText::LocalizedText("open-dialog-path"),
+            picker,
+        );
         let script_timeout = OptionalField::new(
             defaults
                 .player
@@ -286,7 +291,7 @@ impl OpenDialog {
         }
     }
 
-    pub fn url(&self) -> Option<&Url> {
+    pub fn content_descriptor(&self) -> Option<ContentDescriptor> {
         self.path.result()
     }
 
@@ -300,16 +305,16 @@ impl OpenDialog {
         } else {
             self.options.player.frame_rate = None;
         }
-        if let Some(url) = self.path.result()
-            && self
+
+        if let Some(result) = self.path.result() {
+            let launch_options = self.options.clone();
+            if self
                 .event_loop
-                .send_event(RuffleEvent::Open(
-                    url.clone(),
-                    Box::new(self.options.clone()),
-                ))
+                .send_event(RuffleEvent::Open(result, Box::new(launch_options)))
                 .is_ok()
-        {
-            return true;
+            {
+                return true;
+            }
         }
 
         false
@@ -324,14 +329,13 @@ impl OpenDialog {
             .open(&mut keep_open)
             .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .collapsible(false)
-            .resizable(false)
+            .default_width(200.0)
             .show(egui_ctx, |ui| {
                 ui.vertical_centered_justified(|ui| {
                     Grid::new("open-file-options")
-                        .num_columns(2)
+                        .num_columns(1)
                         .striped(true)
                         .show(ui, |ui| {
-                            ui.label(text(locale, "open-dialog-path"));
                             is_valid &= self.path.ui(locale, ui).result().is_some();
                             ui.end_row();
                         });

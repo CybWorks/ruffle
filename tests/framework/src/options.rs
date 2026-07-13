@@ -5,13 +5,17 @@ pub mod image_comparison;
 pub mod known_failure;
 pub mod player;
 
+use crate::compiler::SwfCompilerOptions;
+use crate::environment::Environment;
 use crate::image_trigger::ImageTrigger;
 use crate::options::approximations::Approximations;
+use crate::options::expression::TestExpression;
 use crate::options::font::{DefaultFontsOptions, FontOptions, FontSortOptions};
 use crate::options::image_comparison::ImageComparison;
 use crate::options::known_failure::KnownFailure;
 use crate::options::player::PlayerOptions;
 use anyhow::{Result, bail};
+use ruffle_render::quality::StageQuality;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use toml::Spanned;
@@ -35,6 +39,7 @@ fn merge_into_subtest<'a>(
                     merge_into_subtest(vbase, vconfig, path)?;
                     path.truncate(old_path_len);
                 } else {
+                    // No subtest-specific field, use the base value
                     tconfig.insert(k.clone(), vbase.clone());
                 }
             }
@@ -43,16 +48,39 @@ fn merge_into_subtest<'a>(
         (DeValue::Table(_), DeValue::Array(_)) => "cannot merge table into array",
         (DeValue::Array(_), DeValue::Table(_)) => "cannot merge array into table",
         (DeValue::Array(_), DeValue::Array(_)) => "merging arrays isn't supported",
-        // Otherwise, overwrite the whole value.
-        _ => {
-            *config = base.clone();
-            return Ok(());
-        }
+        // Otherwise, the subtest-specific value wins
+        _ => return Ok(()),
     };
 
     Err(toml::de::Error::custom(format_args!(
         "{err_msg} (path = {path})"
     )))
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+pub enum FrameSelection {
+    Array(Vec<u32>),
+    Range { from: u32, to: u32 },
+}
+
+impl FrameSelection {
+    pub fn includes_frame(&self, frame: u32) -> bool {
+        match self {
+            FrameSelection::Array(frames) => frames.contains(&frame),
+            &FrameSelection::Range { from, to } => from <= frame && frame <= to,
+        }
+    }
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioAssertion {
+    pub frames: FrameSelection,
+    pub max_amplitude: Option<f32>,
+    pub min_max_amplitude: Option<f32>,
+    #[serde(default)]
+    pub known_failure: bool,
 }
 
 #[derive(Clone, Deserialize)]
@@ -69,7 +97,10 @@ pub struct TestOptions {
     pub output_path: String,
     pub sleep_to_meet_frame_rate: bool,
     pub image_comparisons: HashMap<String, ImageComparison>,
+    pub audio_assertions: HashMap<String, AudioAssertion>,
+    pub log_warnings: bool,
     pub ignore: bool,
+    pub filter: Option<TestExpression>,
     pub known_failure: KnownFailure,
     pub approximations: Option<Approximations>,
     pub player_options: PlayerOptions,
@@ -78,6 +109,7 @@ pub struct TestOptions {
     pub fonts: HashMap<String, FontOptions>,
     pub font_sorts: HashMap<String, FontSortOptions>,
     pub default_fonts: DefaultFontsOptions,
+    pub compilers: Vec<SwfCompilerOptions>,
 }
 
 impl Default for TestOptions {
@@ -90,7 +122,10 @@ impl Default for TestOptions {
             output_path: "output.txt".to_string(),
             sleep_to_meet_frame_rate: false,
             image_comparisons: Default::default(),
+            audio_assertions: Default::default(),
+            log_warnings: true,
             ignore: false,
+            filter: None,
             known_failure: KnownFailure::None,
             approximations: None,
             player_options: PlayerOptions::default(),
@@ -99,6 +134,7 @@ impl Default for TestOptions {
             fonts: Default::default(),
             font_sorts: Default::default(),
             default_fonts: Default::default(),
+            compilers: Default::default(),
         }
     }
 }
@@ -177,6 +213,14 @@ impl TestOptions {
             }
         }
 
+        if let Some(approx) = &self.approximations {
+            approx.validate()?;
+        }
+
+        for options in &self.compilers {
+            options.validate()?;
+        }
+
         Ok(())
     }
 
@@ -188,6 +232,15 @@ impl TestOptions {
     pub fn output_path(&self, test_directory: &VfsPath) -> Result<VfsPath> {
         Ok(test_directory.join(&self.output_path)?)
     }
+
+    pub fn can_run(&self, check_renderer: bool, environment: &impl Environment) -> bool {
+        self.required_features.can_run()
+            && self
+                .filter
+                .as_ref()
+                .is_none_or(|f| f.evaluate().expect("invalid 'filter' expression"))
+            && self.player_options.can_run(check_renderer, environment)
+    }
 }
 
 #[derive(Clone, Deserialize, Default)]
@@ -198,7 +251,7 @@ pub struct RequiredFeatures {
 }
 
 impl RequiredFeatures {
-    pub fn can_run(&self) -> bool {
+    fn can_run(&self) -> bool {
         (!self.lzma || cfg!(feature = "lzma")) && (!self.jpegxr || cfg!(feature = "jpegxr"))
     }
 }
@@ -207,14 +260,35 @@ impl RequiredFeatures {
 #[serde(default, deny_unknown_fields)]
 pub struct RenderOptions {
     optional: bool,
-    pub sample_count: u32,
+    quality: Quality,
 }
 
 impl Default for RenderOptions {
     fn default() -> Self {
         Self {
             optional: false,
-            sample_count: 1,
+            quality: Quality(StageQuality::High),
         }
+    }
+}
+
+impl RenderOptions {
+    pub fn quality(&self) -> StageQuality {
+        self.quality.0
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Quality(StageQuality);
+
+impl<'de> Deserialize<'de> for Quality {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let quality = std::str::FromStr::from_str(&s)
+            .map_err(|_| serde::de::Error::custom(format!("Unknown quality: {s}")))?;
+        Ok(Quality(quality))
     }
 }

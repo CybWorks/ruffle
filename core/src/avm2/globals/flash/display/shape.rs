@@ -1,11 +1,11 @@
 //! `flash.display.Shape` builtin/prototype
 
+use crate::avm2::Error;
 use crate::avm2::activation::Activation;
 use crate::avm2::globals::flash::display::display_object::initialize_for_allocator;
 use crate::avm2::globals::slots::flash_display_shape as slots;
 use crate::avm2::object::{ClassObject, Object, StageObject, TObject as _};
 use crate::avm2::value::Value;
-use crate::avm2::Error;
 use crate::display_object::Graphic;
 
 pub fn shape_allocator<'gc>(
@@ -14,11 +14,7 @@ pub fn shape_allocator<'gc>(
 ) -> Result<Object<'gc>, Error<'gc>> {
     let display_object = Graphic::empty(activation.context).into();
 
-    Ok(initialize_for_allocator(
-        activation.context,
-        display_object,
-        class,
-    ))
+    Ok(initialize_for_allocator(activation.context, display_object, class).into())
 }
 
 /// Implements `graphics`.

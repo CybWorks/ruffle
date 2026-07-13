@@ -1,21 +1,23 @@
 //! Object representation for Context3D objects
 
-use crate::avm2::activation::Activation;
-use crate::avm2::object::script_object::ScriptObjectData;
-use crate::avm2::object::{Object, TObject};
-use crate::avm2::value::Value;
 use crate::avm2::Error;
+use crate::avm2::activation::Activation;
+use crate::avm2::object::TObject;
+use crate::avm2::object::script_object::ScriptObjectData;
+use crate::avm2::value::Value;
 use crate::avm2_stub_method;
 use crate::bitmap::bitmap_data::BitmapRawData;
-use crate::context::RenderContext;
+use crate::context::{RenderContext, UpdateContext};
 use gc_arena::{Collect, Gc, GcWeak};
+use naga_agal::AgalError;
 use ruffle_common::utils::HasPrefixField;
 use ruffle_render::backend::{
     BufferUsage, Context3D, Context3DBlendFactor, Context3DCommand, Context3DCompareMode,
-    Context3DTextureFormat, Context3DTriangleFace, Context3DVertexBufferFormat, ProgramType,
-    Texture,
+    Context3DStencilAction, Context3DTextureFormat, Context3DTriangleFace,
+    Context3DVertexBufferFormat, ProgramType, Texture,
 };
 use ruffle_render::commands::CommandHandler;
+use ruffle_render::matrix::Matrix;
 use std::cell::Cell;
 use std::rc::Rc;
 use swf::{Rectangle, Twips};
@@ -34,21 +36,20 @@ pub struct Context3DObjectWeak<'gc>(pub GcWeak<'gc, Context3DData<'gc>>);
 
 impl<'gc> Context3DObject<'gc> {
     pub fn from_context(
-        activation: &mut Activation<'_, 'gc>,
-        context: Box<dyn Context3D>,
+        context: &mut UpdateContext<'gc>,
+        context3d: Box<dyn Context3D>,
         stage3d: Stage3DObject<'gc>,
-    ) -> Object<'gc> {
-        let class = activation.avm2().classes().context3d;
+    ) -> Self {
+        let class = context.avm2.classes().context3d;
 
         Context3DObject(Gc::new(
-            activation.gc(),
+            context.gc(),
             Context3DData {
                 base: ScriptObjectData::new(class),
-                render_context: Cell::new(Some(context)),
+                render_context: Cell::new(Some(context3d)),
                 stage3d,
             },
         ))
-        .into()
     }
 
     pub fn stage3d(self) -> Stage3DObject<'gc> {
@@ -203,14 +204,14 @@ impl<'gc> Context3DObject<'gc> {
         program: Program3DObject<'gc>,
         vertex_shader_agal: Vec<u8>,
         fragment_shader_agal: Vec<u8>,
-    ) {
+    ) -> Result<(), AgalError> {
         self.with_context_3d(|ctx| {
-            ctx.process_command(Context3DCommand::UploadShaders {
-                module: program.shader_module_handle(),
+            ctx.upload_shaders(
+                program.shader_module_handle(),
                 vertex_shader_agal,
                 fragment_shader_agal,
-            })
-        });
+            )
+        })
     }
 
     pub fn set_program(self, program: Option<Program3DObject<'gc>>) {
@@ -240,14 +241,14 @@ impl<'gc> Context3DObject<'gc> {
         });
     }
 
-    pub fn set_program_constants_from_matrix(
+    pub fn set_program_constants(
         self,
         program_type: ProgramType,
         first_register: u32,
-        matrix_raw_data_column_major: Vec<f32>,
+        matrix_raw_data_column_major: &[[u8; 4]],
     ) {
         self.with_context_3d(|ctx| {
-            ctx.process_command(Context3DCommand::SetProgramConstantsFromVector {
+            ctx.process_command(Context3DCommand::SetProgramConstants {
                 program_type,
                 first_register,
                 matrix_raw_data_column_major,
@@ -303,11 +304,15 @@ impl<'gc> Context3DObject<'gc> {
             if context3d.should_render() {
                 let handle = context3d.bitmap_handle();
 
-                context.commands.render_stage3d(
-                    handle,
-                    // FIXME - apply x and y translation from Stage3D
-                    context.transform_stack.transform(),
+                // FIXME - The Stage3D should not be scaled
+                // when resizing the player window.
+                let mut transform = context.transform_stack.transform();
+                transform.matrix *= Matrix::translate(
+                    Twips::from_pixels(self.stage3d().x()),
+                    Twips::from_pixels(self.stage3d().y()),
                 );
+
+                context.commands.render_stage3d(handle, transform);
             }
         });
     }
@@ -455,6 +460,40 @@ impl<'gc> Context3DObject<'gc> {
     pub(crate) fn set_scissor_rectangle(self, rect: Option<Rectangle<Twips>>) {
         self.with_context_3d(|ctx| {
             ctx.process_command(Context3DCommand::SetScissorRectangle { rect })
+        });
+    }
+
+    pub(crate) fn set_stencil_actions(
+        self,
+        triangle_face: Context3DTriangleFace,
+        compare_mode: Context3DCompareMode,
+        on_both_pass: Context3DStencilAction,
+        on_depth_fail: Context3DStencilAction,
+        on_depth_pass_stencil_fail: Context3DStencilAction,
+    ) {
+        self.with_context_3d(|ctx| {
+            ctx.process_command(Context3DCommand::SetStencilActions {
+                triangle_face,
+                compare_mode,
+                on_both_pass,
+                on_depth_fail,
+                on_depth_pass_stencil_fail,
+            })
+        });
+    }
+
+    pub(crate) fn set_stencil_reference_value(
+        self,
+        reference_value: u32,
+        read_mask: u32,
+        write_mask: u32,
+    ) {
+        self.with_context_3d(|ctx| {
+            ctx.process_command(Context3DCommand::SetStencilReferenceValue {
+                reference_value,
+                read_mask,
+                write_mask,
+            })
         });
     }
 }

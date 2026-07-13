@@ -4,16 +4,17 @@ use crate::avm1::Object as Avm1Object;
 use crate::avm2::object::Stage3DObject;
 use crate::avm2::{
     Activation as Avm2Activation, Avm2, EventObject as Avm2EventObject, LoaderInfoObject,
-    Object as Avm2Object, StageObject as Avm2StageObject,
+    Stage3DObject as Avm2Stage3DObject, StageObject as Avm2StageObject,
 };
 use crate::backend::ui::MouseCursor;
 use crate::config::Letterbox;
 use crate::context::{RenderContext, UpdateContext};
 use crate::display_object::container::ChildContainer;
 use crate::display_object::interactive::{InteractiveObjectBase, TInteractiveObject};
-use crate::display_object::DisplayObjectBase;
+use crate::display_object::{BoundsMode, DisplayObjectBase};
 use crate::events::{ClipEvent, ClipEventResult};
 use crate::focus_tracker::FocusTracker;
+use crate::frame_lifecycle::broadcast_frame_entered;
 use crate::prelude::*;
 use crate::string::{FromWStr, WStr};
 use crate::tag_utils::SwfMovie;
@@ -70,7 +71,7 @@ pub struct StageData<'gc> {
     loader_info: Lock<Option<LoaderInfoObject<'gc>>>,
 
     /// An array of AVM2 'Stage3D' instances
-    stage3ds: RefLock<Vec<Avm2Object<'gc>>>,
+    stage3ds: RefLock<Vec<Avm2Stage3DObject<'gc>>>,
 
     /// A tracker for the current keyboard focused element
     focus_tracker: FocusTracker<'gc>,
@@ -286,7 +287,7 @@ impl<'gc> Stage<'gc> {
         context.renderer.set_quality(quality);
     }
 
-    pub fn stage3ds(&self) -> Ref<'_, Vec<Avm2Object<'gc>>> {
+    pub fn stage3ds(&self) -> Ref<'_, Vec<Avm2Stage3DObject<'gc>>> {
         self.0.stage3ds.borrow()
     }
 
@@ -625,11 +626,10 @@ impl<'gc> Stage<'gc> {
         // layer, and gets applied when we start the frame (before
         // `render_viewport` is called).
         for stage3d in self.stage3ds().iter() {
-            let stage3d = stage3d.as_stage_3d().unwrap();
-            if stage3d.visible() {
-                if let Some(context3d) = stage3d.context3d() {
-                    context3d.as_context_3d().unwrap().render(context);
-                }
+            if stage3d.visible()
+                && let Some(context3d) = stage3d.context3d()
+            {
+                context3d.render(context);
             }
         }
 
@@ -792,6 +792,18 @@ impl<'gc> Stage<'gc> {
     pub fn focus_tracker(self) -> FocusTracker<'gc> {
         self.0.focus_tracker
     }
+
+    /// Updates the status of all the Stage3Ds.
+    ///
+    /// If any of them have requested a context, they will create one and set
+    /// it on themselves.
+    pub fn check_requested_context3ds(self, context: &mut UpdateContext<'gc>) {
+        let stage3ds = self.stage3ds();
+
+        for stage3d in &*stage3ds {
+            stage3d.update_context3d_status(context);
+        }
+    }
 }
 
 impl<'gc> TDisplayObject<'gc> for Stage<'gc> {
@@ -823,8 +835,8 @@ impl<'gc> TDisplayObject<'gc> for Stage<'gc> {
             Avm2StageObject::for_display_object(context.gc(), self.into(), stage_constr);
 
         // Always create 4 Stage3D instances for now, which matches the flash projector behavior
-        let stage3ds: Vec<Avm2Object<'gc>> =
-            (0..4).map(|_| Stage3DObject::new(context).into()).collect();
+        let stage3ds: Vec<Avm2Stage3DObject<'gc>> =
+            (0..4).map(|_| Stage3DObject::new(context)).collect();
 
         let write = Gc::write(context.gc(), self.0);
         unlock!(write, StageData, avm2_object).set(Some(avm2_stage));
@@ -835,7 +847,7 @@ impl<'gc> TDisplayObject<'gc> for Stage<'gc> {
         u16::MAX
     }
 
-    fn self_bounds(self) -> Rectangle<Twips> {
+    fn self_bounds(self, _mode: BoundsMode) -> Rectangle<Twips> {
         Default::default()
     }
 
@@ -848,9 +860,7 @@ impl<'gc> TDisplayObject<'gc> for Stage<'gc> {
             child.enter_frame(context);
         }
 
-        let enter_frame_evt = Avm2EventObject::bare_default_event(context, "enterFrame");
-        let dobject_constr = context.avm2.classes().display_object;
-        Avm2::broadcast_event(context, enter_frame_evt, dobject_constr);
+        broadcast_frame_entered(context);
     }
 
     fn construct_frame(self, context: &mut UpdateContext<'gc>) {
@@ -868,19 +878,16 @@ impl<'gc> TDisplayObject<'gc> for Stage<'gc> {
     }
 
     fn set_perspective_projection(self, mut perspective_projection: Option<PerspectiveProjection>) {
-        if perspective_projection.is_none() {
-            // `stage` doesn't allow null PerspectiveProjection.
-            perspective_projection = Some(Default::default());
-        }
+        // `stage` doesn't allow null PerspectiveProjection.
+        perspective_projection.get_or_insert_default();
         if self
             .base()
             .set_perspective_projection(perspective_projection)
+            && let Some(parent) = self.parent()
         {
-            if let Some(parent) = self.parent() {
-                // Self-transform changes are automatically handled,
-                // we only want to inform ancestors to avoid unnecessary invalidations for tx/ty
-                parent.invalidate_cached_bitmap();
-            }
+            // Self-transform changes are automatically handled,
+            // we only want to inform ancestors to avoid unnecessary invalidations for tx/ty
+            parent.invalidate_cached_bitmap();
         }
     }
 

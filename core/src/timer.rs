@@ -15,7 +15,8 @@ use crate::context::UpdateContext;
 use crate::display_object::{DisplayObject, TDisplayObject};
 use crate::string::AvmString;
 use gc_arena::Collect;
-use std::collections::{binary_heap::PeekMut, BinaryHeap};
+use ruffle_common::duration::FloatDuration;
+use std::collections::{BinaryHeap, binary_heap::PeekMut};
 
 /// Manages the collection of timers.
 #[derive(Collect)]
@@ -33,11 +34,11 @@ pub struct Timers<'gc> {
 
 impl<'gc> Timers<'gc> {
     /// Ticks all timers and runs necessary callbacks.
-    pub fn update_timers(context: &mut UpdateContext<'gc>, dt: f64) -> Option<f64> {
+    pub fn update_timers(context: &mut UpdateContext<'gc>, dt: FloatDuration) -> Option<f64> {
         context.timers.cur_time = context
             .timers
             .cur_time
-            .wrapping_add((dt * Self::TIMER_SCALE) as u64);
+            .wrapping_add((dt.as_millis() * Self::TIMER_SCALE) as u64);
 
         if context.timers.is_empty() {
             return None;

@@ -1,20 +1,21 @@
-use crate::custom_event::RuffleEvent;
+use crate::custom_event::{OpenType, RuffleEvent};
 use crate::gui::{GuiController, MENU_HEIGHT};
 use crate::player::{LaunchOptions, PlayerController};
 use crate::preferences::GlobalPreferences;
 use crate::util::{
-    get_screen_size, gilrs_button_to_gamepad_button, parse_url, plot_stats_in_tracy,
+    get_screen_size, gilrs_button_to_gamepad_button, plot_stats_in_tracy,
     winit_input_to_ruffle_key_descriptor, winit_to_ruffle_text_control,
 };
 use anyhow::Error;
 use gilrs::{Event, EventType, Gilrs};
+use ruffle_core::FloatDuration;
 use ruffle_core::PlayerEvent;
 use ruffle_core::events::{ImeEvent, ImeNotification, PlayerNotification};
 use ruffle_core::swf::HeaderExt;
+use ruffle_frontend_utils::content::ContentDescriptor;
 use ruffle_render::backend::ViewportDimensions;
 use std::sync::Arc;
 use std::time::Instant;
-use url::Url;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize, Size};
 use winit::event::{ElementState, Ime, KeyEvent, Modifiers, StartCause, WindowEvent};
@@ -91,6 +92,13 @@ impl MainWindow {
                     return;
                 }
 
+                // This is needed because some platforms (like macOS)
+                // will fire this event at the same time as WindowEvent::MouseInput,
+                // which may cause inaccurate behavior in the movie
+                if position == self.mouse_pos {
+                    return;
+                }
+
                 self.mouse_pos = position;
                 let (x, y) = self.gui.window_to_movie_position(position);
                 let event = PlayerEvent::MouseMove { x, y };
@@ -98,11 +106,11 @@ impl MainWindow {
                 self.check_redraw();
             }
             WindowEvent::DroppedFile(file) => {
-                if let Ok(url) = parse_url(&file) {
+                if let Some(content_descriptor) = ContentDescriptor::new_local(&file, None) {
                     self.gui.create_movie(
                         &mut self.player,
                         LaunchOptions::from(&self.preferences),
-                        url,
+                        content_descriptor,
                     );
                 }
             }
@@ -334,7 +342,7 @@ impl MainWindow {
         if let Some(mut player) = self.player.get() {
             player.set_viewport_dimensions(ViewportDimensions {
                 width: viewport_size.width,
-                height: viewport_size.height - height_offset as u32,
+                height: viewport_size.height - (height_offset * viewport_scale_factor) as u32,
                 scale_factor: viewport_scale_factor,
             });
         }
@@ -366,11 +374,11 @@ impl MainWindow {
         // We should look at changing our tick to happen somewhere else if we see any behavioural problems.
         if matches!(self.loaded, LoadingState::Loaded) {
             let new_time = Instant::now();
-            let dt = new_time.duration_since(self.time).as_nanos();
-            if dt > 0 {
+            let dt = FloatDuration::from_std(new_time.duration_since(self.time));
+            if dt.as_millis() > 0.0 {
                 self.time = new_time;
                 self.next_frame_time = self.player.get().map(|mut player| {
-                    player.tick(dt as f64 / 1_000_000.0);
+                    player.tick(dt);
                     new_time + player.time_til_next_frame()
                 });
                 self.check_redraw();
@@ -506,7 +514,10 @@ impl ApplicationHandler<RuffleEvent> for App {
                 gui.create_movie(
                     &mut player,
                     LaunchOptions::from(&preferences),
-                    movie_url.clone(),
+                    ContentDescriptor {
+                        url: movie_url.clone(),
+                        root_content_path: None,
+                    },
                 );
             } else {
                 gui.show_open_dialog();
@@ -559,24 +570,32 @@ impl ApplicationHandler<RuffleEvent> for App {
                 }
             }
 
-            (Some(main_window), RuffleEvent::BrowseAndOpen(options)) => {
+            (Some(main_window), RuffleEvent::BrowseAndOpen(options, open_type)) => {
                 let event_loop = main_window.event_loop_proxy.clone();
                 let picker = main_window.gui.file_picker();
                 tokio::spawn(async move {
-                    if let Some(url) = picker
-                        .pick_ruffle_file(None)
-                        .await
-                        .and_then(|p| Url::from_file_path(p).ok())
+                    let picked = match open_type {
+                        OpenType::File => {
+                            picker.pick_ruffle_file(None).await.map(|file| (file, None))
+                        }
+                        OpenType::Directory => picker
+                            .pick_ruffle_directory_and_content(None)
+                            .await
+                            .map(|(dir, file)| (file, Some(dir))),
+                    };
+
+                    if let Some(desc) =
+                        picked.and_then(|(file, dir)| ContentDescriptor::new_local(&file, dir))
                     {
-                        let _ = event_loop.send_event(RuffleEvent::Open(url, options));
+                        let _ = event_loop.send_event(RuffleEvent::Open(desc, options));
                     }
                 });
             }
 
-            (Some(main_window), RuffleEvent::Open(url, options)) => {
+            (Some(main_window), RuffleEvent::Open(desc, options)) => {
                 main_window
                     .gui
-                    .create_movie(&mut main_window.player, *options, url);
+                    .create_movie(&mut main_window.player, *options, desc);
             }
 
             (Some(main_window), RuffleEvent::OpenDialog(descriptor)) => {

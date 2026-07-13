@@ -5,12 +5,13 @@ use crate::avm1::{Activation, ArrayBuilder, Attribute, Error, NativeObject, Obje
 use crate::string::{AvmString, StringContext, WStr, WString};
 use gc_arena::barrier::unlock;
 use gc_arena::{
-    lock::{Lock, RefLock},
     Collect, Gc, Mutation,
+    lock::{Lock, RefLock},
 };
+use quick_xml::encoding::EncodingError;
 use quick_xml::escape::escape;
 use quick_xml::events::BytesStart;
-use ruffle_common::xml::custom_unescape;
+use ruffle_common::xml::avm1_unescape;
 use ruffle_macros::istr;
 use std::cell::RefMut;
 use std::fmt;
@@ -83,18 +84,19 @@ impl<'gc> XmlNode<'gc> {
         activation: &mut Activation<'_, 'gc>,
         bs: BytesStart<'_>,
         id_map: Object<'gc>,
-        decoder: quick_xml::Decoder,
     ) -> Result<Self, quick_xml::Error> {
         let name = AvmString::new_utf8_bytes(activation.gc(), bs.name().into_inner());
         let node = Self::new(activation.gc(), ELEMENT_NODE, Some(name));
 
         // Reverse attributes so they appear in the `PropertyMap` in their definition order.
-        let attributes: Result<Vec<_>, _> = bs.attributes().collect();
-        let attributes = attributes?;
+        let attributes = bs.attributes().collect::<Result<Vec<_>, _>>()?;
+
         for attribute in attributes.iter().rev() {
             let key = AvmString::new_utf8_bytes(activation.gc(), attribute.key.into_inner());
-            let value_str = custom_unescape(&attribute.value, decoder)?;
-            let value = AvmString::new_utf8_bytes(activation.gc(), value_str.as_bytes());
+
+            let value_str = avm1_unescape(&attribute.value)
+                .map_err(|e| quick_xml::Error::Encoding(EncodingError::Utf8(e)))?;
+            let value = AvmString::new_utf8(activation.gc(), value_str);
 
             // Insert an attribute.
             node.attributes()
@@ -219,10 +221,10 @@ impl<'gc> XmlNode<'gc> {
             return;
         }
 
-        if let Some(old_parent) = child.parent() {
-            if !Gc::ptr_eq(self.0, old_parent.0) {
-                old_parent.orphan_child(mc, child);
-            }
+        if let Some(old_parent) = child.parent()
+            && !Gc::ptr_eq(self.0, old_parent.0)
+        {
+            old_parent.orphan_child(mc, child);
         }
 
         child.set_parent(mc, Some(self));
@@ -347,7 +349,10 @@ impl<'gc> XmlNode<'gc> {
     /// call this if you need to instantiate the script object for the first
     /// time. Attempting to call it a second time will panic.
     pub fn introduce_script_object(self, gc_context: &Mutation<'gc>, new_object: Object<'gc>) {
-        assert!(self.get_script_object().is_none(), "An attempt was made to change the already-established link between script object and XML node. This has been denied and is likely a bug.");
+        assert!(
+            self.get_script_object().is_none(),
+            "An attempt was made to change the already-established link between script object and XML node. This has been denied and is likely a bug."
+        );
 
         unlock!(Gc::write(gc_context, self.0), XmlNodeData, script_object).set(Some(new_object));
     }

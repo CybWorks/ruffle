@@ -12,7 +12,6 @@ use serde::Serialize;
 use std::borrow::Cow;
 use std::fs::File;
 use std::path::Path;
-use std::process::exit;
 
 // This function is used in macros and they require such signature with &bool.
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -286,16 +285,15 @@ impl Definition {
             .super_class_name()
             .as_ref()
             .and_then(|n| n.local_name())
+            && &super_name != b"Object"
         {
-            if &super_name != b"Object" {
-                definition.classinfo.get_or_insert_default().extends = Some(super_name.to_string());
-            }
+            definition.classinfo.get_or_insert_default().extends = Some(super_name.to_string());
         }
 
         let prototype = class_object.prototype();
         let prototype_base = prototype.base();
         let prototype_values = prototype_base.values();
-        for (key, value) in prototype_values.as_hashmap().iter() {
+        for (key, value) in prototype_values.iter() {
             let name = match key {
                 DynamicKey::String(name) => *name,
                 DynamicKey::Uint(key) => AvmString::new_utf8(activation.gc(), key.to_string()),
@@ -365,16 +363,28 @@ impl Definition {
             let trait_name = class_trait.name().local_name().to_string();
             match class_trait.kind() {
                 TraitKind::Slot {
-                    type_name,
+                    slot_type,
                     default_value,
                     ..
                 } => {
                     output.get_or_insert_default().variables.insert(
                         trait_name,
                         VariableInfo {
-                            type_info: type_name
-                                .and_then(|m| m.local_name())
-                                .map(|n| n.to_string()),
+                            type_info: slot_type.get_local_name().map(|n| n.to_string()),
+                            value: format_value(default_value),
+                            stubbed: false,
+                        },
+                    );
+                }
+                TraitKind::Const {
+                    slot_type,
+                    default_value,
+                    ..
+                } => {
+                    output.get_or_insert_default().constants.insert(
+                        trait_name,
+                        VariableInfo {
+                            type_info: slot_type.get_local_name().map(|n| n.to_string()),
                             value: format_value(default_value),
                             stubbed: false,
                         },
@@ -424,22 +434,6 @@ impl Definition {
                     );
                 }
                 TraitKind::Class { .. } => {}
-                TraitKind::Const {
-                    type_name,
-                    default_value,
-                    ..
-                } => {
-                    output.get_or_insert_default().constants.insert(
-                        trait_name,
-                        VariableInfo {
-                            type_info: type_name
-                                .and_then(|m| m.local_name())
-                                .map(|n| n.to_string()),
-                            value: format_value(default_value),
-                            stubbed: false,
-                        },
-                    );
-                }
             }
         }
     }
@@ -497,5 +491,4 @@ pub fn capture_specification(context: &mut UpdateContext, output: &Path) {
     }
     serde_json::to_writer_pretty(&File::create(output).unwrap(), &definitions).unwrap();
     tracing::info!("Wrote stub report to {output:?}");
-    exit(0);
 }

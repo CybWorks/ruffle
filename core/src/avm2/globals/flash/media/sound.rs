@@ -1,5 +1,7 @@
 //! `flash.media.Sound` builtin/prototype
 
+use crate::avm2::Avm2;
+use crate::avm2::Error;
 use crate::avm2::activation::Activation;
 use crate::avm2::error::{make_error_2037, make_error_2084};
 use crate::avm2::globals::methods::flash_media_sound as sound_methods;
@@ -9,8 +11,6 @@ use crate::avm2::object::{
 };
 use crate::avm2::parameters::ParametersExt;
 use crate::avm2::value::Value;
-use crate::avm2::Avm2;
-use crate::avm2::Error;
 use crate::backend::navigator::Request;
 use crate::character::Character;
 use crate::display_object::SoundTransform;
@@ -42,7 +42,11 @@ pub fn init<'gc>(
             {
                 sound_object.set_sound(activation.context, sound);
             } else {
-                tracing::warn!("Attempted to construct subclass of Sound, {}, which is associated with non-Sound character {}", class_def.name().local_name(), symbol);
+                tracing::warn!(
+                    "Attempted to construct subclass of Sound, {}, which is associated with non-Sound character {}",
+                    class_def.name().local_name(),
+                    symbol
+                );
             }
         }
     }
@@ -63,10 +67,10 @@ pub fn get_bytes_total<'gc>(
     let this = this.as_object().unwrap();
 
     if let Some(sound) = this.as_sound_object() {
-        if let Some(sound_handle) = sound.sound_handle() {
-            if let Some(length) = activation.context.audio.get_sound_size(sound_handle) {
-                return Ok((length).into());
-            }
+        if let Some(sound_handle) = sound.sound_handle()
+            && let Some(length) = activation.context.audio.get_sound_size(sound_handle)
+        {
+            return Ok((length).into());
         }
         return Ok(0.into());
     }
@@ -126,10 +130,10 @@ pub fn get_length<'gc>(
     let this = this.as_object().unwrap();
 
     if let Some(sound) = this.as_sound_object() {
-        if let Some(sound_handle) = sound.sound_handle() {
-            if let Some(duration) = activation.context.audio.get_sound_duration(sound_handle) {
-                return Ok((duration).into());
-            }
+        if let Some(sound_handle) = sound.sound_handle()
+            && let Some(duration) = activation.context.audio.get_sound_duration(sound_handle)
+        {
+            return Ok((duration.as_millis()).into());
         }
         return Ok(0.into());
     }
@@ -200,12 +204,12 @@ pub fn extract<'gc>(
     let bytearray = args.try_get_object(0);
     let length = args.get_f64(1);
 
-    if let Some(bytearray) = bytearray {
-        if let Some(mut bytearray) = bytearray.as_bytearray_mut() {
-            bytearray
-                .write_bytes(vec![0u8; length.ceil() as usize].as_slice())
-                .map_err(|e| e.to_avm(activation))?;
-        }
+    if let Some(bytearray) = bytearray
+        && let Some(mut bytearray) = bytearray.as_bytearray_mut()
+    {
+        bytearray
+            .write_bytes(vec![0u8; length.ceil() as usize].as_slice())
+            .map_err(|e| e.to_avm(activation))?;
     }
 
     Ok(Value::Undefined)

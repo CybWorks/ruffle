@@ -10,7 +10,10 @@ use egui::{Context, FontData, FontDefinitions, ViewportId};
 use fontdb::{Database, Family, Query, Source};
 use ruffle_core::events::{ImeCursorArea, ImePurpose};
 use ruffle_core::{Player, PlayerEvent};
-use ruffle_render_wgpu::backend::{WgpuRenderBackend, request_adapter_and_device};
+use ruffle_frontend_utils::content::ContentDescriptor;
+use ruffle_render_wgpu::backend::{
+    WgpuRenderBackend, create_wgpu_instance, request_adapter_and_device,
+};
 use ruffle_render_wgpu::descriptors::Descriptors;
 use ruffle_render_wgpu::utils::{format_list, get_backend_names};
 use std::any::Any;
@@ -58,7 +61,7 @@ impl GuiController {
         initial_movie_url: Option<Url>,
         no_gui: bool,
     ) -> anyhow::Result<Self> {
-        let (instance, backend) = create_wgpu_instance(preferences.graphics_backends().into())?;
+        let (instance, backend) = select_wgpu_backend(preferences.graphics_backends().into())?;
         let surface = unsafe {
             instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::from_window(window.as_ref())?)
         }?;
@@ -146,7 +149,10 @@ impl GuiController {
         let gui = RuffleGui::new(
             Arc::downgrade(&window),
             event_loop,
-            initial_movie_url,
+            initial_movie_url.map(|url| ContentDescriptor {
+                url,
+                root_content_path: None,
+            }),
             LaunchOptions::from(&preferences),
             preferences.clone(),
         );
@@ -195,7 +201,7 @@ impl GuiController {
         }
     }
 
-    pub fn reconfigure_surface(&mut self) {
+    pub fn reconfigure_surface(&self) {
         self.surface.configure(
             &self.descriptors.device,
             &wgpu::SurfaceConfiguration {
@@ -257,8 +263,10 @@ impl GuiController {
         &mut self,
         player: &mut PlayerController,
         opt: LaunchOptions,
-        movie_url: Url,
+        content_descriptor: ContentDescriptor,
     ) {
+        tracing::info!("Opening {}", content_descriptor.describe());
+
         self.close_movie(player);
         let movie_view = MovieView::new(
             self.movie_view_renderer.clone(),
@@ -266,10 +274,10 @@ impl GuiController {
             self.size.width,
             self.size.height,
         );
-        player.create(&opt, &movie_url, movie_view);
+        player.create(&opt, &content_descriptor, movie_view);
         self.gui.on_player_created(
             opt,
-            movie_url,
+            content_descriptor,
             player
                 .get()
                 .expect("Player must exist after being created."),
@@ -484,21 +492,22 @@ impl GuiController {
     }
 
     pub fn export_bundle(&mut self) {
-        let Some(movie_url) = self.gui.dialogs.saved_movie_url() else {
+        let Some(content_descriptor) = self.gui.dialogs.saved_content_descriptor() else {
             return;
         };
 
-        let player_options = self.gui.dialogs.saved_launch_options().player.clone();
+        let launch_options = self.gui.dialogs.saved_launch_options();
+        let player_options = launch_options.player.clone();
         self.gui
             .dialogs
             .open_dialog(DialogDescriptor::ExportBundle(Box::new(
-                ExportBundleDialogConfiguration::new(movie_url.clone(), player_options),
+                ExportBundleDialogConfiguration::new(content_descriptor, player_options),
             )));
         self.gui.on_player_destroyed();
     }
 }
 
-fn create_wgpu_instance(
+fn select_wgpu_backend(
     preferred_backends: wgpu::Backends,
 ) -> anyhow::Result<(wgpu::Instance, wgpu::Backends)> {
     for backend in preferred_backends.iter() {
@@ -532,11 +541,7 @@ fn create_wgpu_instance(
 }
 
 fn try_wgpu_backend(backend: wgpu::Backends) -> Option<wgpu::Instance> {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-        backends: backend,
-        flags: wgpu::InstanceFlags::default().with_env(),
-        ..Default::default()
-    });
+    let instance = create_wgpu_instance(backend, wgpu::BackendOptions::default());
     if instance.enumerate_adapters(backend).is_empty() {
         None
     } else {
@@ -676,7 +681,7 @@ fn register_family_font(
         }
     };
 
-    tracing::info!("Registering font {name} as {family}");
+    tracing::debug!("Registering font {name} as {family}");
 
     fd.font_data.insert(name.clone(), fontdata.into());
     fd.families.entry(family).or_default().push(name);

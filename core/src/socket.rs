@@ -1,6 +1,6 @@
 use crate::avm1::{
-    globals::xml_socket::XmlSocket, Activation as Avm1Activation, ActivationIdentifier,
-    ExecutionReason, Object as Avm1Object,
+    Activation as Avm1Activation, ActivationIdentifier, ExecutionReason, Object as Avm1Object,
+    globals::xml_socket::XmlSocket,
 };
 use crate::avm2::object::{EventObject, SocketObject};
 use crate::avm2::{Activation as Avm2Activation, Avm2};
@@ -8,11 +8,10 @@ use crate::backend::navigator::NavigatorBackend;
 use crate::context::UpdateContext;
 use crate::string::AvmString;
 
-use async_channel::{unbounded, Receiver, Sender as AsyncSender, Sender};
-use gc_arena::collect::Trace;
+use async_channel::{Receiver, Sender, unbounded};
 use gc_arena::Collect;
 use ruffle_macros::istr;
-use slotmap::{new_key_type, SlotMap};
+use slotmap::{SlotMap, new_key_type};
 use std::{
     cell::{Cell, RefCell},
     time::Duration,
@@ -33,12 +32,12 @@ enum SocketKind<'gc> {
 #[collect(no_drop)]
 struct Socket<'gc> {
     target: SocketKind<'gc>,
-    sender: RefCell<AsyncSender<Vec<u8>>>,
+    sender: RefCell<Sender<Vec<u8>>>,
     connected: Cell<bool>,
 }
 
 impl<'gc> Socket<'gc> {
-    fn new(target: SocketKind<'gc>, sender: AsyncSender<Vec<u8>>) -> Self {
+    fn new(target: SocketKind<'gc>, sender: Sender<Vec<u8>>) -> Self {
         Self {
             target,
             sender: RefCell::new(sender),
@@ -62,19 +61,15 @@ pub enum SocketAction {
 }
 
 /// Manages the collection of Sockets.
+#[derive(Collect)]
+#[collect(no_drop)]
 pub struct Sockets<'gc> {
     sockets: SlotMap<SocketHandle, Socket<'gc>>,
 
+    #[collect(require_static)]
     receiver: Receiver<SocketAction>,
+    #[collect(require_static)]
     sender: Sender<SocketAction>,
-}
-
-unsafe impl<'gc> Collect<'gc> for Sockets<'gc> {
-    fn trace<C: Trace<'gc>>(&self, cc: &mut C) {
-        for (_, socket) in self.sockets.iter() {
-            cc.trace(socket);
-        }
-    }
 }
 
 impl<'gc> Sockets<'gc> {

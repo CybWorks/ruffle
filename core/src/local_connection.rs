@@ -1,13 +1,13 @@
-use crate::avm1::globals::local_connection::LocalConnection as Avm1LocalConnectionObject;
 use crate::avm1::Object as Avm1Object;
-use crate::avm2::object::LocalConnectionObject;
+use crate::avm1::globals::local_connection::LocalConnection as Avm1LocalConnectionObject;
 use crate::avm2::Domain as Avm2Domain;
+use crate::avm2::object::LocalConnectionObject;
 use crate::context::UpdateContext;
 use crate::string::AvmString;
 use flash_lso::types::Value as AmfValue;
 use fnv::FnvHashMap;
-use gc_arena::collect::Trace;
 use gc_arena::Collect;
+use gc_arena::collect::Trace;
 use ruffle_macros::istr;
 use ruffle_wstr::{WStr, WString};
 use std::borrow::Cow;
@@ -123,7 +123,7 @@ pub struct LocalConnections<'gc> {
 // TODO(moulins): use gc_arena::Static to avoid unsafe impl?
 unsafe impl<'gc> Collect<'gc> for LocalConnections<'gc> {
     fn trace<C: Trace<'gc>>(&self, cc: &mut C) {
-        for (_, v) in self.connections.iter() {
+        for v in self.connections.values() {
             cc.trace(v);
         }
         cc.trace(&self.messages);

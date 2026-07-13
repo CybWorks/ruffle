@@ -79,10 +79,10 @@ pub fn dispatch_added_to_stage_event<'gc>(
             dispatch_added_to_stage_event(grandchild, context)
         }
     }
-    if let Some(button) = child.as_avm2_button() {
-        if let Some(child) = button.get_state_child(button.state().into()) {
-            dispatch_added_to_stage_event(child, context);
-        }
+    if let Some(button) = child.as_avm2_button()
+        && let Some(child) = button.get_state_child(button.state().into())
+    {
+        dispatch_added_to_stage_event(child, context);
     }
 }
 
@@ -218,11 +218,15 @@ pub trait TDisplayObjectContainer<'gc>:
         child.set_place_frame(0);
         child.set_depth(depth);
 
-        if let Some(removed_child) = removed_child {
-            if !self.raw_container().is_action_script_3() {
-                removed_child.avm1_unload(context);
-            }
-            removed_child.set_parent(context, None);
+        if let Some(removed_child) = removed_child
+            && !self.raw_container().is_action_script_3()
+        {
+            // The parent of `removed_child` should NOT be set to `None` here.
+            // It's theoretically impossible for an AVM2 child to end up here(?),
+            // and doing so for AVM1 can e.g. break the logic of the audio
+            // manager's `stop_sounds_on_parent_and_children` method.
+            // (See https://github.com/ruffle-rs/ruffle/issues/21500)
+            removed_child.avm1_unload(context);
         }
 
         let this: DisplayObject<'_> = self.into();
@@ -533,10 +537,10 @@ pub trait TDisplayObjectContainer<'gc>:
                 // Non-visible objects and their children are excluded from tab ordering.
                 continue;
             }
-            if let Some(child) = child.as_interactive() {
-                if child.is_tabbable(context) {
-                    tab_order.add_object(child);
-                }
+            if let Some(child) = child.as_interactive()
+                && child.is_tabbable(context)
+            {
+                tab_order.add_object(child);
             }
             if let Some(container) = child.as_container() {
                 container.fill_tab_order(tab_order, context);
@@ -744,52 +748,44 @@ impl<'gc> ChildContainer<'gc> {
                 let parent = child.parent().expect(
                     "Parent must be removed *after* calling `remove_child_from_render_list`",
                 );
-                if child.has_explicit_name() {
-                    if let Some(name) = child.name() {
-                        if let Some(parent_obj) = parent.object2() {
-                            if child.movie().is_action_script_3() {
-                                let parent_obj = Avm2Value::from(parent_obj);
+                if child.has_explicit_name()
+                    && let Some(name) = child.name()
+                    && let Some(parent_obj) = parent.object2()
+                    && child.movie().is_action_script_3()
+                {
+                    let parent_obj = Avm2Value::from(parent_obj);
 
-                                let mut activation = Avm2Activation::from_nothing(context);
-                                let multiname = Avm2Multiname::new(
-                                    activation.avm2().find_public_namespace(),
-                                    name,
+                    let mut activation = Avm2Activation::from_nothing(context);
+                    let multiname =
+                        Avm2Multiname::new(activation.avm2().find_public_namespace(), name);
+                    let current_val = parent_obj.get_property(&multiname, &mut activation);
+                    match current_val {
+                        Ok(Avm2Value::Null | Avm2Value::Undefined) => {
+                            // When the `get_property` returns null
+                            // or undefined, FP doesn't attempt to
+                            // set it to `null`. This is observable:
+                            // a setter method won't get called.
+                        }
+                        Ok(_other) => {
+                            let res = parent_obj.set_property(
+                                &multiname,
+                                Avm2Value::Null,
+                                &mut activation,
+                            );
+                            if let Err(err) = res {
+                                Avm2::uncaught_error(
+                                    &mut activation,
+                                    Some(child),
+                                    err,
+                                    &format!("Error setting AVM2 child named \"{}\" to null", name),
                                 );
-                                let current_val =
-                                    parent_obj.get_property(&multiname, &mut activation);
-                                match current_val {
-                                    Ok(Avm2Value::Null) | Ok(Avm2Value::Undefined) => {
-                                        // When the `get_property` returns null
-                                        // or undefined, FP doesn't attempt to
-                                        // set it to `null`. This is observable:
-                                        // a setter method won't get called.
-                                    }
-                                    Ok(_other) => {
-                                        let res = parent_obj.set_property(
-                                            &multiname,
-                                            Avm2Value::Null,
-                                            &mut activation,
-                                        );
-                                        if let Err(err) = res {
-                                            Avm2::uncaught_error(
-                                                &mut activation,
-                                                Some(child),
-                                                err,
-                                                &format!(
-                                                    "Error setting AVM2 child named \"{}\" to null",
-                                                    name
-                                                ),
-                                            );
-                                        }
-                                    }
-                                    Err(_) => {
-                                        // In FP, errors when accessing the
-                                        // original value are completely
-                                        // swallowed. They don't make it to
-                                        // flashlog or to uncaught error events.
-                                    }
-                                }
                             }
+                        }
+                        Err(_) => {
+                            // In FP, errors when accessing the
+                            // original value are completely
+                            // swallowed. They don't make it to
+                            // flashlog or to uncaught error events.
                         }
                     }
                 }
@@ -852,15 +848,14 @@ impl<'gc> ChildContainer<'gc> {
                     .position(|x| DisplayObject::ptr_eq(*x, above_child))
                 {
                     self.insert_id(position, child);
-                    None
                 } else {
                     self.push_id(child);
-                    None
                 }
             } else {
                 self.push_id(child);
-                None
             }
+
+            None
         }
     }
 
@@ -1120,10 +1115,10 @@ impl<'gc> ChildContainer<'gc> {
             if mc.has_unload_handler() {
                 return true;
             // otherwise, check for a dynamic unload handler
-            } else if let Some(obj) = child.object1() {
-                if obj.has_property(activation, istr!("onUnload")) {
-                    return true;
-                }
+            } else if let Some(obj) = child.object1()
+                && obj.has_property(activation, istr!("onUnload"))
+            {
+                return true;
             }
         }
 

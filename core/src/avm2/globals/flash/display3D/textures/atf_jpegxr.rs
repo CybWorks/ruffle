@@ -1,6 +1,6 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::bytearray::ByteArrayStorage;
-use crate::avm2::error::{make_error_3675, make_error_3679, Error};
+use crate::avm2::error::{Error, make_error_3675, make_error_3679};
 use crate::avm2::object::{Object, TextureObject};
 use crate::avm2_stub_method;
 use ruffle_render::atf::ATFTexture;
@@ -163,7 +163,7 @@ pub fn do_compressed_upload<'gc>(
             dxt5.clone()
         }
         ATFTextureData::Unknown(_) => {
-            return Err(format!("Unsupported ATF format: {:?}", atf_texture.format).into())
+            return Err(format!("Unsupported ATF format: {:?}", atf_texture.format).into());
         }
     };
 

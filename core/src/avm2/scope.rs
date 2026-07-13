@@ -1,18 +1,18 @@
 //! Represents AVM2 scope chain resolution.
 
+use crate::avm2::Error;
 use crate::avm2::activation::Activation;
 use crate::avm2::class::Class;
 use crate::avm2::domain::Domain;
 use crate::avm2::object::TObject;
+use crate::avm2::property_map::PropertyMap;
+use crate::avm2::qname::QName;
 use crate::avm2::value::Value;
-use crate::avm2::Error;
 use crate::avm2::{Multiname, Namespace};
 use core::fmt;
 use gc_arena::barrier::field;
 use gc_arena::lock::RefLock;
 use gc_arena::{Collect, Gc, Mutation};
-
-use super::property_map::PropertyMap;
 
 /// Represents a Scope that can be on either a ScopeChain or local ScopeStack.
 #[derive(Collect, Clone, Copy, Debug)]
@@ -217,13 +217,13 @@ impl<'gc> ScopeChain<'gc> {
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<Option<Value<'gc>>, Error<'gc>> {
         // First we check the cache of our container
-        if let Some(container) = self.container {
-            if let Some(cache) = &container.cache {
-                if let Some(cached) = cache.borrow().get_for_multiname(multiname) {
-                    return Ok(Some(*cached));
-                }
-            }
+        if let Some(container) = self.container
+            && let Some(cache) = &container.cache
+            && let Some(cached) = cache.borrow().get_for_multiname(multiname)
+        {
+            return Ok(Some(*cached));
         }
+
         let found = self.find_internal(multiname, activation)?;
         if let (Some((Some(ns), obj)), Some(container)) = (found, self.container) {
             // We found a value that hasn't been cached yet, so let's try to cache it now
@@ -232,10 +232,9 @@ impl<'gc> ScopeChain<'gc> {
                 let name = multiname
                     .local_name()
                     .expect("Resolvable multinames should always have a local name");
-                cache
-                    .unlock()
-                    .borrow_mut()
-                    .insert_with_namespace(ns, name, obj);
+                let qname = QName::new(ns, name);
+
+                cache.unlock().borrow_mut().insert_at_end(qname, obj);
             }
         }
         Ok(found.map(|o| o.1))

@@ -4,8 +4,8 @@ use crate::{
     font::{FontFileData, FontQuery, FontRenderer},
 };
 use chrono::{DateTime, Utc};
-use fluent_templates::loader::langid;
 pub use fluent_templates::LanguageIdentifier;
+use fluent_templates::loader::langid;
 use std::{any::Any, borrow::Cow};
 use url::Url;
 
@@ -47,13 +47,27 @@ pub struct FileFilter {
     pub mac_type: Option<String>,
 }
 
-/// A result of a file selection
-pub trait FileDialogResult: Any {
-    /// Was the file selection canceled by the user
-    fn is_cancelled(&self) -> bool;
+impl FileFilter {
+    /// Returns extensions suitable for file dialogs.
+    /// When `is_mac` is true, uses `mac_type` if available; otherwise uses `extensions` with wildcards stripped.
+    /// `is_mac` should be true when the user uses a Mac.
+    pub fn extensions_for_dialog(&self, is_mac: bool) -> Vec<&str> {
+        if is_mac && let Some(mac_type) = &self.mac_type {
+            return mac_type.split(';').collect();
+        }
+
+        self.extensions
+            .split(';')
+            .map(|x| x.trim_start_matches("*."))
+            .collect()
+    }
+}
+
+/// Data for a single selected file.
+pub trait FileDialogSelection: Any {
     fn creation_time(&self) -> Option<DateTime<Utc>>;
     fn modification_time(&self) -> Option<DateTime<Utc>>;
-    fn file_name(&self) -> Option<String>;
+    fn file_name(&self) -> String;
     fn size(&self) -> Option<u64>;
     fn file_type(&self) -> Option<String>;
     fn creator(&self) -> Option<String> {
@@ -61,13 +75,32 @@ pub trait FileDialogResult: Any {
     }
     fn contents(&self) -> &[u8];
     /// Write the given data to the chosen file and refresh any internal metadata.
-    /// Any future calls to other functions (such as [FileDialogResult::size]) will reflect
+    /// Any future calls to other functions (such as [FileDialogSelection::size]) will reflect
     /// the state at the time of the last refresh
     fn write_and_refresh(&mut self, data: &[u8]);
 }
 
-/// Future representing a file selection in process
-pub type DialogResultFuture = OwnedFuture<Box<dyn FileDialogResult>, DialogLoaderError>;
+/// Result of a single-file dialog (open or save).
+pub enum FileDialogResult {
+    /// The user selected a file.
+    Selection(Box<dyn FileDialogSelection>),
+    /// The user canceled the dialog.
+    Canceled,
+}
+
+/// Result of a multi-file open dialog.
+pub enum MultiFileDialogResult {
+    /// The user selected one or more files.
+    Selection(Vec<Box<dyn FileDialogSelection>>),
+    /// The user canceled the dialog.
+    Canceled,
+}
+
+/// Future representing a single-file selection in process.
+pub type DialogResultFuture = OwnedFuture<FileDialogResult, DialogLoaderError>;
+
+/// Future representing a multi-file selection in process.
+pub type MultiDialogResultFuture = OwnedFuture<MultiFileDialogResult, DialogLoaderError>;
 
 pub trait UiBackend: Any {
     fn mouse_visible(&self) -> bool;
@@ -124,10 +157,18 @@ pub trait UiBackend: Any {
         register: &mut dyn FnMut(FontDefinition),
     ) -> Vec<FontQuery>;
 
-    /// Displays a file selection dialog, returning None if the dialog cannot be displayed
-    /// (e.g because it is already open)
+    /// Displays a single-file selection dialog, returning None if the dialog cannot be displayed
+    /// (e.g because it is already open).
     /// * `filters` represents a list of filters to the possible file types that can be selected
     fn display_file_open_dialog(&mut self, filters: Vec<FileFilter>) -> Option<DialogResultFuture>;
+
+    /// Displays a multi-file selection dialog, returning None if the dialog cannot be displayed
+    /// (e.g because it is already open).
+    /// * `filters` represents a list of filters to the possible file types that can be selected
+    fn display_file_open_dialog_multiple(
+        &mut self,
+        _filters: Vec<FileFilter>,
+    ) -> Option<MultiDialogResultFuture>;
 
     /// Display a dialog allowing a user to select a destination to save a file to
     ///
@@ -221,11 +262,14 @@ impl UiBackend for NullUiBackend {
         &mut self,
         _filters: Vec<FileFilter>,
     ) -> Option<DialogResultFuture> {
-        Some(Box::pin(async move {
-            let result: Result<Box<dyn FileDialogResult>, DialogLoaderError> =
-                Ok(Box::new(NullFileDialogResult::new()));
-            result
-        }))
+        Some(Box::pin(async move { Ok(FileDialogResult::Canceled) }))
+    }
+
+    fn display_file_open_dialog_multiple(
+        &mut self,
+        _filters: Vec<FileFilter>,
+    ) -> Option<MultiDialogResultFuture> {
+        Some(Box::pin(async move { Ok(MultiFileDialogResult::Canceled) }))
     }
 
     fn close_file_dialog(&mut self) {}
@@ -243,45 +287,4 @@ impl Default for NullUiBackend {
     fn default() -> Self {
         NullUiBackend::new()
     }
-}
-
-pub struct NullFileDialogResult {}
-
-impl NullFileDialogResult {
-    pub fn new() -> Self {
-        Self {}
-    }
-}
-
-impl Default for NullFileDialogResult {
-    fn default() -> Self {
-        NullFileDialogResult::new()
-    }
-}
-
-impl FileDialogResult for NullFileDialogResult {
-    fn is_cancelled(&self) -> bool {
-        true
-    }
-
-    fn creation_time(&self) -> Option<DateTime<Utc>> {
-        None
-    }
-    fn modification_time(&self) -> Option<DateTime<Utc>> {
-        None
-    }
-    fn file_name(&self) -> Option<String> {
-        None
-    }
-    fn size(&self) -> Option<u64> {
-        None
-    }
-    fn file_type(&self) -> Option<String> {
-        None
-    }
-    fn contents(&self) -> &[u8] {
-        &[]
-    }
-
-    fn write_and_refresh(&mut self, _data: &[u8]) {}
 }

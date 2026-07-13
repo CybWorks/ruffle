@@ -14,7 +14,7 @@ use crate::tag_utils::SwfMovie;
 use crate::types::{Degrees, Percent};
 use crate::vminterface::Instantiator;
 use bitflags::bitflags;
-use gc_arena::barrier::{unlock, Write};
+use gc_arena::barrier::{Write, unlock};
 use gc_arena::lock::Lock;
 use gc_arena::{Collect, Gc, Mutation};
 use ruffle_macros::{enum_trait_object, istr};
@@ -24,6 +24,7 @@ use ruffle_render::transform::{Transform, TransformStack};
 use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::fmt::Debug;
 use std::hash::Hash;
+use std::num::NonZero;
 use std::sync::Arc;
 use swf::{ColorTransform, Fixed8};
 
@@ -39,13 +40,14 @@ mod morph_shape;
 mod movie_clip;
 mod stage;
 mod text;
+mod text_line;
 mod video;
 
 use crate::avm1::Activation;
 use crate::display_object::bitmap::BitmapWeak;
 pub use crate::display_object::container::{
-    dispatch_added_event_only, dispatch_added_to_stage_event_only, DisplayObjectContainer,
-    TDisplayObjectContainer,
+    DisplayObjectContainer, TDisplayObjectContainer, dispatch_added_event_only,
+    dispatch_added_to_stage_event_only,
 };
 pub use avm1_button::{Avm1Button, ButtonState, ButtonTracking};
 pub use avm2_button::Avm2Button;
@@ -64,7 +66,8 @@ use ruffle_render::blend::ExtendedBlendMode;
 use ruffle_render::commands::{CommandHandler, CommandList, RenderBlendMode};
 use ruffle_render::filters::Filter;
 pub use stage::{Stage, StageAlign, StageDisplayState, StageScaleMode, WindowMode};
-pub use text::Text;
+pub use text::{Text, TextSnapshot};
+pub use text_line::TextLine;
 pub use video::Video;
 
 use self::loader_display::LoaderDisplayWeak;
@@ -151,10 +154,11 @@ impl BitmapCache {
         self.source_width = source_width;
         self.source_height = source_height;
         self.draw_offset = draw_offset;
-        if let Some(current) = &mut self.bitmap {
-            if current.width == actual_width && current.height == actual_height {
-                return; // No need to resize it
-            }
+        if let Some(current) = &mut self.bitmap
+            && current.width == actual_width
+            && current.height == actual_height
+        {
+            return; // No need to resize it
         }
         let acceptable_size = if swf_version > 9 {
             let total = actual_width * actual_height;
@@ -162,15 +166,16 @@ impl BitmapCache {
         } else {
             actual_width < 2880 && actual_height < 2880
         };
+
         if renderer.is_offscreen_supported()
-            && actual_width > 0
-            && actual_height > 0
+            && let Some(actual_width) = NonZero::new(actual_width)
+            && let Some(actual_height) = NonZero::new(actual_height)
             && acceptable_size
         {
             let handle = renderer.create_empty_texture(actual_width, actual_height);
             self.bitmap = handle.ok().map(|handle| BitmapInfo {
-                width: actual_width,
-                height: actual_height,
+                width: actual_width.get(),
+                height: actual_height.get(),
                 handle,
             });
         } else {
@@ -839,9 +844,9 @@ impl<'gc> DisplayObjectBase<'gc> {
     fn recheck_cache_as_bitmap(&self) {
         let mut write = self.cell.borrow_mut();
         let should_cache = self.is_bitmap_cached_preference() || !write.filters.is_empty();
-        if should_cache && write.cache.is_none() {
-            write.cache = Some(Default::default());
-        } else if !should_cache && write.cache.is_some() {
+        if should_cache {
+            write.cache.get_or_insert_default();
+        } else {
             write.cache = None;
         }
     }
@@ -901,6 +906,22 @@ impl<'gc> DisplayObjectBase<'gc> {
     pub fn set_has_matrix3d_stub(&self, value: bool) {
         self.set_flag(DisplayObjectFlags::HAS_MATRIX3D_STUB, value)
     }
+}
+
+/// Indicates which kind of bounds should be returned by `self_bounds`.
+/// In most cases `BoundsMode::Engine` should be used.
+#[derive(Copy, Clone, Debug)]
+pub enum BoundsMode {
+    /// The bounds visible on the stage (e.g. takes MorphShape ratio into
+    /// account). Used for hit testing and rendering.
+    Engine,
+
+    /// The bounds returned by ActionScript (e.g. doesn't take MorphShape
+    /// ratio into account - always uses ratio 0 AKA start shape).
+    /// This is used in AVM1 in MovieClip::getBounds(), getRect(), _width, _height, hitTest (object)
+    /// Used in AVM2 in DO::getBounds(), getRect(), width, height, hitTestObject()
+    /// Used in both AVM1 and AVM2 for Transform.pixelBounds.
+    Script,
 }
 
 struct DrawCacheInfo {
@@ -1107,11 +1128,14 @@ pub fn render_base<'gc>(
         // If there's nothing to draw, throw away the blend entirely.
         if !sub_commands.is_empty() {
             let render_blend_mode = if let ExtendedBlendMode::Shader = blend_mode {
-                // Note - Flash appears to let you set `dobj.blendMode = BlendMode.SHADER` without
-                // having `dobj.blendShader` result, but the resulting rendered displayobject
-                // seems to be corrupted. For now, let's panic, and see if any swfs actually
-                // rely on this behavior.
-                RenderBlendMode::Shader(this.blend_shader().expect("Missing blend shader"))
+                // Note - Flash appears to let you set blend mode to shader
+                // without having blend shader set.  In this case, Flash seems
+                // to fall back to a normal blend.
+                if let Some(shader) = this.blend_shader() {
+                    RenderBlendMode::Shader(shader)
+                } else {
+                    RenderBlendMode::Builtin(swf::BlendMode::Normal)
+                }
             } else {
                 RenderBlendMode::Builtin(blend_mode.try_into().unwrap())
             };
@@ -1250,6 +1274,7 @@ pub fn apply_standard_mask_and_scroll<'gc, F>(
         Avm1Button(Avm1Button<'gc>),
         Avm2Button(Avm2Button<'gc>),
         EditText(EditText<'gc>),
+        TextLine(TextLine<'gc>),
         Graphic(Graphic<'gc>),
         MorphShape(MorphShape<'gc>),
         MovieClip(MovieClip<'gc>),
@@ -1270,9 +1295,14 @@ pub trait TDisplayObject<'gc>:
 
     /// The `SCALE_ROTATION_CACHED` flag should only be set in SWFv5+.
     /// So scaling/rotation values always have to get recalculated from the matrix in SWFv4.
+    /// SWF version 0 means non-SWF content (a loaded image); since loading images requires
+    /// `loadMovie` (SWFv5+) or `MovieClipLoader` (SWFv6+), this can't occur in a SWFv4 context.
+    /// Therefore, loaded images are supposed to work the way SWF >= 5 movies do in this regard,
+    /// but the SWF version of the MovieClips created for loaded images can't inherit their
+    /// version from the loading movie - they have to be reported as -1 to ActionScript.
     #[no_dynamic]
     fn set_scale_rotation_cached(self) {
-        if self.swf_version() >= 5 {
+        if self.swf_version() == 0 || self.swf_version() >= 5 {
             self.base().set_scale_rotation_cached(true);
         }
     }
@@ -1293,32 +1323,37 @@ pub trait TDisplayObject<'gc>:
     /// These bounds do **not** include child DisplayObjects.
     /// To get the bounds including children, use `bounds`, `local_bounds`, or `world_bounds`.
     ///
+    /// The `mode` parameter indicates which kind of bounds to return:
+    /// - `BoundsMode::Engine`: Actual visual bounds (for hit testing, rendering)
+    /// - `BoundsMode::Script`: Bounds as reported by ActionScript (some objects like MorphShape
+    ///   always return the start shape's bounds)
+    ///
     /// Implementors must override this method.
     /// Leaf DisplayObjects should return their bounds.
-    /// Composite DisplayObjects that only contain children should return `&Default::default()`
-    fn self_bounds(self) -> Rectangle<Twips>;
+    /// Composite DisplayObjects that only contain children should return `Default::default()`
+    fn self_bounds(self, mode: BoundsMode) -> Rectangle<Twips>;
 
     /// The untransformed bounding box of this object including children.
     #[no_dynamic]
-    fn bounds(self) -> Rectangle<Twips> {
-        self.bounds_with_transform(&Matrix::default())
+    fn bounds(self, mode: BoundsMode) -> Rectangle<Twips> {
+        self.bounds_with_transform(&Matrix::default(), mode)
     }
 
     /// The local bounding box of this object including children, in its parent's coordinate system.
     #[no_dynamic]
-    fn local_bounds(self) -> Rectangle<Twips> {
-        self.bounds_with_transform(&self.base().matrix())
+    fn local_bounds(self, mode: BoundsMode) -> Rectangle<Twips> {
+        self.bounds_with_transform(&self.base().matrix(), mode)
     }
 
     /// The world bounding box of this object including children, relative to the stage.
     #[no_dynamic]
-    fn world_bounds(self) -> Rectangle<Twips> {
-        self.bounds_with_transform(&self.local_to_global_matrix())
+    fn world_bounds(self, mode: BoundsMode) -> Rectangle<Twips> {
+        self.bounds_with_transform(&self.local_to_global_matrix(), mode)
     }
 
     /// The world bounding box of this object, as reported by `Transform.pixelBounds`.
-    fn pixel_bounds(self) -> Rectangle<Twips> {
-        self.world_bounds()
+    fn pixel_bounds(self, mode: BoundsMode) -> Rectangle<Twips> {
+        self.world_bounds(mode)
     }
 
     /// Bounds used for drawing debug rects and picking objects.
@@ -1330,14 +1365,17 @@ pub trait TDisplayObject<'gc>:
             .as_interactive()
             .map(|int| int.highlight_bounds())
             .unwrap_or_default();
-        self.world_bounds().union(&highlight_bounds)
+        self.world_bounds(BoundsMode::Engine)
+            .union(&highlight_bounds)
     }
 
     /// Gets the bounds of this object and all children, transformed by a given matrix.
     /// This function recurses down and transforms the AABB each child before adding
     /// it to the bounding box. This gives a tighter AABB then if we simply transformed
     /// the overall AABB.
-    fn bounds_with_transform(self, matrix: &Matrix) -> Rectangle<Twips> {
+    ///
+    /// The `mode` parameter indicates which kind of bounds to return.
+    fn bounds_with_transform(self, matrix: &Matrix, mode: BoundsMode) -> Rectangle<Twips> {
         // A scroll rect completely overrides an object's bounds,
         // and can even grow the bounding box to be larger than the actual content
         if let Some(scroll_rect) = self.scroll_rect() {
@@ -1350,12 +1388,12 @@ pub trait TDisplayObject<'gc>:
                 };
         }
 
-        let mut bounds = *matrix * self.self_bounds();
+        let mut bounds = *matrix * self.self_bounds(mode);
 
         if let Some(ctr) = self.as_container() {
             for child in ctr.iter_render_list() {
                 let matrix = *matrix * child.base().matrix();
-                bounds = bounds.union(&child.bounds_with_transform(&matrix));
+                bounds = bounds.union(&child.bounds_with_transform(&matrix, mode));
             }
         }
 
@@ -1366,13 +1404,15 @@ pub trait TDisplayObject<'gc>:
     /// This differs from the bounds that are exposed to Flash, in two main ways:
     /// - It may be larger if filters are applied which will increase the size of what's shown
     /// - It does not respect scroll rects
+    ///
+    /// Uses `BoundsMode::Engine` as this is for rendering purposes.
     fn render_bounds_with_transform(
         self,
         matrix: &Matrix,
         include_own_filters: bool,
         view_matrix: &Matrix,
     ) -> Rectangle<Twips> {
-        let mut bounds = *matrix * self.self_bounds();
+        let mut bounds = *matrix * self.self_bounds(BoundsMode::Engine);
 
         if let Some(ctr) = self.as_container() {
             for child in ctr.iter_render_list() {
@@ -1423,12 +1463,11 @@ pub trait TDisplayObject<'gc>:
         if self
             .base()
             .set_perspective_projection(perspective_projection)
+            && let Some(parent) = self.parent()
         {
-            if let Some(parent) = self.parent() {
-                // Self-transform changes are automatically handled,
-                // we only want to inform ancestors to avoid unnecessary invalidations for tx/ty
-                parent.invalidate_cached_bitmap();
-            }
+            // Self-transform changes are automatically handled,
+            // we only want to inform ancestors to avoid unnecessary invalidations for tx/ty
+            parent.invalidate_cached_bitmap();
         }
     }
 
@@ -1518,12 +1557,12 @@ pub trait TDisplayObject<'gc>:
     /// Set by the `_x`/`x` ActionScript properties.
     /// This invalidates any ancestors cacheAsBitmap automatically.
     fn set_x(self, x: Twips) {
-        if self.base().set_x(x) {
-            if let Some(parent) = self.parent() {
-                // Self-transform changes are automatically handled,
-                // we only want to inform ancestors to avoid unnecessary invalidations for tx/ty
-                parent.invalidate_cached_bitmap();
-            }
+        if self.base().set_x(x)
+            && let Some(parent) = self.parent()
+        {
+            // Self-transform changes are automatically handled,
+            // we only want to inform ancestors to avoid unnecessary invalidations for tx/ty
+            parent.invalidate_cached_bitmap();
         }
     }
 
@@ -1537,12 +1576,12 @@ pub trait TDisplayObject<'gc>:
     /// Set by the `_y`/`y` ActionScript properties.
     /// This invalidates any ancestors cacheAsBitmap automatically.
     fn set_y(self, y: Twips) {
-        if self.base().set_y(y) {
-            if let Some(parent) = self.parent() {
-                // Self-transform changes are automatically handled,
-                // we only want to inform ancestors to avoid unnecessary invalidations for tx/ty
-                parent.invalidate_cached_bitmap();
-            }
+        if self.base().set_y(y)
+            && let Some(parent) = self.parent()
+        {
+            // Self-transform changes are automatically handled,
+            // we only want to inform ancestors to avoid unnecessary invalidations for tx/ty
+            parent.invalidate_cached_bitmap();
         }
     }
 
@@ -1621,7 +1660,7 @@ pub trait TDisplayObject<'gc>:
     /// Gets the pixel width of the AABB containing this display object in local space.
     /// Returned by the ActionScript `_width`/`width` properties.
     fn width(self) -> f64 {
-        self.local_bounds().width().to_pixels()
+        self.local_bounds(BoundsMode::Script).width().to_pixels()
     }
 
     /// Sets the pixel width of this display object in local space.
@@ -1629,7 +1668,7 @@ pub trait TDisplayObject<'gc>:
     /// Set by the ActionScript `_width`/`width` properties.
     /// This does odd things on rotated clips to match the behavior of Flash.
     fn set_width(self, _context: &mut UpdateContext<'gc>, value: f64) {
-        let object_bounds = self.bounds();
+        let object_bounds = self.bounds(BoundsMode::Script);
         let object_width = object_bounds.width().to_pixels();
         let object_height = object_bounds.height().to_pixels();
         let aspect_ratio = object_height / object_width;
@@ -1669,14 +1708,14 @@ pub trait TDisplayObject<'gc>:
     /// Gets the pixel height of the AABB containing this display object in local space.
     /// Returned by the ActionScript `_height`/`height` properties.
     fn height(self) -> f64 {
-        self.local_bounds().height().to_pixels()
+        self.local_bounds(BoundsMode::Script).height().to_pixels()
     }
 
     /// Sets the pixel height of this display object in local space.
     /// Set by the ActionScript `_height`/`height` properties.
     /// This does odd things on rotated clips to match the behavior of Flash.
     fn set_height(self, _context: &mut UpdateContext<'gc>, value: f64) {
-        let object_bounds = self.bounds();
+        let object_bounds = self.bounds(BoundsMode::Script);
         let object_width = object_bounds.width().to_pixels();
         let object_height = object_bounds.height().to_pixels();
         let aspect_ratio = object_width / object_height;
@@ -1741,11 +1780,11 @@ pub trait TDisplayObject<'gc>:
     /// This invalidates any cacheAsBitmap automatically.
     #[no_dynamic]
     fn set_alpha(self, value: f64) {
-        if self.base().set_alpha(value) {
-            if let Some(parent) = self.parent() {
-                // Self-transform changes are automatically handled
-                parent.invalidate_cached_bitmap();
-            }
+        if self.base().set_alpha(value)
+            && let Some(parent) = self.parent()
+        {
+            // Self-transform changes are automatically handled
+            parent.invalidate_cached_bitmap();
         }
     }
 
@@ -2015,18 +2054,16 @@ pub trait TDisplayObject<'gc>:
     /// Returned by the `_visible`/`visible` ActionScript properties.
     #[no_dynamic]
     fn set_visible(self, context: &mut UpdateContext<'gc>, value: bool) {
-        if self.base().set_visible(value) {
-            if let Some(parent) = self.parent() {
-                // We don't need to invalidate ourselves, we're just toggling if the bitmap is rendered.
-                parent.invalidate_cached_bitmap();
-            }
+        if self.base().set_visible(value)
+            && let Some(parent) = self.parent()
+        {
+            // We don't need to invalidate ourselves, we're just toggling if the bitmap is rendered.
+            parent.invalidate_cached_bitmap();
         }
 
-        if !value {
-            if let Some(int) = self.as_interactive() {
-                // The focus is dropped when it's made invisible.
-                int.drop_focus(context);
-            }
+        if !value && let Some(int) = self.as_interactive() {
+            // The focus is dropped when it's made invisible.
+            int.drop_focus(context);
         }
     }
 
@@ -2051,14 +2088,14 @@ pub trait TDisplayObject<'gc>:
     /// Values other than the default `BlendMode::Normal` implicitly cause cache-as-bitmap behavior.
     #[no_dynamic]
     fn set_blend_mode(self, value: ExtendedBlendMode) {
-        if self.base().set_blend_mode(value) {
-            if let Some(parent) = self.parent() {
-                // We don't need to invalidate ourselves, we're just toggling how the bitmap is rendered.
+        if self.base().set_blend_mode(value)
+            && let Some(parent) = self.parent()
+        {
+            // We don't need to invalidate ourselves, we're just toggling how the bitmap is rendered.
 
-                // Note that Flash does not always invalidate on changing the blend mode;
-                // but that's a bug we don't need to copy :)
-                parent.invalidate_cached_bitmap();
-            }
+            // Note that Flash does not always invalidate on changing the blend mode;
+            // but that's a bug we don't need to copy :)
+            parent.invalidate_cached_bitmap();
         }
     }
 
@@ -2332,33 +2369,31 @@ pub trait TDisplayObject<'gc>:
 
     #[no_dynamic]
     fn set_on_parent_field(self, context: &mut UpdateContext<'gc>) {
-        if self.has_explicit_name() {
-            if let Some(parent) = self.parent().and_then(|p| p.object2()) {
-                let parent = Avm2Value::from(parent);
+        if self.has_explicit_name()
+            && let Some(parent) = self.parent().and_then(|p| p.object2())
+        {
+            let parent = Avm2Value::from(parent);
 
-                if let Some(child) = self.object2() {
-                    if let Some(name) = self.name() {
-                        let domain = context
-                            .library
-                            .library_for_movie(self.movie())
-                            .unwrap()
-                            .avm2_domain();
+            if let Some(child) = self.object2()
+                && let Some(name) = self.name()
+            {
+                let domain = context
+                    .library
+                    .library_for_movie(self.movie())
+                    .unwrap()
+                    .avm2_domain();
 
-                        let mut activation = Avm2Activation::from_domain(context, domain);
-                        let multiname =
-                            Avm2Multiname::new(activation.avm2().find_public_namespace(), name);
-                        let set_result =
-                            parent.init_property(&multiname, child.into(), &mut activation);
+                let mut activation = Avm2Activation::from_domain(context, domain);
+                let multiname = Avm2Multiname::new(activation.avm2().find_public_namespace(), name);
+                let set_result = parent.init_property(&multiname, child.into(), &mut activation);
 
-                        if let Err(err) = set_result {
-                            Avm2::uncaught_error(
-                                &mut activation,
-                                Some(self),
-                                err,
-                                &format!("Error setting AVM2 child named \"{}\"", name),
-                            );
-                        }
-                    }
+                if let Err(err) = set_result {
+                    Avm2::uncaught_error(
+                        &mut activation,
+                        Some(self),
+                        err,
+                        &format!("Error setting AVM2 child named \"{}\"", name),
+                    );
                 }
             }
         }
@@ -2407,7 +2442,7 @@ pub trait TDisplayObject<'gc>:
             self_str = &self_str[..end_char];
         }
 
-        let bounds = self.world_bounds();
+        let bounds = self.world_bounds(BoundsMode::Engine);
 
         let mut classname = "".to_string();
         if let Some(o) = self.object2() {
@@ -2530,6 +2565,11 @@ pub trait TDisplayObject<'gc>:
             .unwrap_or(Avm1Value::Undefined)
     }
 
+    #[no_dynamic]
+    fn object1_or_null(self) -> Avm1Value<'gc> {
+        self.object1().map(|o| o.into()).unwrap_or(Avm1Value::Null)
+    }
+
     /// Equivalent to `self.object1_or_undef().coerce_to_object_or_bare()`, but avoids
     /// the need for an activation.
     ///
@@ -2553,14 +2593,16 @@ pub trait TDisplayObject<'gc>:
     /// Tests if a given stage position point intersects with the world bounds of this object.
     #[no_dynamic]
     fn hit_test_bounds(self, point: Point<Twips>) -> bool {
-        self.world_bounds().contains(point)
+        self.world_bounds(BoundsMode::Engine).contains(point)
     }
 
     /// Tests if a given object's world bounds intersects with the world bounds
     /// of this object.
     #[no_dynamic]
     fn hit_test_object(self, other: DisplayObject<'gc>) -> bool {
-        self.world_bounds().intersects(&other.world_bounds())
+        // This is only used in ActionScript so it gets a BoundsMode::Script.
+        self.world_bounds(BoundsMode::Script)
+            .intersects(&other.world_bounds(BoundsMode::Script))
     }
 
     /// Tests if a given stage position point intersects within this object, considering the art.
@@ -2677,11 +2719,11 @@ pub trait TDisplayObject<'gc>:
             if p.is_root() {
                 return parent;
             }
-            if let Some(p_parent) = p.parent() {
-                if !p_parent.movie().is_action_script_3() {
-                    // We've traversed upwards into a loader AVM1 movie, so return the current parent.
-                    return parent;
-                }
+            if let Some(p_parent) = p.parent()
+                && !p_parent.movie().is_action_script_3()
+            {
+                // We've traversed upwards into a loader AVM1 movie, so return the current parent.
+                return parent;
             }
             parent = p.parent();
         }
@@ -2857,6 +2899,7 @@ impl<'gc> DisplayObject<'gc> {
         pub fn as_avm2_button for Avm2Button;
         pub fn as_movie_clip for MovieClip;
         pub fn as_edit_text for EditText;
+        pub fn as_text_line for TextLine;
         pub fn as_text for Text;
         pub fn as_morph_shape for MorphShape;
         pub fn as_video for Video;
@@ -2868,6 +2911,7 @@ impl<'gc> DisplayObject<'gc> {
             Self::Avm1Button(dobj) => Some(InteractiveObject::Avm1Button(dobj)),
             Self::Avm2Button(dobj) => Some(InteractiveObject::Avm2Button(dobj)),
             Self::EditText(dobj) => Some(InteractiveObject::EditText(dobj)),
+            Self::TextLine(dobj) => Some(InteractiveObject::TextLine(dobj)),
             Self::LoaderDisplay(dobj) => Some(InteractiveObject::LoaderDisplay(dobj)),
             Self::MovieClip(dobj) => Some(InteractiveObject::MovieClip(dobj)),
             Self::Stage(dobj) => Some(InteractiveObject::Stage(dobj)),
@@ -3064,11 +3108,12 @@ impl SoundTransform {
         const MAX_VOLUME: i64 = SoundTransform::MAX_VOLUME as i64;
 
         // It seems like Flash masks the results below to 30-bit integers:
-        // * Negative values are equivalent to their absolute value (their sign bit is unset).
         // * Specifically, 0x40000000, -0x40000000 and -0x80000000 are equivalent to zero.
+        // Negative values are equivalent to their absolute value.
         const MASK: i32 = (1 << 30) - 1;
 
-        self.volume = (i64::from(self.volume) * i64::from(other.volume) / MAX_VOLUME) as i32 & MASK;
+        self.volume =
+            (i64::from(self.volume) * i64::from(other.volume) / MAX_VOLUME).abs() as i32 & MASK;
 
         // This is a 2x2 matrix multiply between the transforms.
         // Done with integer math to match Flash behavior.

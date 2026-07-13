@@ -1,7 +1,7 @@
 //! `flash.display.SimpleButton` builtin/prototype
 
 use crate::avm2::activation::Activation;
-use crate::avm2::error::{make_error_2136, Error};
+use crate::avm2::error::{Error, make_error_2136};
 use crate::avm2::globals::flash::display::display_object::initialize_for_allocator;
 use crate::avm2::object::{ClassObject, Object, StageObject};
 use crate::avm2::value::Value;
@@ -51,11 +51,7 @@ pub fn simple_button_allocator<'gc>(
                 .instantiate_by_id(symbol, activation.context.gc_context);
 
             if let Some(child) = child {
-                return Ok(initialize_for_allocator(
-                    activation.context,
-                    child,
-                    orig_class,
-                ));
+                return Ok(initialize_for_allocator(activation.context, child, orig_class).into());
             } else {
                 return Err(make_error_2136(activation));
             }

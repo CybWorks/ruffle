@@ -28,18 +28,16 @@ pub fn capture_and_compare_image(
     };
 
     let expected_image = {
-        let path = base_path.join(format!("{name}.expected.png"))?;
+        let filename = format!("{name}.expected.png");
+        let path = base_path.join(&filename)?;
         if path.exists()? {
             image::load_from_memory(&read_bytes(&path)?)
                 .context("Failed to open expected image")?
                 .into_rgba8()
-        } else if image_comparison.known_failure {
-            // If we're expecting this to be wrong, don't save a likely wrong image
-            return Err(anyhow!("Image '{name}': No image to compare to!"));
         } else {
-            write_image(&path, &actual_image)?;
             return Err(anyhow!(
-                "Image '{name}': No image to compare to! Saved actual image as expected."
+                "Image '{name}': No image to compare to! \
+                Please take an expected image from Flash Player and save it as {filename}."
             ));
         }
     };
@@ -199,7 +197,7 @@ impl ImageDiff {
     fn difference_color(&self) -> anyhow::Result<image::RgbImage> {
         let mut difference_color =
             Vec::with_capacity(self.width as usize * self.height as usize * 3);
-        for p in self.difference_data.chunks_exact(4) {
+        for p in self.difference_data.as_chunks::<4>().0 {
             difference_color.extend_from_slice(&p[..3]);
         }
 
@@ -211,7 +209,7 @@ impl ImageDiff {
         if self.is_alpha_different {
             let mut difference_alpha =
                 Vec::with_capacity(self.width as usize * self.height as usize);
-            for p in self.difference_data.chunks_exact(4) {
+            for p in self.difference_data.as_chunks::<4>().0 {
                 difference_alpha.push(p[3])
             }
 
@@ -231,8 +229,10 @@ fn calculate_difference_data(
 ) -> Vec<u8> {
     expected_image
         .as_raw()
-        .chunks_exact(4)
-        .zip(actual_image.as_raw().chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(actual_image.as_raw().as_chunks::<4>().0)
         .flat_map(|(cmp_chunk, data_chunk)| {
             if cmp_chunk[3] != data_chunk[3] {
                 *is_alpha_different = true;
@@ -250,7 +250,9 @@ fn calculate_difference_data(
 
 fn calculate_outliers(difference_data: &[u8], tolerance: u8) -> usize {
     difference_data
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|colors| {
             (colors[0] > tolerance) as usize
                 + (colors[1] > tolerance) as usize
@@ -262,7 +264,9 @@ fn calculate_outliers(difference_data: &[u8], tolerance: u8) -> usize {
 
 fn calculate_max_difference(difference_data: &[u8]) -> u8 {
     difference_data
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|colors| colors[0].max(colors[1]).max(colors[2]).max(colors[3]))
         .max()
         .unwrap()
@@ -283,6 +287,17 @@ where
 {
     let mut buffer = vec![];
     image.write_to(&mut Cursor::new(&mut buffer), ImageFormat::Png)?;
-    write_bytes(path, &buffer)?;
+    write_bytes(path, &optimize_png(&buffer)?)?;
     Ok(())
+}
+
+fn optimize_png(image: &[u8]) -> anyhow::Result<Vec<u8>> {
+    // Use oxipng to optimize the PNG.
+    let mut options = oxipng::Options::max_compression();
+
+    // Remove metadata that won't affect image display.
+    options.strip = oxipng::StripChunks::Safe;
+
+    oxipng::optimize_from_memory(image, &options)
+        .map_err(|e| anyhow::anyhow!("oxipng optimization failed: {}", e))
 }

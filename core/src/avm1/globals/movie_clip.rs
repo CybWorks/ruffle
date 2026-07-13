@@ -3,18 +3,18 @@
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::globals::matrix::gradient_object_to_matrix;
-use crate::avm1::globals::{self, bitmap_filter, AVM_DEPTH_BIAS, AVM_MAX_DEPTH};
+use crate::avm1::globals::{self, AVM_DEPTH_BIAS, AVM_MAX_DEPTH, bitmap_filter};
 use crate::avm1::object::NativeObject;
-use crate::avm1::property_decl::{DeclContext, StaticDeclarations, SystemClass};
+use crate::avm1::property_decl::{DeclContext, PropertyOrder, StaticDeclarations, SystemClass};
 use crate::avm1::{self, ArrayBuilder, Object, Value};
 use crate::backend::navigator::NavigationMethod;
 use crate::context::UpdateContext;
-use crate::display_object::{Bitmap, EditText, MovieClip, TInteractiveObject};
+use crate::display_object::{Bitmap, BoundsMode, EditText, MovieClip, TInteractiveObject};
 use crate::ecma_conversions::f64_to_wrapping_i32;
 use crate::prelude::*;
 use crate::string::AvmString;
 use crate::vminterface::Instantiator;
-use crate::{avm1_stub, avm_error, avm_warn};
+use crate::{avm_error, avm_warn, avm1_stub};
 use ruffle_macros::istr;
 use ruffle_render::shape_utils::{DrawCommand, GradientType};
 use swf::{
@@ -63,8 +63,8 @@ macro_rules! mc_setter {
 }
 
 const PROTO_DECLS: StaticDeclarations = declare_static_properties! {
-    "useHandCursor" => bool(true; DONT_ENUM);
-    "enabled" => bool(true; DONT_ENUM);
+    "useHandCursor" => value(true; DONT_ENUM);
+    "enabled" => value(true; DONT_ENUM);
     // NOTE: `tabIndex` is not enumerable in MovieClip, contrary to Button and TextField
     "tabIndex" => property(mc_getter!(tab_index), mc_setter!(set_tab_index); DONT_ENUM | VERSION_6);
     "_lockroot" => property(mc_getter!(lock_root), mc_setter!(set_lock_root); DONT_DELETE | DONT_ENUM);
@@ -117,6 +117,7 @@ const PROTO_DECLS: StaticDeclarations = declare_static_properties! {
     "lineGradientStyle" => method(mc_method!(line_gradient_style); DONT_ENUM | DONT_DELETE | VERSION_8);
     "beginBitmapFill" => method(mc_method!(begin_bitmap_fill); DONT_ENUM | DONT_DELETE | VERSION_8);
     "createTextField" => method(mc_method!(create_text_field); DONT_ENUM | DONT_DELETE);
+    "getTextSnapshot" => method(get_text_snapshot; DONT_ENUM | DONT_DELETE);
     // NOTE: `focusEnabled` is not a built-in property of MovieClip.
     // NOTE: `tabEnabled` is not a built-in property of MovieClip.
     // NOTE: `tabChildren` is not a built-in property of MovieClip.
@@ -126,7 +127,7 @@ pub fn create_class<'gc>(
     context: &mut DeclContext<'_, 'gc>,
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
-    let class = context.empty_class(super_proto);
+    let class = context.empty_class(super_proto, PropertyOrder::PrototypeLast);
     context.define_properties_on(class.proto, PROTO_DECLS(context));
     class
 }
@@ -265,41 +266,35 @@ fn attach_bitmap<'gc>(
     activation: &mut Activation<'_, 'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let [Value::Object(bitmap_data), ..] = args {
-        if let NativeObject::BitmapData(bitmap_data) = bitmap_data.native() {
-            if let Some(depth) = args.get(1) {
-                let depth = depth
-                    .coerce_to_i32(activation)?
-                    .wrapping_add(AVM_DEPTH_BIAS);
+    if let [Value::Object(bitmap_data), ..] = args
+        && let NativeObject::BitmapData(bitmap_data) = bitmap_data.native()
+        && let Some(depth) = args.get(1)
+    {
+        let depth = depth
+            .coerce_to_i32(activation)?
+            .wrapping_add(AVM_DEPTH_BIAS);
 
-                // TODO: Implement pixel snapping
-                let _pixel_snapping = args
-                    .get(2)
-                    .unwrap_or(&Value::Undefined)
-                    .as_bool(activation.swf_version());
+        // TODO: Implement pixel snapping
+        let _pixel_snapping = args
+            .get(2)
+            .unwrap_or(&Value::Undefined)
+            .as_bool(activation.swf_version());
 
-                let smoothing = args
-                    .get(3)
-                    .unwrap_or(&Value::Undefined)
-                    .as_bool(activation.swf_version());
+        let smoothing = args
+            .get(3)
+            .unwrap_or(&Value::Undefined)
+            .as_bool(activation.swf_version());
 
-                //TODO: do attached BitmapDatas have character ids?
-                let display_object = Bitmap::new_with_bitmap_data(
-                    activation.gc(),
-                    0,
-                    bitmap_data,
-                    smoothing,
-                    &movie_clip.movie(),
-                );
-                movie_clip.replace_at_depth(activation.context, display_object.into(), depth);
-                display_object.post_instantiation(
-                    activation.context,
-                    None,
-                    Instantiator::Avm1,
-                    true,
-                );
-            }
-        }
+        //TODO: do attached BitmapDatas have character ids?
+        let display_object = Bitmap::new_with_bitmap_data(
+            activation.gc(),
+            0,
+            bitmap_data,
+            smoothing,
+            &movie_clip.movie(),
+        );
+        movie_clip.replace_at_depth(activation.context, display_object.into(), depth);
+        display_object.post_instantiation(activation.context, None, Instantiator::Avm1, true);
     }
 
     Ok(Value::Undefined)
@@ -846,6 +841,8 @@ fn create_empty_movie_clip<'gc>(
     movie_clip.replace_at_depth(activation.context, new_clip.into(), depth);
     new_clip.post_instantiation(activation.context, None, Instantiator::Avm1, true);
 
+    new_clip.call_on_construct_handler(activation.context);
+
     Ok(new_clip.object1_or_undef())
 }
 
@@ -973,6 +970,7 @@ pub fn clone_sprite<'gc>(
     }
 
     let movie = parent.movie();
+    #[allow(clippy::question_mark)]
     let cloned_sprite = if sprite.id() != 0 {
         // Clip from SWF; instantiate a new copy.
         let library = context.library.library_for_movie(movie).unwrap();
@@ -1010,7 +1008,8 @@ pub fn clone_sprite<'gc>(
     if let (Some(cloned_sprite), Some(sprite)) =
         (cloned_sprite.as_movie_clip(), sprite.as_movie_clip())
     {
-        cloned_sprite.init_clip_event_handlers(sprite.clip_actions().into());
+        cloned_sprite
+            .init_clip_event_handlers(sprite.clip_event_flags(), sprite.clip_actions().into());
 
         if let Some(drawing) = sprite.drawing().as_deref().cloned() {
             *cloned_sprite.drawing_mut() = drawing;
@@ -1053,50 +1052,42 @@ fn get_instance_at_depth<'gc>(
     activation: &mut Activation<'_, 'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if activation.swf_version() >= 7 {
-        let depth = if let Some(depth) = args.get(0) {
-            depth
-                .coerce_to_i32(activation)?
-                .wrapping_add(AVM_DEPTH_BIAS)
-        } else {
-            avm_error!(
-                activation,
-                "MovieClip.get_instance_at_depth: Too few parameters"
-            );
-            return Ok(Value::Undefined);
-        };
-        match movie_clip.child_by_depth(depth) {
-            Some(child) => {
-                // If the child doesn't have a corresponding AVM object, return mc itself.
-                // NOTE: this behavior was guessed from observing behavior for Text and Graphic;
-                // I didn't test other variants like Bitmap, MorphSpahe, Video
-                // or objects that weren't fully initialized yet.
-                match child.object1() {
-                    None => Ok(movie_clip.object1_or_undef()),
-                    Some(obj) => Ok(obj.into()),
-                }
-            }
-            None => Ok(Value::Undefined),
-        }
+    let depth = if let Some(depth) = args.get(0) {
+        depth
+            .coerce_to_i32(activation)?
+            .wrapping_add(AVM_DEPTH_BIAS)
     } else {
-        Ok(Value::Undefined)
+        avm_error!(
+            activation,
+            "MovieClip.get_instance_at_depth: Too few parameters"
+        );
+        return Ok(Value::Undefined);
+    };
+    match movie_clip.child_by_depth(depth) {
+        Some(child) => {
+            // If the child doesn't have a corresponding AVM object, return mc itself.
+            // NOTE: this behavior was guessed from observing behavior for Text and Graphic;
+            // I didn't test other variants like Bitmap, MorphSpahe, Video
+            // or objects that weren't fully initialized yet.
+            match child.object1() {
+                None => Ok(movie_clip.object1_or_undef()),
+                Some(obj) => Ok(obj.into()),
+            }
+        }
+        None => Ok(Value::Undefined),
     }
 }
 
 fn get_next_highest_depth<'gc>(
     movie_clip: MovieClip<'gc>,
-    activation: &mut Activation<'_, 'gc>,
+    _activation: &mut Activation<'_, 'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if activation.swf_version() >= 7 {
-        let depth = movie_clip
-            .highest_depth()
-            .wrapping_sub(AVM_DEPTH_BIAS - 1)
-            .max(0);
-        Ok(depth.into())
-    } else {
-        Ok(Value::Undefined)
-    }
+    let depth = movie_clip
+        .highest_depth()
+        .wrapping_sub(AVM_DEPTH_BIAS - 1)
+        .max(0);
+    Ok(depth.into())
 }
 
 fn goto_and_play<'gc>(
@@ -1142,17 +1133,14 @@ pub fn goto_frame<'gc>(
             let frame_path = val.coerce_to_string(activation)?;
             if let Some((clip, frame)) =
                 activation.resolve_variable_path(movie_clip.into(), &frame_path)?
+                && let Some(clip) = clip.as_display_object().and_then(|o| o.as_movie_clip())
             {
-                if let Some(clip) = clip.as_display_object().and_then(|o| o.as_movie_clip()) {
-                    if let Ok(frame) = frame.parse().map(f64_to_wrapping_i32) {
-                        // First try to parse as a frame number.
-                        call_frame = Some((clip, frame));
-                    } else if let Some(frame) =
-                        clip.frame_label_to_number(frame, activation.context)
-                    {
-                        // Otherwise, it's a frame label.
-                        call_frame = Some((clip, frame as i32));
-                    }
+                if let Ok(frame) = frame.parse().map(f64_to_wrapping_i32) {
+                    // First try to parse as a frame number.
+                    call_frame = Some((clip, frame));
+                } else if let Some(frame) = clip.frame_label_to_number(frame, activation.context) {
+                    // Otherwise, it's a frame label.
+                    call_frame = Some((clip, frame as i32));
                 }
             }
         }
@@ -1423,8 +1411,8 @@ fn local_to_global<'gc>(
         ) {
             let local = Point::from_pixels(x, y);
             let global = movie_clip.local_to_global(local);
-            point.set(istr!("x"), global.x.to_pixels().into(), activation)?;
-            point.set(istr!("y"), global.y.to_pixels().into(), activation)?;
+            point.set(istr!("x"), global.x.to_pixels(), activation)?;
+            point.set(istr!("y"), global.y.to_pixels(), activation)?;
         } else {
             avm_warn!(
                 activation,
@@ -1466,7 +1454,7 @@ fn get_bounds<'gc>(
             }
         }
 
-        let bounds = movie_clip.bounds();
+        let bounds = movie_clip.bounds(BoundsMode::Script);
         let out_bounds = if DisplayObject::ptr_eq(movie_clip.into(), target) {
             // Getting the clips bounds in its own coordinate space; no AABB transform needed.
             bounds
@@ -1500,26 +1488,10 @@ fn get_bounds<'gc>(
             &activation.context.strings,
             Some(activation.prototypes().object),
         );
-        out.set(
-            istr!("xMin"),
-            out_bounds.x_min.to_pixels().into(),
-            activation,
-        )?;
-        out.set(
-            istr!("xMax"),
-            out_bounds.x_max.to_pixels().into(),
-            activation,
-        )?;
-        out.set(
-            istr!("yMin"),
-            out_bounds.y_min.to_pixels().into(),
-            activation,
-        )?;
-        out.set(
-            istr!("yMax"),
-            out_bounds.y_max.to_pixels().into(),
-            activation,
-        )?;
+        out.set(istr!("xMin"), out_bounds.x_min.to_pixels(), activation)?;
+        out.set(istr!("xMax"), out_bounds.x_max.to_pixels(), activation)?;
+        out.set(istr!("yMin"), out_bounds.y_min.to_pixels(), activation)?;
+        out.set(istr!("yMax"), out_bounds.y_max.to_pixels(), activation)?;
         Ok(out.into())
     } else {
         Ok(Value::Undefined)
@@ -1577,7 +1549,7 @@ pub fn get_url<'gc>(
         };
         let vars_method = method.map(|m| (m, activation.locals_into_form_values()));
 
-        activation.context.navigator.navigate_to_url(
+        activation.context.navigator.navigate_to_url_normalized(
             &url.to_utf8_lossy(),
             &window.to_utf8_lossy(),
             vars_method,
@@ -1605,8 +1577,8 @@ fn global_to_local<'gc>(
         ) {
             let global = Point::from_pixels(x, y);
             let local = movie_clip.global_to_local(global).unwrap_or(global);
-            point.set(istr!("x"), local.x.to_pixels().into(), activation)?;
-            point.set(istr!("y"), local.y.to_pixels().into(), activation)?;
+            point.set(istr!("x"), local.x.to_pixels(), activation)?;
+            point.set(istr!("y"), local.y.to_pixels(), activation)?;
         } else {
             avm_warn!(
                 activation,
@@ -1639,7 +1611,10 @@ fn load_movie<'gc>(
         DisplayObject::MovieClip(target),
         request,
         None,
-        crate::loader::MovieLoaderVMData::Avm1 { broadcaster: None },
+        crate::loader::MovieLoaderVMData::Avm1 {
+            broadcaster: None,
+            base_clip: activation.base_clip(),
+        },
     );
     activation.context.navigator.spawn_future(future);
 
@@ -1687,24 +1662,23 @@ fn set_transform<'gc>(
     activation: &mut Activation<'_, 'gc>,
     value: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
-    if let Value::Object(object) = value {
-        if let NativeObject::Transform(transform) = object.native() {
-            if let Some(clip) = transform.clip(activation) {
-                let matrix = clip.base().matrix();
-                this.set_matrix(matrix);
+    if let Value::Object(object) = value
+        && let NativeObject::Transform(transform) = object.native()
+        && let Some(clip) = transform.clip(activation)
+    {
+        let matrix = clip.base().matrix();
+        this.set_matrix(matrix);
 
-                let color_transform = clip.base().color_transform();
-                this.set_color_transform(color_transform);
+        let color_transform = clip.base().color_transform();
+        this.set_color_transform(color_transform);
 
-                if let Some(parent) = this.parent() {
-                    // Self-transform changes are automatically handled,
-                    // we only want to inform ancestors to avoid unnecessary invalidations for tx/ty
-                    parent.invalidate_cached_bitmap();
-                }
-
-                this.set_transformed_by_script(true);
-            }
+        if let Some(parent) = this.parent() {
+            // Self-transform changes are automatically handled,
+            // we only want to inform ancestors to avoid unnecessary invalidations for tx/ty
+            parent.invalidate_cached_bitmap();
         }
+
+        this.set_transformed_by_script(true);
     }
 
     Ok(())
@@ -1852,4 +1826,14 @@ fn set_tab_index<'gc>(
     };
     this.set_tab_index(value);
     Ok(())
+}
+
+fn get_text_snapshot<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Object<'gc>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let text_snapshot_class: Value<'gc> = activation.resolve(istr!("TextSnapshot"))?.into();
+    let text_snapshot_class = text_snapshot_class.coerce_to_object_or_bare(activation)?;
+    text_snapshot_class.construct(activation, &[this.into()])
 }

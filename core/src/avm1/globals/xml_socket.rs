@@ -1,4 +1,4 @@
-use crate::avm1::property_decl::{DeclContext, StaticDeclarations, SystemClass};
+use crate::avm1::property_decl::{DeclContext, PropertyOrder, StaticDeclarations, SystemClass};
 use crate::avm1::{Activation, Error, ExecutionReason, NativeObject, Object, Value};
 use crate::context::UpdateContext;
 use crate::display_object::TDisplayObject;
@@ -45,10 +45,10 @@ impl<'gc> XmlSocket<'gc> {
     }
 
     pub fn cast(value: Value<'gc>) -> Option<Self> {
-        if let Value::Object(object) = value {
-            if let NativeObject::XmlSocket(xml_socket) = object.native() {
-                return Some(xml_socket);
-            }
+        if let Value::Object(object) = value
+            && let NativeObject::XmlSocket(xml_socket) = object.native()
+        {
+            return Some(xml_socket);
         }
         None
     }
@@ -69,7 +69,7 @@ pub fn create_class<'gc>(
     context: &mut DeclContext<'_, 'gc>,
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
-    let class = context.class(constructor, super_proto);
+    let class = context.class(constructor, super_proto, PropertyOrder::PrototypeLast);
     context.define_properties_on(class.proto, PROTO_DECLS(context));
     class
 }
@@ -108,10 +108,10 @@ pub fn close<'gc>(
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(xml_socket) = XmlSocket::cast(this.into()) {
-        if let Some(handle) = xml_socket.handle() {
-            activation.context.sockets.close(handle)
-        }
+    if let Some(xml_socket) = XmlSocket::cast(this.into())
+        && let Some(handle) = xml_socket.handle()
+    {
+        activation.context.sockets.close(handle)
     }
 
     Ok(Value::Undefined)
@@ -123,26 +123,28 @@ pub fn connect<'gc>(
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if XmlSocket::cast(this.into()).is_some() {
-        let host = args
-            .get(0)
-            .copied()
-            .unwrap_or_else(|| {
-                let movie = activation.base_clip().movie();
+        let host = args.get(0).copied().unwrap_or(Value::Null);
+        let host = if matches!(host, Value::Null | Value::Undefined) {
+            let movie = activation.base_clip().movie();
 
-                if let Ok(url) = url::Url::parse(movie.url()) {
-                    if url.scheme() == "file" {
-                        istr!("localhost").into()
-                    } else if let Some(domain) = url.domain() {
-                        AvmString::new_utf8(activation.gc(), domain).into()
-                    } else {
-                        // no domain?
-                        istr!("localhost").into()
-                    }
+            if let Ok(url) = url::Url::parse(movie.url()) {
+                if url.scheme() == "file" {
+                    istr!("localhost").into()
+                } else if let Some(domain) = url.domain() {
+                    AvmString::new_utf8(activation.gc(), domain).into()
                 } else {
-                    Value::Undefined
+                    // no domain?
+                    istr!("localhost").into()
                 }
-            })
-            .coerce_to_string(activation)?;
+            } else {
+                tracing::error!("XMLSocket::connect: Unable to parse movie URL");
+                // should we just bail here instead?
+                Value::Undefined
+            }
+        } else {
+            host
+        };
+        let host = host.coerce_to_string(activation)?;
         let port = args
             .get(1)
             .unwrap_or(&Value::Undefined)
@@ -167,20 +169,20 @@ pub fn send<'gc>(
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(xml_socket) = XmlSocket::cast(this.into()) {
-        if let Some(handle) = xml_socket.handle() {
-            let mut data = args
-                .get(0)
-                .unwrap_or(&Value::Undefined)
-                .coerce_to_string(activation)?
-                .to_string()
-                .into_bytes();
+    if let Some(xml_socket) = XmlSocket::cast(this.into())
+        && let Some(handle) = xml_socket.handle()
+    {
+        let mut data = args
+            .get(0)
+            .unwrap_or(&Value::Undefined)
+            .coerce_to_string(activation)?
+            .to_string()
+            .into_bytes();
 
-            // The string needs to end with a null byte.
-            data.push(0);
+        // The string needs to end with a null byte.
+        data.push(0);
 
-            activation.context.sockets.send(handle, data);
-        }
+        activation.context.sockets.send(handle, data);
     }
 
     Ok(Value::Undefined)

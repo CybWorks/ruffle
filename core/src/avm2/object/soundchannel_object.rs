@@ -1,9 +1,9 @@
 //! Object representation for sounds
 
+use crate::avm2::Error;
 use crate::avm2::activation::Activation;
 use crate::avm2::object::script_object::ScriptObjectData;
 use crate::avm2::object::{ClassObject, Object, TObject};
-use crate::avm2::Error;
 use crate::backend::audio::SoundInstanceHandle;
 use crate::context::UpdateContext;
 use crate::display_object::SoundTransform;
@@ -97,10 +97,10 @@ impl<'gc> SoundChannelObject<'gc> {
         // The position is cached on read. This means that if the position isn't read until after
         // the sound has played, the position will be 0 (#9952).
         let sound_channel_data = self.0.sound_channel_data.borrow();
-        if let SoundChannelData::Loaded { sound_instance } = &*sound_channel_data {
-            if let Some(pos) = context.audio.get_sound_position(*sound_instance) {
-                self.0.position.set(pos);
-            }
+        if let SoundChannelData::Loaded { sound_instance } = &*sound_channel_data
+            && let Some(pos) = context.audio.get_sound_position(*sound_instance)
+        {
+            self.0.position.set(pos);
         }
 
         self.0.position.get()

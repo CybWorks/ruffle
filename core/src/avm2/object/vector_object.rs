@@ -1,16 +1,16 @@
 //! Vector storage object
 
+use crate::avm2::Multiname;
 use crate::avm2::activation::Activation;
-use crate::avm2::error::{make_error_1125, make_reference_error, Error, ReferenceErrorCode};
+use crate::avm2::error::{Error, ReferenceErrorCode, make_error_1125, make_reference_error};
 use crate::avm2::object::script_object::ScriptObjectData;
 use crate::avm2::object::{ClassObject, Object, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::vector::VectorStorage;
-use crate::avm2::Multiname;
 use crate::string::WStr;
 use core::fmt;
 use gc_arena::barrier::unlock;
-use gc_arena::{lock::RefLock, Collect, Gc, GcWeak, Mutation};
+use gc_arena::{Collect, Gc, GcWeak, Mutation, lock::RefLock};
 use ruffle_common::utils::HasPrefixField;
 use std::cell::{Ref, RefMut};
 
@@ -183,17 +183,16 @@ impl<'gc> TObject<'gc> for VectorObject<'gc> {
         name: &Multiname<'gc>,
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
-        if name.valid_dynamic_name() {
-            if let Some(local_name) = name.local_name() {
-                if let Some(index) = VectorObject::as_vector_index(&local_name) {
-                    let u32_index = index as u32;
+        if name.valid_dynamic_name()
+            && let Some(local_name) = name.local_name()
+            && let Some(index) = VectorObject::as_vector_index(&local_name)
+        {
+            let u32_index = index as u32;
 
-                    if u32_index as f64 == index {
-                        return self.0.vector.borrow().get(u32_index as usize, activation);
-                    } else if let Some(error) = self.fail_read_error(activation, name, index) {
-                        return Err(error);
-                    }
-                }
+            if u32_index as f64 == index {
+                return self.0.vector.borrow().get(u32_index as usize, activation);
+            } else if let Some(error) = self.fail_read_error(activation, name, index) {
+                return Err(error);
             }
         }
 
@@ -239,46 +238,16 @@ impl<'gc> TObject<'gc> for VectorObject<'gc> {
         value: Value<'gc>,
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<(), Error<'gc>> {
-        if name.valid_dynamic_name() {
-            if let Some(local_name) = name.local_name() {
-                if let Some(index) = VectorObject::as_vector_index(&local_name) {
-                    let u32_index = index as u32;
+        if name.valid_dynamic_name()
+            && let Some(local_name) = name.local_name()
+            && let Some(index) = VectorObject::as_vector_index(&local_name)
+        {
+            let u32_index = index as u32;
 
-                    if u32_index as f64 == index {
-                        return self.set_element(activation, u32_index as usize, value);
-                    } else {
-                        return Err(self.fail_write_error(activation, name, index));
-                    }
-                }
-            }
-        }
-
-        // No properties can be set on Vector classes
-        Err(make_reference_error(
-            activation,
-            ReferenceErrorCode::InvalidWrite,
-            name,
-            self.instance_class(),
-        ))
-    }
-
-    fn init_property_local(
-        self,
-        name: &Multiname<'gc>,
-        value: Value<'gc>,
-        activation: &mut Activation<'_, 'gc>,
-    ) -> Result<(), Error<'gc>> {
-        if name.valid_dynamic_name() {
-            if let Some(local_name) = name.local_name() {
-                if let Some(index) = VectorObject::as_vector_index(&local_name) {
-                    let u32_index = index as u32;
-
-                    if u32_index as f64 == index {
-                        return self.set_element(activation, u32_index as usize, value);
-                    } else {
-                        return Err(self.fail_write_error(activation, name, index));
-                    }
-                }
+            if u32_index as f64 == index {
+                return self.set_element(activation, u32_index as usize, value);
+            } else {
+                return Err(self.fail_write_error(activation, name, index));
             }
         }
 
@@ -302,20 +271,19 @@ impl<'gc> TObject<'gc> for VectorObject<'gc> {
     }
 
     fn has_own_property(self, name: &Multiname<'gc>) -> bool {
-        if name.valid_dynamic_name() {
-            if let Some(name) = name.local_name() {
-                if let Some(index) = VectorObject::as_vector_index(&name) {
-                    let u32_index = index as u32;
+        if name.valid_dynamic_name()
+            && let Some(name) = name.local_name()
+            && let Some(index) = VectorObject::as_vector_index(&name)
+        {
+            let u32_index = index as u32;
 
-                    if u32_index as f64 == index {
-                        return self.0.vector.borrow().is_in_range(u32_index as usize);
-                    } else {
-                        // FIXME SWFv10 has different behavior; implementing it
-                        // will require having access to an `activation` so that
-                        // we can check `activation.caller_movie_or_root()`
-                        return false;
-                    }
-                }
+            if u32_index as f64 == index {
+                return self.0.vector.borrow().is_in_range(u32_index as usize);
+            } else {
+                // FIXME SWFv10 has different behavior; implementing it
+                // will require having access to an `activation` so that
+                // we can check `activation.caller_movie_or_root()`
+                return false;
             }
         }
 

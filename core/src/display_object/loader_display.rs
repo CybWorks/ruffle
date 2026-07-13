@@ -1,11 +1,11 @@
 use crate::avm1::Object as Avm1Object;
 use crate::avm2::Activation;
 use crate::avm2::StageObject as Avm2StageObject;
+use crate::backend::ui::MouseCursor;
 use crate::context::RenderContext;
 use crate::context::UpdateContext;
-use crate::display_object::InteractiveObject;
 use crate::display_object::TInteractiveObject;
-use crate::display_object::{DisplayObjectBase, DisplayObjectPtr};
+use crate::display_object::{BoundsMode, DisplayObjectBase, DisplayObjectPtr};
 use crate::events::{ClipEvent, ClipEventResult};
 use crate::prelude::*;
 
@@ -84,7 +84,7 @@ impl<'gc> TDisplayObject<'gc> for LoaderDisplay<'gc> {
         self.render_children(context);
     }
 
-    fn self_bounds(self) -> Rectangle<Twips> {
+    fn self_bounds(self, _mode: BoundsMode) -> Rectangle<Twips> {
         Default::default()
     }
 
@@ -168,73 +168,44 @@ impl<'gc> TInteractiveObject<'gc> for LoaderDisplay<'gc> {
         ClipEventResult::NotHandled
     }
 
-    fn mouse_pick_avm1(
-        self,
-        context: &mut UpdateContext<'gc>,
-        point: Point<Twips>,
-        require_button_mode: bool,
-    ) -> Option<InteractiveObject<'gc>> {
-        // Don't do anything if run in an AVM2 context.
-        if self.as_displayobject().movie().is_action_script_3() {
-            return None;
-        }
-
-        for child in self.iter_render_list().rev() {
-            if let Some(int) = child.as_interactive() {
-                if int.as_displayobject().movie().is_action_script_3() {
-                    let avm2_result = int.mouse_pick_avm2(context, point, require_button_mode);
-                    if let Avm2MousePick::Hit(result) = avm2_result {
-                        return Some(result);
-                    }
-                } else if let Some(result) =
-                    int.mouse_pick_avm1(context, point, require_button_mode)
-                {
-                    return Some(result);
-                }
-            }
-        }
-
-        None
-    }
-
     fn mouse_pick_avm2(
         self,
         context: &mut UpdateContext<'gc>,
         point: Point<Twips>,
         require_button_mode: bool,
     ) -> Avm2MousePick<'gc> {
-        // Don't do anything if run in an AVM1 context.
-        if !self.as_displayobject().movie().is_action_script_3() {
-            return Avm2MousePick::Miss;
-        }
-
         let mut options = HitTestOptions::SKIP_INVISIBLE;
         options.set(HitTestOptions::SKIP_MASK, self.maskee().is_none());
 
-        // We have at most one child
-        if let Some(child) = self.iter_render_list().next() {
-            if let Some(int) = child.as_interactive() {
-                if int.as_displayobject().movie().is_action_script_3() {
-                    return int
-                        .mouse_pick_avm2(context, point, require_button_mode)
-                        .combine_with_parent(self.into());
-                } else {
-                    let avm1_result = int.mouse_pick_avm1(context, point, require_button_mode);
-                    if let Some(result) = avm1_result {
-                        return Avm2MousePick::Hit(result);
-                    } else {
-                        return Avm2MousePick::Miss;
+        if self.visible() {
+            // A loader has at most one child.
+            if let Some(child) = self.iter_render_list().next() {
+                if let Some(int) = child.as_interactive() {
+                    if int.as_displayobject().movie().is_action_script_3() {
+                        return int
+                            .mouse_pick_avm2(context, point, require_button_mode)
+                            .combine_with_parent(self.into());
+                    } else if let Some(result) =
+                        int.mouse_pick_avm1(context, point, require_button_mode)
+                    {
+                        return Avm2MousePick::Hit(result).combine_with_parent(self.into());
                     }
                 }
-            } else if child.hit_test_shape(context, point, options) {
-                if self.mouse_enabled() {
-                    return Avm2MousePick::Hit(self.into());
-                } else {
-                    return Avm2MousePick::PropagateToParent;
+
+                if child.hit_test_shape(context, point, options) {
+                    if self.mouse_enabled() {
+                        return Avm2MousePick::Hit(self.into());
+                    } else {
+                        return Avm2MousePick::PropagateToParent;
+                    }
                 }
             }
         }
         Avm2MousePick::Miss
+    }
+
+    fn mouse_cursor(self, _context: &mut UpdateContext<'gc>) -> MouseCursor {
+        MouseCursor::Arrow
     }
 }
 

@@ -1,8 +1,8 @@
+use crate::avm2::Error;
 use crate::avm2::activation::Activation;
 use crate::avm2::globals::slots::flash_events_mouse_event as slots;
 use crate::avm2::object::{Object, TObject as _};
 use crate::avm2::value::Value;
-use crate::avm2::Error;
 use crate::display_object::TDisplayObject;
 use swf::Point;
 
@@ -40,8 +40,8 @@ pub fn update_after_event<'gc>(
 pub(super) fn local_to_stage_x<'gc>(
     activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
-    slot_x: u32,
-    slot_y: u32,
+    slot_x: usize,
+    slot_y: usize,
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(evt) = this.as_event() {
         let local_x = this.get_slot(slot_x).coerce_to_number(activation)?;
@@ -66,8 +66,8 @@ pub(super) fn local_to_stage_x<'gc>(
 pub(super) fn local_to_stage_y<'gc>(
     activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
-    slot_x: u32,
-    slot_y: u32,
+    slot_x: usize,
+    slot_y: usize,
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(evt) = this.as_event() {
         let local_x = this.get_slot(slot_x).coerce_to_number(activation)?;

@@ -1,11 +1,11 @@
 //! DisplayObject-specific AVM1 operations.
 
+use crate::avm_warn;
+use crate::avm1::Value;
 use crate::avm1::activation::Activation;
 use crate::avm1::clamp::Clamp;
 use crate::avm1::error::Error;
 use crate::avm1::property_map::PropertyMap;
-use crate::avm1::Value;
-use crate::avm_warn;
 use crate::display_object::{
     DisplayObject, MovieClip, TDisplayObject, TDisplayObjectContainer, TInteractiveObject,
 };
@@ -25,10 +25,8 @@ pub fn get_property<'gc>(
 
     // 1) Path properties such as `_root`, `_parent`, `_levelN` (obeys case sensitivity)
     let magic_property = name.starts_with(b'_');
-    if magic_property {
-        if let Some(object) = resolve_path_property(dobj, name, activation) {
-            return Some(object);
-        }
+    if magic_property && let Some(object) = resolve_path_property(dobj, name, activation) {
+        return Some(object);
     }
 
     // 2) Child display objects with the given instance name
@@ -46,15 +44,14 @@ pub fn get_property<'gc>(
     }
 
     // 3) Display object properties such as `_x`, `_y` (never case sensitive)
-    if magic_property {
-        if let Some(property) = activation
+    if magic_property
+        && let Some(property) = activation
             .context
             .avm1
             .display_properties()
             .get_by_name(name)
-        {
-            return Some(property.get(activation, dobj));
-        }
+    {
+        return Some(property.get(activation, dobj));
     }
 
     None
@@ -147,6 +144,10 @@ fn resolve_path_property<'gc>(
     name: AvmString<'gc>,
     activation: &mut Activation<'_, 'gc>,
 ) -> Option<Value<'gc>> {
+    if activation.swf_version() < 5 {
+        return None;
+    }
+
     let case_sensitive = activation.is_case_sensitive();
     if name.eq_with_case(b"_root", case_sensitive) {
         return Some(dobj.avm1_root().object1_or_undef());
@@ -157,12 +158,22 @@ fn resolve_path_property<'gc>(
                 .map(Value::Object)
                 .unwrap_or(Value::Undefined),
         );
-    } else if activation.swf_version() > 5 && name.eq_with_case(b"_global", case_sensitive) {
+    } else if activation.swf_version() >= 6 && name.eq_with_case(b"_global", case_sensitive) {
         // _global is available only in SWF6+
         return Some(activation.global_object().into());
     }
 
-    // Resolve level names `_levelN`.
+    if let Some(level) = parse_level(name.as_wstr(), activation) {
+        return Some(level);
+    }
+
+    None
+}
+
+/// Parse _levelN and _flashN level names.
+pub fn parse_level<'gc>(name: &WStr, activation: &mut Activation<'_, 'gc>) -> Option<Value<'gc>> {
+    let case_sensitive = activation.is_case_sensitive();
+
     if let Some(prefix) = name.slice(..6) {
         // `_flash` is a synonym of `_level`, a relic from the earliest Flash versions.
         if prefix.eq_with_case(b"_level", case_sensitive)
@@ -325,6 +336,11 @@ fn set_x<'gc>(
     val: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     if let Some(x) = property_coerce_to_number(activation, val)? {
+        let x = if x.is_infinite() {
+            f64::NEG_INFINITY
+        } else {
+            x
+        };
         this.set_x(Twips::from_pixels(x));
     }
     Ok(())
@@ -340,6 +356,11 @@ fn set_y<'gc>(
     val: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     if let Some(y) = property_coerce_to_number(activation, val)? {
+        let y = if y.is_infinite() {
+            f64::NEG_INFINITY
+        } else {
+            y
+        };
         this.set_y(Twips::from_pixels(y));
     }
     Ok(())
@@ -403,6 +424,7 @@ fn set_alpha<'gc>(
     val: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     if let Some(val) = property_coerce_to_number(activation, val)? {
+        let val = if val.is_infinite() { 0.0 } else { val };
         this.set_alpha(val / 100.0);
     }
     Ok(())
@@ -501,6 +523,10 @@ fn set_name<'gc>(
     this: DisplayObject<'gc>,
     val: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
+    let val = match val {
+        Value::Number(n) if n.is_nan() && activation.swf_version() >= 7 => 0.into(),
+        other => other,
+    };
     let name = val.coerce_to_string(activation)?;
     this.set_name(activation.gc(), name);
     Ok(())
@@ -539,6 +565,10 @@ fn set_high_quality<'gc>(
     _this: DisplayObject<'gc>,
     val: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
+    if matches!(val, Value::Null | Value::Undefined) {
+        return Ok(());
+    }
+
     use ruffle_render::quality::StageQuality;
     let val = val.coerce_to_f64(activation)?;
     if !val.is_nan() {
@@ -594,9 +624,13 @@ fn set_focus_rect<'gc>(
                 // undefined & null are ignored
                 return Ok(());
             }
-            Value::Object(_) => false,
-            _ => val.coerce_to_f64(activation)? != 0.0,
+            Value::Object(_) => 0.0,
+            _ => val.coerce_to_f64(activation)?,
         };
+        if val.is_nan() {
+            return Ok(());
+        }
+        let val = val != 0.0;
         activation.context.stage.set_stage_focus_rect(val);
     } else if let Some(obj) = this.as_interactive() {
         let val = match val {
@@ -620,9 +654,12 @@ fn set_sound_buf_time<'gc>(
     _this: DisplayObject<'gc>,
     val: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
+    if matches!(val, Value::Null | Value::Undefined) {
+        return Ok(());
+    }
+
     avm_warn!(activation, "_soundbuftime is currently ignored by Ruffle");
     let val = val.coerce_to_f64(activation)?;
-    // NaN/undefined/null are invalid values; do not set.
     if !val.is_nan() {
         activation
             .context
@@ -667,7 +704,7 @@ fn property_coerce_to_number<'gc>(
 ) -> Result<Option<f64>, Error<'gc>> {
     if value != Value::Undefined && value != Value::Null {
         let n = value.coerce_to_f64(activation)?;
-        if n.is_finite() {
+        if !n.is_nan() {
             return Ok(Some(n));
         }
     }

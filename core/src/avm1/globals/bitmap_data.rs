@@ -3,9 +3,10 @@
 use super::matrix::object_to_matrix;
 use crate::avm1::globals::bitmap_filter;
 use crate::avm1::globals::color_transform::ColorTransformObject;
+use crate::avm1::globals::movie_clip::object_to_rectangle;
 use crate::avm1::object::NativeObject;
 use crate::avm1::parameters::{ParametersExt, UndefinedAs};
-use crate::avm1::property_decl::{DeclContext, StaticDeclarations, SystemClass};
+use crate::avm1::property_decl::{DeclContext, PropertyOrder, StaticDeclarations, SystemClass};
 use crate::avm1::{Activation, Attribute, Error, Object, Value};
 use crate::bitmap::bitmap_data::BitmapData;
 use crate::bitmap::bitmap_data::{BitmapDataDrawError, IBitmapDrawable};
@@ -14,54 +15,59 @@ use crate::bitmap::{is_size_valid, operations};
 use crate::character::Character;
 use crate::display_object::DisplayObject;
 use crate::swf::BlendMode;
-use crate::{avm1_stub, avm_error};
+use crate::{avm_error, avm1_stub};
 use ruffle_macros::istr;
 use ruffle_render::transform::Transform;
 
 const PROTO_DECLS: StaticDeclarations = declare_static_properties! {
-    "height" => property(height);
     "width" => property(width);
-    "transparent" => property(get_transparent);
+    "height" => property(height);
     "rectangle" => property(get_rectangle);
+    "transparent" => property(get_transparent);
     "getPixel" => method(get_pixel);
-    "getPixel32" => method(get_pixel32);
     "setPixel" => method(set_pixel);
-    "setPixel32" => method(set_pixel32);
-    "copyChannel" => method(copy_channel);
     "fillRect" => method(fill_rect);
-    "clone" => method(clone);
-    "dispose" => method(dispose);
-    "floodFill" => method(flood_fill);
-    "noise" => method(noise);
-    "colorTransform" => method(color_transform);
-    "getColorBoundsRect" => method(get_color_bounds_rect);
-    "perlinNoise" => method(perlin_noise);
-    "applyFilter" => method(apply_filter);
-    "draw" => method(draw);
-    "hitTest" => method(hit_test);
-    "generateFilterRect" => method(generate_filter_rect);
     "copyPixels" => method(copy_pixels);
-    "merge" => method(merge);
-    "paletteMap" => method(palette_map);
-    "pixelDissolve" => method(pixel_dissolve);
+    "applyFilter" => method(apply_filter);
     "scroll" => method(scroll);
     "threshold" => method(threshold);
+    "draw" => method(draw);
+    "pixelDissolve" => method(pixel_dissolve);
+    "getPixel32" => method(get_pixel32);
+    "setPixel32" => method(set_pixel32);
+    "floodFill" => method(flood_fill);
+    "getColorBoundsRect" => method(get_color_bounds_rect);
+    "perlinNoise" => method(perlin_noise);
+    "colorTransform" => method(color_transform);
+    "hitTest" => method(hit_test);
+    "paletteMap" => method(palette_map);
+    "merge" => method(merge);
+    "noise" => method(noise);
+    "copyChannel" => method(copy_channel);
+    "clone" => method(clone);
+    "dispose" => method(dispose);
+    "generateFilterRect" => method(generate_filter_rect);
     "compare" => method(compare);
 };
 
 const OBJECT_DECLS: StaticDeclarations = declare_static_properties! {
+    "RED_CHANNEL" => value(1);
+    "GREEN_CHANNEL" => value(2);
+    "BLUE_CHANNEL" => value(4);
+    "ALPHA_CHANNEL" => value(8);
     "loadBitmap" => method(load_bitmap);
-    "RED_CHANNEL" => int(1);
-    "GREEN_CHANNEL" => int(2);
-    "BLUE_CHANNEL" => int(4);
-    "ALPHA_CHANNEL" => int(8);
 };
 
 pub fn create_class<'gc>(
     context: &mut DeclContext<'_, 'gc>,
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
-    let class = context.native_class(constructor, None, super_proto);
+    let class = context.native_class(
+        constructor,
+        None,
+        super_proto,
+        PropertyOrder::PrototypeFirst,
+    );
     context.define_properties_on(class.proto, PROTO_DECLS(context));
     context.define_properties_on(class.constr, OBJECT_DECLS(context));
     class
@@ -530,9 +536,12 @@ fn draw<'gc>(
         }
     }
 
-    if args.get(4).is_some() {
-        avm1_stub!(activation, "BitmapData", "draw", "with clip rect");
-    }
+    let clip_rect = args
+        .get(4)
+        .and_then(|o| o.coerce_to_object_or_bare(activation).ok())
+        .and_then(|o| object_to_rectangle(activation, o).ok())
+        .unwrap_or_default();
+
     let smoothing = args
         .get(5)
         .unwrap_or(&false.into())
@@ -564,7 +573,7 @@ fn draw<'gc>(
         },
         smoothing,
         blend_mode,
-        None,
+        clip_rect,
         quality,
     ) {
         Ok(()) => {}
@@ -619,10 +628,10 @@ fn apply_filter<'gc>(
 
     let dest_x = dest_point
         .get(istr!("x"), activation)?
-        .coerce_to_f64(activation)? as u32;
+        .coerce_to_f64(activation)? as i32;
     let dest_y = dest_point
         .get(istr!("y"), activation)?
-        .coerce_to_f64(activation)? as u32;
+        .coerce_to_f64(activation)? as i32;
 
     let filter_object = args
         .get(3)

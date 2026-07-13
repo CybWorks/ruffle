@@ -1,17 +1,17 @@
 //! `flash.display.LoaderInfo` builtin/prototype
 
+use crate::avm2::Error;
 use crate::avm2::activation::Activation;
 use crate::avm2::bytearray::Endian;
 use crate::avm2::error::make_error_2099;
 use crate::avm2::object::{DomainObject, LoaderStream, ScriptObject, TObject as _};
 use crate::avm2::value::Value;
-use crate::avm2::Error;
 use crate::display_object::TDisplayObject;
 use crate::loader::ContentType;
 use crate::string::AvmString;
 use crate::{avm2_stub_getter, avm2_stub_method};
 use std::sync::Arc;
-use swf::{write_swf, Compression};
+use swf::{Compression, write_swf};
 use url::Url;
 
 /// `actionScriptVersion` getter
@@ -86,9 +86,11 @@ pub fn get_bytes_total<'gc>(
 
     if let Some(loader_stream) = this.as_loader_info_object().map(|o| o.loader_stream()) {
         match &*loader_stream {
-            LoaderStream::NotYetLoaded(swf, _, _) => return Ok(swf.compressed_len().into()),
+            LoaderStream::NotYetLoaded(swf, _, _) => {
+                return Ok(Value::from_usize_lossy(swf.compressed_len()));
+            }
             LoaderStream::Swf(movie, _) => {
-                return Ok(movie.compressed_len().into());
+                return Ok(Value::from_usize_lossy(movie.compressed_len()));
             }
         }
     }
@@ -109,13 +111,13 @@ pub fn get_bytes_loaded<'gc>(
     match &*loader_stream {
         LoaderStream::NotYetLoaded(swf, None, _) => {
             if loader_info.errored() {
-                return Ok(swf.compressed_len().into());
+                return Ok(Value::from_usize_lossy(swf.compressed_len()));
             }
             Ok(0.into())
         }
         LoaderStream::Swf(swf, root) | LoaderStream::NotYetLoaded(swf, Some(root), _) => {
             if root.as_bitmap().is_some() {
-                return Ok(swf.compressed_len().into());
+                return Ok(Value::from_usize_lossy(swf.compressed_len()));
             }
             Ok(root
                 .as_movie_clip()
@@ -160,6 +162,7 @@ pub fn get_content_type<'gc>(
         let content_type = match loader_info.content_type_hide_before_init() {
             ContentType::Swf => "application/x-shockwave-flash",
             ContentType::Jpeg => "image/jpeg",
+            ContentType::JpegXr => "image/jpegxr",
             ContentType::Png => "image/png",
             ContentType::Gif => "image/gif",
             ContentType::Unknown => return Ok(Value::Null),
@@ -265,15 +268,14 @@ pub fn get_child_allows_parent<'gc>(
             avm2_stub_getter!(activation, "flash.display.LoaderInfo", "childAllowsParent");
 
             if let Some(loader) = loader_info.loader() {
-                let loader = loader.as_display_object().expect("Loader is a DO");
+                let loader = loader.display_object();
                 let parent_movie = loader.movie();
 
-                if let Ok(child_url) = Url::parse(root.url()) {
-                    if let Ok(parent_url) = Url::parse(parent_movie.url()) {
-                        if child_url.host() == parent_url.host() {
-                            return Ok(true.into());
-                        }
-                    }
+                if let Ok(child_url) = Url::parse(root.url())
+                    && let Ok(parent_url) = Url::parse(parent_movie.url())
+                    && child_url.host() == parent_url.host()
+                {
+                    return Ok(true.into());
                 }
                 Ok(false.into())
             } else {
@@ -306,15 +308,14 @@ pub fn get_parent_allows_child<'gc>(
             avm2_stub_getter!(activation, "flash.display.LoaderInfo", "parentAllowsChild");
 
             if let Some(loader) = loader_info.loader() {
-                let loader = loader.as_display_object().expect("Loader is a DO");
+                let loader = loader.display_object();
                 let parent_movie = loader.movie();
 
-                if let Ok(child_url) = Url::parse(root.url()) {
-                    if let Ok(parent_url) = Url::parse(parent_movie.url()) {
-                        if child_url.host() == parent_url.host() {
-                            return Ok(true.into());
-                        }
-                    }
+                if let Ok(child_url) = Url::parse(root.url())
+                    && let Ok(parent_url) = Url::parse(parent_movie.url())
+                    && child_url.host() == parent_url.host()
+                {
+                    return Ok(true.into());
                 }
                 Ok(false.into())
             } else {

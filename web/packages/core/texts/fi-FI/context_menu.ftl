@@ -1,4 +1,5 @@
-context-menu-download-swf = Lataa .swf
+context-menu-download-swf = Lataa SWF
+context-menu-copy-debug-info = Kopioi vianjäljitystiedot
 context-menu-about-ruffle =
     { $flavor ->
         [extension] Tietoja – Ruffle-laajennus ({ $version })

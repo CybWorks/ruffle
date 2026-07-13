@@ -1,9 +1,9 @@
 //! `flash.media.SoundChannel` builtin/prototype
 
+use crate::avm2::Error;
 use crate::avm2::activation::Activation;
 use crate::avm2::parameters::ParametersExt;
 use crate::avm2::value::Value;
-use crate::avm2::Error;
 use crate::display_object::SoundTransform;
 
 pub use crate::avm2::object::sound_channel_allocator;
@@ -19,10 +19,9 @@ pub fn get_left_peak<'gc>(
     if let Some(instance) = this
         .as_sound_channel()
         .and_then(|channel| channel.instance())
+        && let Some(peak) = activation.context.audio.get_sound_peak(instance)
     {
-        if let Some(peak) = activation.context.audio.get_sound_peak(instance) {
-            return Ok(Value::Number(peak[0].into()));
-        }
+        return Ok(Value::Number(peak[0].into()));
     }
 
     Ok(Value::Undefined)
@@ -39,10 +38,9 @@ pub fn get_right_peak<'gc>(
     if let Some(instance) = this
         .as_sound_channel()
         .and_then(|channel| channel.instance())
+        && let Some(peak) = activation.context.audio.get_sound_peak(instance)
     {
-        if let Some(peak) = activation.context.audio.get_sound_peak(instance) {
-            return Ok(Value::Number(peak[1].into()));
-        }
+        return Ok(Value::Number(peak[1].into()));
     }
 
     Ok(Value::Undefined)

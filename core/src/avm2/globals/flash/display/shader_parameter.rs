@@ -1,9 +1,9 @@
+use crate::avm2::Error;
 use crate::avm2::activation::Activation;
 use crate::avm2::globals::slots::flash_display_shader_input as input_slots;
 use crate::avm2::globals::slots::flash_display_shader_parameter as parameter_slots;
 use crate::avm2::object::TObject;
 use crate::avm2::value::Value;
-use crate::avm2::Error;
 use crate::pixel_bender::PixelBenderTypeExt;
 use crate::string::AvmString;
 
@@ -32,7 +32,11 @@ pub fn make_shader_parameter<'gc>(
 
             let type_name = AvmString::new_utf8(activation.gc(), param_type.to_string());
 
-            param_object.set_slot(parameter_slots::_INDEX, index.into(), activation)?;
+            param_object.set_slot(
+                parameter_slots::_INDEX,
+                Value::from_usize_lossy(index),
+                activation,
+            )?;
             param_object.set_slot(parameter_slots::_TYPE, type_name.into(), activation)?;
             for meta in metadata {
                 let name = AvmString::new_utf8(activation.gc(), &meta.key);
@@ -63,7 +67,11 @@ pub fn make_shader_parameter<'gc>(
                 .unwrap();
 
             obj.set_slot(input_slots::_CHANNELS, (*channels).into(), activation)?;
-            obj.set_slot(input_slots::_INDEX, index.into(), activation)?;
+            obj.set_slot(
+                input_slots::_INDEX,
+                Value::from_usize_lossy(index),
+                activation,
+            )?;
             obj.set_dynamic_property(
                 istr!("name"),
                 AvmString::new_utf8(activation.gc(), name).into(),

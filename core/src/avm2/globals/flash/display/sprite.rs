@@ -1,7 +1,7 @@
 //! `flash.display.Sprite` builtin/prototype
 
 use crate::avm2::activation::Activation;
-use crate::avm2::error::{make_error_2136, Error};
+use crate::avm2::error::{Error, make_error_2136};
 use crate::avm2::globals::flash::display::display_object::initialize_for_allocator;
 use crate::avm2::globals::slots::{
     flash_display_sprite as sprite_slots, flash_geom_rectangle as rectangle_slots,
@@ -24,11 +24,9 @@ pub fn sprite_allocator<'gc>(
         if class == sprite_cls {
             let movie = activation.caller_movie_or_root();
             let display_object = MovieClip::new(movie, activation.gc()).into();
-            return Ok(initialize_for_allocator(
-                activation.context,
-                display_object,
-                orig_class,
-            ));
+            return Ok(
+                initialize_for_allocator(activation.context, display_object, orig_class).into(),
+            );
         }
 
         if let Some((movie, symbol)) = activation
@@ -44,11 +42,7 @@ pub fn sprite_allocator<'gc>(
                 .instantiate_by_id(symbol, activation.context.gc_context);
 
             if let Some(child) = child {
-                return Ok(initialize_for_allocator(
-                    activation.context,
-                    child,
-                    orig_class,
-                ));
+                return Ok(initialize_for_allocator(activation.context, child, orig_class).into());
             } else {
                 return Err(make_error_2136(activation));
             }
@@ -200,21 +194,10 @@ pub fn start_drag<'gc>(
 
         let rectangle = args.try_get_object(1);
         let constraint = if let Some(rectangle) = rectangle {
-            let x = rectangle
-                .get_slot(rectangle_slots::X)
-                .coerce_to_number(activation)?;
-
-            let y = rectangle
-                .get_slot(rectangle_slots::Y)
-                .coerce_to_number(activation)?;
-
-            let width = rectangle
-                .get_slot(rectangle_slots::WIDTH)
-                .coerce_to_number(activation)?;
-
-            let height = rectangle
-                .get_slot(rectangle_slots::HEIGHT)
-                .coerce_to_number(activation)?;
+            let x = rectangle.get_slot(rectangle_slots::X).as_f64();
+            let y = rectangle.get_slot(rectangle_slots::Y).as_f64();
+            let width = rectangle.get_slot(rectangle_slots::WIDTH).as_f64();
+            let height = rectangle.get_slot(rectangle_slots::HEIGHT).as_f64();
 
             // Normalize the bounds.
             let mut x_min = Twips::from_pixels(x);
